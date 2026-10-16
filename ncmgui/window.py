@@ -247,6 +247,7 @@ class MainWindow(QMainWindow):
         cwd: str | None = None,
         intro: list[str] | None = None,
         tagger: Callable[[str], str | None] | None = None,
+        on_finish: Callable[["ConsolePanel", int], None] | None = None,
     ):
         """启动一个作业。
 
@@ -259,6 +260,10 @@ class MainWindow(QMainWindow):
             返回改写后的整行就按标记色显示，返回 None 表示跟它无关。
             下载页用它把 VIP 的进度行标出来，见
             :class:`~ncmgui.resolver.FeeTagger`。
+        :param on_finish: 作业结束后回调 ``(面板, 退出码)``。**在主线程里调**，
+            所以可以放心开新作业、动界面。下载页用它接一个「下完再抓歌词」的
+            后处理 —— 后处理需要往同一个面板里写输出，而面板是这里创建的，
+            调用方拿不到，只能这样传回去。
         :return: 启动成功返回 :class:`~ncmgui.runner.JobRunner`，否则返回 None
         """
         from .runner import JobRunner
@@ -290,6 +295,10 @@ class MainWindow(QMainWindow):
         runner.output.connect(lambda _line, p=panel: self._mark_activity(p))
         panel.jobFinished.connect(lambda code, p=panel: self._on_job_finished(p, code))
         panel.closeRequested.connect(lambda p=panel: self._close_panel(p))
+        if on_finish is not None:
+            # 接在 _on_job_finished 之后（连接顺序即调用顺序），标签页标题已经
+            # 改成「完成 / 失败」了，后处理再往上写输出不会把它盖回去
+            panel.jobFinished.connect(lambda code, p=panel: on_finish(p, code))
 
         runner.start()
         return runner

@@ -66,11 +66,16 @@ jobs:
         run: python scripts/fetch_ncmctl.py
 
       # 这几个自检都是纯函数，不联网、不需要 ncmctl 在场，正好用来卡住
-      # 「命令构建层被改坏了」这类问题
+      # 「命令构建层被改坏了」这类问题。歌词那一步还会验一遍 mutagen 的
+      # 标签往返 —— 那正是打包时最容易少收东西的地方。
       - name: 离线自检
         run: |
           python -m ncmgui.ncmctl
           python -m ncmgui.resolver
+          # 少了 mutagen，歌词那步会打印一句"跳过标签往返测试"然后通过 ——
+          # 一个静默跳过等于没测，所以这里先明确它必须在
+          python -c "import mutagen"
+          python -m ncmgui.lyrics
 
       - name: 打包
         env:

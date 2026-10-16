@@ -21,6 +21,18 @@ PyQt6>=6.5
 # 打包时会连同它自带的 conpty.dll / OpenConsole.exe 一起进 exe，用户无感。
 pywinpty>=2.0; sys_platform == "win32"
 
+# 写入音频标签（下载页「歌词 → 写入音频标签」）。
+#
+# ncmctl 只下音频、不写任何标签（连 artist/title 都没有），所以「把歌词内嵌进
+# 文件」这件事只能自己做。mutagen 认 flac / mp3 / m4a / ogg / opus 的标签格式，
+# 是纯 Python 的单文件库（一个 wheel 196 KB，没有二进制依赖），PyInstaller 能
+# 自动收全，spec 不用改。
+#
+# 只有「写入音频标签」这一种模式用得上：默认的「独立 .lrc 文件」自己拼字符串
+# 就行。缺了它程序照常跑，只是选到内嵌模式时会给出明确提示。
+# 许可 GPL-2.0-or-later，与本项目一致。
+mutagen>=1.47
+
 # 可选：二维码登录的兜底渲染。
 # ncmctl 会自己生成 qrcode.png，本程序优先直接显示它；
 # 只有在 PNG 没生成时，才用这个库把终端里打印的二维码内容渲染出来。

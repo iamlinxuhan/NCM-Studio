@@ -574,6 +574,17 @@ class Resolver:
             raise ResolveError(f"歌手 {artist_id} 没有取到任何作品")
         return ids
 
+    def lyric(self, song_id: int) -> dict:
+        """取一首歌的歌词，原样返回 ``Lyric`` 接口的响应。
+
+        响应里有三份：``lrc``（原文）、``tlyric``（中文翻译）、``romalrc``（罗马音），
+        整理它们的是 :mod:`ncmgui.lyrics` —— 这一层只负责把请求发出去。
+
+        放在这里而不是让调用方直接用 ``_curl``，是因为地址是 ``int64`` 而别的方法
+        有的是字符串（``PlaylistDetail.id``），这种细节不该散到外面去。
+        """
+        return self._curl("Lyric", {"id": int(song_id)})
+
     def song_details(self, ids: Sequence[int], batch: int = DETAIL_BATCH) -> list[Song]:
         """批量取歌曲详情，得到文件名推算所需的歌名、艺术家与付费类型。"""
         songs: list[Song] = []
@@ -863,6 +874,14 @@ def _selftest() -> int:
     argv = ncmctl.build_curl("GetUserInfo", "weapi", "{}", "/tmp/r.json", "15s")
     check("curl 带 --output", argv[argv.index("--output") + 1], "/tmp/r.json")
     check("curl 方法名在最后", argv[-1], "GetUserInfo")
+
+    # ---- 取歌词的入口：没有 ncmctl 时应当报明确的错，而不是抛个别的异常出去
+    try:
+        Resolver("").lyric(1)
+    except ResolveError:
+        pass
+    else:
+        failures.append("没有 ncmctl 时 Resolver.lyric 应当抛 ResolveError")
 
     if failures:
         print(f"解析器自检失败 {len(failures)} 项：")

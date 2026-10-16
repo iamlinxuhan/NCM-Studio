@@ -18,17 +18,19 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # 允许直接 `python main.py` 而不必先安装成包
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PyQt6.QtCore import Qt  # noqa: E402
-from PyQt6.QtGui import QGuiApplication  # noqa: E402
+from PyQt6.QtGui import QGuiApplication, QIcon  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, theme  # noqa: E402
 from ncmgui.config import Config  # noqa: E402
+from ncmgui.resources import ICON_PATH  # noqa: E402
 from ncmgui.window import MainWindow  # noqa: E402
 
 
@@ -71,6 +73,26 @@ def _self_test(window: MainWindow) -> int:
         panel.view.append_line("panel ok")
     except Exception as exc:  # pragma: no cover - 自检路径
         problems.append(f"控制台构造失败：{exc!r}")
+
+    # 歌词的「写入音频标签」模式靠 mutagen，而 mutagen 是懒加载的（那个功能点到了
+    # 才 import）。打包时少收一个子模块，模块清单上看不出来、构建也不报错，只有
+    # 用户选到那个模式才会发现 —— 所以这里真写一次再读回来，而不是 import 一下
+    # 就算完。歌词本身是纯文本处理，离线验得到，不需要联网。
+    try:
+        from ncmgui import lyrics
+
+        with tempfile.TemporaryDirectory(prefix="ncmgui-selftest-") as tmp:
+            flac = Path(tmp) / "自检.flac"
+            flac.write_bytes(lyrics.blank_flac())
+            lyrics.embed(flac, "[00:01.00]自检歌词\n")
+            if lyrics.read_embedded(flac) != "[00:01.00]自检歌词\n":
+                problems.append("歌词写进音频标签后读不回来（mutagen 可能没打全）")
+            if not lyrics.has_content("[00:01.00]自检歌词"):
+                problems.append("歌词内容判定异常：有歌词的被当成了没有歌词")
+            if lyrics.has_content("[00:00.00]暂无歌词"):
+                problems.append("歌词内容判定异常：占位串被当成了真歌词")
+    except Exception as exc:  # pragma: no cover - 自检路径
+        problems.append(f"歌词标签读写失败：{exc!r}")
 
     if problems:
         print("自检失败：")
@@ -137,7 +159,14 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationDisplayName(APP_NAME)
     app.setApplicationVersion(VERSION)
     app.setOrganizationName(APP_ID)
+    # 要和 .desktop 的文件名、以及里面的 StartupWMClass 三处一致，
+    # 否则任务栏会把窗口当成另一个程序，用不上图标
     app.setDesktopFileName(APP_ID)
+
+    # 窗口图标。源码运行时 resources.asset 指向的 ncmgui/assets/ 里没有东西
+    # （那是打包时由 spec 放进去的），QIcon 拿到空路径会构造一个空图标 ——
+    # 界面照常显示，只是用系统默认图标，不影响使用
+    app.setWindowIcon(QIcon(str(ICON_PATH)))
 
     theme.apply_theme(app)
 

@@ -102,6 +102,10 @@ def _defaults() -> dict[str, Any]:
             "strict": False,
             # 下载前先比对输出目录，已有的直接跳过（ncmctl 自身不会跳过）
             "skip_existing": True,
+            # 歌词：lrc（独立 .lrc 文件）/ embed（写进音频标签）/ none。
+            # 取值见 ncmgui.lyrics 的 MODE_*；写在这里是为了让它出现在配置文件里，
+            # 用户翻配置文件时能发现这一项。
+            "lyric": "lrc",
         },
         "ncm": {
             "output": str(default_ncm_dir()),

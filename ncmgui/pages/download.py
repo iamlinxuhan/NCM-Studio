@@ -1,19 +1,23 @@
 """下载页：歌曲 ID / 链接 → 本地音乐文件。
 
-除了把 ncmctl 的 download 子命令表单化，这一页还补了两件 ncmctl 自己不做的
-事（见 :mod:`ncmgui.resolver`）：
+除了把 ncmctl 的 download 子命令表单化，这一页还补了三件 ncmctl 自己不做的
+事（前两件见 :mod:`ncmgui.resolver`）：
 
 * **查重** —— ncmctl 遇到同名文件只会改写成 ``歌曲(1).flac`` 接着下，
   不会跳过。这里在下载前先把目标展开成歌曲清单，比对输出目录，把已有的剔掉。
 * **下载「我喜欢的音乐」** —— 一键把整个红心歌单搬回本地。
+* **歌词** —— ncmctl 只下音频，标签一个都不写（``--tag`` 是空实现），歌词自然
+  也没有。下完之后按设置补一轮，见 :mod:`ncmgui.lyrics`。
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from typing import Callable
+
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMessageBox
 
-from .. import ncmctl
+from .. import lyrics, ncmctl
 from ..config import default_music_dir
 from ..resolver import PLAYLIST_URL, FeeTagger, Plan, Resolver, Song
 from ..widgets.card import Card, accent_button, ghost_button
@@ -33,6 +37,41 @@ MODE_PREVIEW = "preview"
 MODE_DOWNLOAD = "download"
 MODE_LIKED = "liked"
 
+#: 抓歌词时的并发路数。每首要起一个 ncmctl 子进程，开太多只是让接口先限流我们；
+#: 这个环节本来就只有几秒到几十秒，不值得为它把并发拉满。
+LYRIC_PARALLEL = 4
+
+#: 歌词接口的超时。比解析用的 30s 短 —— 一首歌的歌词就一个请求，卡住就是卡住，
+#: 拖着不返回只会白占一个并发位。
+LYRIC_TIMEOUT = "20s"
+
+
+def _say(panel, text: str, progress: bool = False) -> None:
+    """往某个作业面板里写一行（或刷新一行）。
+
+    面板可能已经被用户关掉了 —— 歌词是下载结束后才接上去跑的一轮，用户完全
+    可能在这期间把标签页关掉。此时访问它的控件会抛 ``RuntimeError``，忽略即可。
+    """
+    try:
+        if progress:
+            panel.view.append_progress(text)
+        else:
+            panel.view.append_line(text, classify(text))
+    except RuntimeError:
+        pass
+
+
+class _LyricSignals(QObject):
+    """把歌词后处理线程里的输出送回界面。
+
+    :class:`~ncmgui.workers.BackgroundTask` 只有一个 ``progress(str)`` 通道，
+    而这里要区分「不断刷新的计数行」和「值得留一行的说明」，所以在页面内部另开
+    一个两通道的信号对象。信号是队列投递的，槽函数仍在主线程执行。
+    """
+
+    progress = pyqtSignal(str)
+    note = pyqtSignal(str)
+
 
 class DownloadPage(BasePage):
     PAGE_TITLE = "下载"
@@ -45,6 +84,10 @@ class DownloadPage(BasePage):
         self._task = None
         self._plan: Plan | None = None
         self._plan_mode = ""
+        #: 解析失败时退而求其次的动作（见 _start_task）
+        self._fallback: Callable[[], None] | None = None
+        #: 正在跑的歌词任务，仅用于避免重复启动
+        self._lyric_task = None
         super().__init__(window)
 
     # -------------------------------------------------------------------- 构建
@@ -106,6 +149,19 @@ class DownloadPage(BasePage):
             hint=(
                 "下载前先解析出每首歌的文件名并比对输出目录，已存在的直接跳过。"
                 "ncmctl 自身不会跳过，重名时会写成「歌曲(1).flac」再下一遍。"
+            ),
+        )
+        self.lyric = options.add_combo(
+            "歌词",
+            lyrics.MODES,
+            # 配置里是个认不出的值时 set_combo_data 会保持第 0 项，而第 0 项
+            # 就是默认的「独立 .lrc 文件」，正好是我们想要的兜底
+            self.cfg.get("download.lyric", lyrics.MODE_LRC),
+            hint=(
+                "ncmctl 只下音频，一个标签都不写，歌词更没有。「独立 .lrc 文件」"
+                "会在音频旁边放一个同名的 .lrc；「写入音频标签」直接写进音频文件"
+                "（会改写文件本身）；外文歌会自动把中文翻译逐行插在原文下面。"
+                "已经带歌词的会跳过，重复跑不会做无用功。"
             ),
         )
         self.parallel = options.add_spin(
@@ -205,11 +261,14 @@ class DownloadPage(BasePage):
     def _output_dir(self) -> str:
         return self.output.path()
 
-    def _start_task(self, work, busy_text: str, mode: str) -> None:
+    def _start_task(self, work, busy_text: str, mode: str, fallback=None) -> None:
         """在后台跑一次解析。
 
         :param work: 接收一个 :class:`Resolver`、返回结果的函数。**不得触碰界面。**
         :param mode: 见 ``MODE_*``，决定结果回来之后做什么
+        :param fallback: 解析失败时改跑的动作。只为「下载」准备 —— 解析不出来
+            只该影响查重和歌词，不该把整个下载拦下来，ncmctl 自己未必解析不了
+            那个目标。
         """
         if self._task is not None and self._task.is_running:
             self.toast("上一次解析还没结束，请稍候")
@@ -223,6 +282,7 @@ class DownloadPage(BasePage):
 
         self._task = task
         self._plan_mode = mode
+        self._fallback = fallback
         task.progress.connect(self._on_progress)
         task.done.connect(self._on_plan_ready)
         task.failed.connect(self._on_task_failed)
@@ -235,9 +295,22 @@ class DownloadPage(BasePage):
         self.report_label.setText(message)
 
     def _on_task_failed(self, message: str) -> None:
-        self._plan_mode = ""
+        mode, self._plan_mode = self._plan_mode, ""
+        fallback, self._fallback = self._fallback, None
         self._sync_buttons()
         self.report_label.setText("解析失败，未做任何下载。")
+
+        if mode == MODE_DOWNLOAD and fallback is not None:
+            # 走到这里说明是「关掉查重 + 要抓歌词」那一档：解析只是为了拿歌词和
+            # 文件名，没有它照样能下载。ncmctl 自己未必解析不了这个目标，所以
+            # 退回去直接下，只是这一轮没有歌词。
+            self.warn(
+                f"{message}\n\n将跳过查重与歌词，把目标直接交给 ncmctl 下载。",
+                "解析失败",
+            )
+            fallback()
+            return
+
         self.warn(message, "解析失败")
 
     def _on_plan_ready(self, plan: object) -> None:
@@ -256,7 +329,10 @@ class DownloadPage(BasePage):
         self._plan = plan
         self._show_plan(plan)
 
-        if mode in (MODE_DOWNLOAD, MODE_LIKED):
+        if mode == MODE_DOWNLOAD:
+            # 计划里存着产生它的原始目标，关掉查重时下载仍旧用它们（见 _execute_plan）
+            self._execute_plan(plan, list(plan.sources))
+        elif mode == MODE_LIKED:
             self._execute_plan(plan)
         elif plan.warnings:
             self.toast(f"有 {len(plan.warnings)} 个目标没能解析，展开明细可以看到")
@@ -313,22 +389,35 @@ class DownloadPage(BasePage):
 
         self.save_config()
 
-        # 关掉查重就直接把原始目标交给 ncmctl，行为与以前一致
-        if not self.skip_existing.isChecked():
+        checking = self.skip_existing.isChecked()
+        wants_lyric = combo_data(self.lyric, lyrics.MODE_LRC) != lyrics.MODE_NONE
+
+        # 既不查重也不要歌词：直接把原始目标交给 ncmctl，一个接口请求都不用发，
+        # 行为与以前完全一致
+        if not checking and not wants_lyric:
             self._submit_download(targets, self._title_for(targets))
             return
 
         # 「仅查重」刚跑过且条件没变，直接复用结果
         if self._plan_is_fresh(targets):
             self._show_plan(self._plan)
-            self._execute_plan(self._plan)
+            self._execute_plan(self._plan, targets)
             return
 
         output = self._output_dir()
+        if checking:
+            busy = "正在解析目标并对照输出目录查重…"
+            fallback = None
+        else:
+            # 这一趟解析纯粹是为了拿歌曲 ID 好去取歌词，不参与下载决策
+            busy = "正在解析目标（为了取歌词）…"
+            fallback = lambda: self._submit_download(targets, self._title_for(targets))
+
         self._start_task(
             lambda r: r.plan(targets, output),
-            "正在解析目标并对照输出目录查重…",
+            busy,
             MODE_DOWNLOAD,
+            fallback=fallback,
         )
 
     def _download_liked(self) -> None:
@@ -347,11 +436,20 @@ class DownloadPage(BasePage):
 
         self._start_task(work, "正在读取「我喜欢的音乐」…", MODE_LIKED)
 
-    def _execute_plan(self, plan: Plan) -> None:
+    def _execute_plan(self, plan: Plan, raw_targets: list[str] | None = None) -> None:
+        """按计划开跑。
+
+        :param raw_targets: 产生这份计划的原始目标（链接 / ID）。关掉查重时用它，
+            这样交给 ncmctl 的 argv 与「直接用 ncmctl」完全一致 —— 这一条是对外
+            承诺过的。拿不到原始目标时（「我喜欢的音乐」是先解析才知道歌单 ID 的）
+            退回按歌曲 ID 下载，也就是一直以来的行为。
+        """
         if self.skip_existing.isChecked():
             songs = plan.missing
+            targets = [str(song.id) for song in songs]
         else:
             songs = plan.songs
+            targets = list(raw_targets or []) or [str(song.id) for song in songs]
 
         label = f"「{plan.label}」" if plan.label else ""
         if not songs:
@@ -360,7 +458,7 @@ class DownloadPage(BasePage):
 
         title = f"下载{label} {len(songs)} 首" if label else f"下载 {len(songs)} 首"
         self._submit_download(
-            [str(song.id) for song in songs],
+            targets,
             title,
             intro=self._intro_for(plan, songs),
             songs=songs,
@@ -404,7 +502,9 @@ class DownloadPage(BasePage):
 
         :param songs: 这批目标对应的歌曲。给了它就能顺带装上付费标注 ——
             ncmctl 的进度行会被改写成 ``[VIP]歌手 - 歌名  [进度条]`` 并标黄，
-            让人一眼看出哪几首可能拉不到音质。跳过查重时拿不到，就不标。
+            让人一眼看出哪几首可能拉不到音质；同时也能在下载结束后接着抓歌词
+            （歌词要靠 ``song.base`` 才知道该写到哪个文件上）。跳过查重时拿不到，
+            就两样都不做。
         """
         argv = ncmctl.build_download(
             targets,
@@ -419,7 +519,78 @@ class DownloadPage(BasePage):
             argv,
             intro=intro,
             tagger=FeeTagger(songs) if songs else None,
+            on_finish=self._lyric_hook(songs),
         )
+
+    def _lyric_hook(self, songs: list[Song] | None):
+        """造一个「下载结束后抓歌词」的回调；不需要时返回 ``None``。"""
+        mode = combo_data(self.lyric, lyrics.MODE_LRC)
+        if not songs or mode == lyrics.MODE_NONE:
+            return None
+
+        pairs = [(song.base, song.id) for song in songs]
+        output = self._output_dir()
+
+        def hook(panel, code: int) -> None:
+            if code != 0:
+                _say(panel, f"下载没有正常结束（退出码 {code}），跳过歌词抓取")
+                return
+            self._start_lyrics(panel, pairs, output, mode)
+
+        return hook
+
+    def _start_lyrics(self, panel, pairs: list[tuple[str, int]], output: str, mode: str) -> None:
+        """下载结束后补一轮歌词。
+
+        跑在后台线程里：一首歌一个 ``ncmctl curl``，几百首的歌单就是一长串请求。
+        输出直接写在**下载作业那个面板**里，紧接在 ``── 进程结束 ──`` 之后 ——
+        这样「下了哪些、歌词跟上了没有」在同一处看得到，不用再去翻第二个标签页。
+        """
+        from ..workers import BackgroundTask
+
+        binary = self.window.binary
+        opts = self.opts()
+        signals = _LyricSignals(self)
+
+        _say(panel, "")
+        _say(panel, f"── 抓取歌词：{len(pairs)} 首 · {lyrics.mode_label(mode)} ──")
+        signals.progress.connect(lambda text, p=panel: _say(p, text, progress=True))
+        signals.note.connect(lambda text, p=panel: _say(p, text))
+
+        def work() -> lyrics.Report:
+            resolver = Resolver(binary, opts=opts, timeout=LYRIC_TIMEOUT)
+            return lyrics.collect(
+                pairs,
+                resolver.lyric,
+                output,
+                mode,
+                parallel=LYRIC_PARALLEL,
+                on_progress=lambda done, total, base: signals.progress.emit(
+                    f"歌词 {done}/{total} · {base}"
+                ),
+                on_note=signals.note.emit,
+            )
+
+        task = BackgroundTask(work, parent=self)
+        self._lyric_task = task
+        task.done.connect(lambda report, p=panel: self._on_lyrics_done(p, report))
+        task.failed.connect(lambda message, p=panel: self._on_lyrics_failed(p, message))
+        task.start()
+
+    def _on_lyrics_done(self, panel, report: object) -> None:
+        self._lyric_task = None
+        if not isinstance(report, lyrics.Report):
+            return
+        _say(panel, "")
+        _say(panel, f"── 歌词：{report.summary()} ──")
+        if report.failed or report.missing:
+            self.toast(f"歌词：{report.summary()}")
+
+    def _on_lyrics_failed(self, panel, message: str) -> None:
+        self._lyric_task = None
+        # 歌词是锦上添花：音频已经下好了，这一步失败不该让人以为下载出了问题
+        _say(panel, f"歌词抓取失败：{message}（音频文件不受影响）")
+        self.toast("歌词抓取失败，音频文件不受影响")
 
     @staticmethod
     def _title_for(targets: list[str]) -> str:
@@ -431,5 +602,6 @@ class DownloadPage(BasePage):
         self.cfg.set("download.level", combo_data(self.level, "lossless"))
         self.cfg.set("download.strict", self.strict.isChecked())
         self.cfg.set("download.skip_existing", self.skip_existing.isChecked())
+        self.cfg.set("download.lyric", combo_data(self.lyric, lyrics.MODE_LRC))
         self.cfg.set("download.parallel", self.parallel.value())
         self.cfg.set("download.output", self.output.path())

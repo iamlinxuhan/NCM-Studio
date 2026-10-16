@@ -75,13 +75,18 @@ class BasePage(QWidget):
         confirm: tuple[str, str] | None = None,
         intro: list[str] | None = None,
         tagger: Callable[[str], str | None] | None = None,
+        on_finish: Callable[[object, int], None] | None = None,
     ):
         """提交一个作业，返回 JobRunner 或 None。
 
         :param intro: 见 :meth:`MainWindow.submit` —— 进程开跑前先写进控制台的行
         :param tagger: 见 :meth:`MainWindow.submit` —— 给运行中的输出行加标记
+        :param on_finish: 见 :meth:`MainWindow.submit` —— 作业结束后的回调，
+            参数是 ``(控制台面板, 退出码)``
         """
-        return self.window.submit(title, argv, confirm, intro=intro, tagger=tagger)
+        return self.window.submit(
+            title, argv, confirm, intro=intro, tagger=tagger, on_finish=on_finish
+        )
 
     def is_logged_in(self) -> bool:
         return self.window.is_logged_in()

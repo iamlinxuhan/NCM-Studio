@@ -32,10 +32,13 @@ for _name in ("warning", "information", "critical", "question"):
 
     setattr(QMessageBox, _name, staticmethod(_stub))
 
+import mutagen
+
 from ncmgui import ncmctl, theme
 from ncmgui.config import Config
 from ncmgui.pages.download import DownloadPage
 from ncmgui.resolver import PLAYLIST_URL, Plan, Resolver, Song
+from ncmgui.widgets.form import set_combo_data
 from ncmgui.window import MainWindow
 
 app = QApplication([])
@@ -82,13 +85,17 @@ def positionals(argv: list[str]) -> list[str]:
 
 submitted: list[tuple[str, list[str], list[str]]] = []
 tagger_seen: list[object] = []
+hooks_seen: list[object] = []
 real_submit = window.submit
 
 
-def spy(title, argv, confirm=None, cwd=None, intro=None, tagger=None):
+def spy(title, argv, confirm=None, cwd=None, intro=None, tagger=None, on_finish=None):
     submitted.append((title, list(argv), list(intro or [])))
     tagger_seen.append(tagger)
-    return real_submit(title, argv, confirm, cwd, intro=intro, tagger=tagger)
+    hooks_seen.append(on_finish)
+    return real_submit(
+        title, argv, confirm, cwd, intro=intro, tagger=tagger, on_finish=on_finish
+    )
 
 
 window.submit = spy
@@ -223,6 +230,29 @@ if submitted:
     else:
         print("      （这 2 首都不付费，真机标记断言跳过）", flush=True)
 
+    # ---- 歌词：默认的「独立 .lrc 文件」 -------------------------------- #
+    # 歌词是下载结束之后才接上去的一轮，走的是 jobFinished → on_finish 这条路，
+    # 所以这里要等的是页面自己那个后台任务，而不是 ncmctl 那个作业面板。
+    print("      —— 歌词（独立 .lrc）——", flush=True)
+    check("作业装了歌词后处理", hooks_seen and hooks_seen[-1] is not None, hooks_seen[-1:])
+    ok = pump(lambda: "── 歌词：" in panel.view.toPlainText(), 240)
+    check("歌词这一轮跑完了", ok, panel.view.toPlainText()[-200:])
+    print("      " + next(
+        (ln for ln in panel.view.toPlainText().splitlines() if ln.startswith("── 歌词：")),
+        "(没有歌词汇总行)",
+    ), flush=True)
+
+    audio = sorted(f for f in out.iterdir() if f.suffix in (".mp3", ".flac") and f.stat().st_size > 0)
+    lrcs = sorted(out.glob("*.lrc"))
+    check("每首下好的歌都有同名 .lrc", {p.stem for p in lrcs} == {p.stem for p in audio},
+          [p.name for p in lrcs])
+    if lrcs:
+        body = lrcs[0].read_text("utf-8")
+        check(".lrc 里有时间戳", "[00:" in body, body[:80])
+        check(".lrc 不是占位串", "暂无歌词" not in body and "纯音乐，请欣赏" not in body,
+              body[:80])
+        print(f"      {lrcs[0].name} 前两行：{body.splitlines()[:2]}", flush=True)
+
 # ====================================================================== #
 print("[3] 关掉查重后，应当把原始目标直接交给 ncmctl", flush=True)
 submitted.clear()
@@ -236,6 +266,20 @@ if submitted:
     argv = submitted[0][1]
     assert argv[0] == "download", argv
     check("原始目标原样传递", positionals(argv) == ["1901371647", "2161154646"], argv)
+
+# 这一步是真下载，等它连同后面的歌词一起收尾 —— 它的输出目录和 [6] 是同一个，
+# 不等干净的话两边会抢同一批文件（老版本这里没等，因为那时没有后处理）
+loose_panel = window.console_tabs.widget(window.console_tabs.count() - 1)
+pump(lambda: not window._running_panels(), 400)
+pump(lambda: "── 歌词：" in loose_panel.view.toPlainText(), 240)
+loose_log = loose_panel.view.toPlainText()
+check("关掉查重时也会抓歌词（解析只为取 ID，下载目标没被换掉）",
+      "── 歌词：" in loose_log,
+      [ln for ln in loose_log.splitlines() if ln.startswith("── 歌词：")])
+loose_lrc = {p.stem for p in out.glob("*.lrc")}
+for song in page._plan.songs if page._plan else []:
+    # 这两首是按 ID 下的，歌词该按 ncmctl 实际落盘的文件名写出去
+    check(f"按 ID 下载的歌也配上了歌词：{song.display[:20]}", song.base in loose_lrc, sorted(loose_lrc))
 
 # ====================================================================== #
 print("[4] 「仅查重」不应当触发下载", flush=True)
@@ -271,6 +315,68 @@ for state, expect, forbid in (
 
 check("全免费时不开场白", DownloadPage._intro_for(
     Plan(songs=[free], missing=[free]), [free]) == [], True)
+
+# ====================================================================== #
+# 另外两种歌词模式直接在已经下好的文件上验，不重新下载
+print("[6] 歌词：另外两种模式", flush=True)
+panel = window.console_tabs.widget(window.console_tabs.count() - 1)
+pairs = [(song.base, song.id) for song in keep]
+# 只取 keep 那两首 —— [3] 那一步也往同一个目录里下过东西，别把它的文件算进来
+keep_bases = {song.base for song in keep}
+audio = sorted(
+    f
+    for f in out.iterdir()
+    if f.suffix in (".mp3", ".flac") and f.stat().st_size > 0 and f.stem in keep_bases
+)
+
+
+def runs() -> int:
+    return panel.view.toPlainText().count("── 歌词：")
+
+
+def embedded_lyric(path: Path) -> str:
+    """像播放器那样把歌词读回来。
+
+    刻意不走 :mod:`ncmgui.lyrics` —— 拿被测代码自己验自己，写错了也看不出来。
+    """
+    import mutagen.flac
+    import mutagen.mp3
+
+    if path.suffix == ".flac":
+        return (mutagen.flac.FLAC(path).get("lyrics") or [""])[0]
+    if path.suffix == ".mp3":
+        frames = (mutagen.mp3.MP3(path).tags or {}).getall("USLT")
+        return frames[0].text if frames else ""
+    return ""
+
+
+set_combo_data(page.lyric, "none")
+check("模式=不下载时压根不挂后处理", page._lyric_hook(keep) is None)
+
+# 「写入音频标签」：先清掉上一轮生成的 .lrc，确保下面看的确实是标签
+for stale in out.glob("*.lrc"):
+    stale.unlink()
+before = {p: (p.stat().st_size, mutagen.File(p).info.length) for p in audio}
+
+page._start_lyrics(panel, pairs, str(out), "embed")
+was = runs()
+ok = pump(lambda: runs() > was, 240)
+check("内嵌那一轮跑完了", ok, panel.view.toPlainText()[-200:])
+print("      " + next(
+    (ln for ln in panel.view.toPlainText().splitlines() if ln.startswith("── 歌词：") and runs() > was),
+    "(没有汇总行)",
+), flush=True)
+
+check("内嵌模式没有产生 .lrc", not list(out.glob("*.lrc")), [p.name for p in out.glob("*.lrc")])
+for path in audio:
+    got = embedded_lyric(path)
+    check(f"标签里读得到歌词：{path.name}", bool(got) and "[00:" in got, got[:60])
+    size, length = before[path]
+    check(f"音频数据本身没被动过：{path.name}",
+          mutagen.File(path).info.length == length, (length, mutagen.File(path).info.length))
+    if path.suffix == ".flac":
+        # 标签写在元数据块里，音频流不该因此重编码 —— 时长必须一模一样
+        check(f"flac 时长未变：{path.name}", mutagen.File(path).info.length > 0, length)
 
 print(flush=True)
 if fails:
