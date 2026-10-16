@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ncmgui import NCMCTL_VERSION  # noqa: E402
+from ncmgui import NCMCTL_VERSION, ensure_utf8_stdout  # noqa: E402
 
 #: 仓库根目录。
 ROOT = Path(__file__).resolve().parent.parent
@@ -147,6 +147,10 @@ def _extract(archive: Path, into: Path) -> list[str]:
 
 
 def main() -> int:
+    # 下面的输出里有「→」和中文。Windows 控制台默认 cp1252，编码不了这些字符，
+    # 一 print 就 UnicodeEncodeError —— 而这是脚本的第一句话，等于一行活没干就崩。
+    ensure_utf8_stdout()
+
     key = _host_key()
     entry = _CHECKSUMS.get(key)
     if entry is None:
