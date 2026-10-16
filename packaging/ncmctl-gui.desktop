@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ncmctl GUI
+Name[zh_CN]=ncmctl 图形界面
+Comment=Graphical front-end for ncmctl
+Comment[zh_CN]=网易云音乐命令行工具 ncmctl 的图形界面
+Exec=ncmctl-gui
+Icon=ncmctl-gui
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+StartupWMClass=ncmctl-gui

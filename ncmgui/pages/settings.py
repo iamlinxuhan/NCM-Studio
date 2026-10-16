@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QLabel
 
-from .. import ncmctl
+from .. import NCMCTL_VERSION, ncmctl
 from ..config import config_dir
 from ..widgets.card import accent_button, danger_button, ghost_button
 from ..widgets.form import FormCard
+from ..workers import BackgroundTask
 from .base import BasePage
+
+
+def _same_file(left: str | None, right: str | None) -> bool:
+    """两个路径是否指向同一个文件。任一为空则视为不同。"""
+    if not left or not right:
+        return False
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return False
 
 
 class SettingsPage(BasePage):
@@ -22,19 +35,24 @@ class SettingsPage(BasePage):
         self._build_global_card()
         self._build_update_card()
         self._build_about_card()
+        # _build_binary_card 里的 _detect 跑在更新卡片存在之前，
+        # 那一次同步不到按钮，这里补一次
+        self._sync_update_button()
 
     # --------------------------------------------------------- ncmctl 定位
 
     def _build_binary_card(self) -> None:
         card = FormCard(
             "ncmctl 位置",
-            "留空时自动在 PATH 与常见安装位置（~/go/bin 等）查找。",
+            f"留空时优先使用随本程序分发的 ncmctl v{NCMCTL_VERSION}，"
+            "其次在 PATH 与常见安装位置（~/go/bin 等）查找。"
+            "想让本程序改用你自己装的那份，在下面填它的完整路径。",
         )
         self.binary_path = card.add_path(
             "可执行文件", mode="file",
             value=self.cfg.get("ncmctl_path", ""),
-            placeholder="留空表示自动探测",
-            hint="从 GitHub Release 装的话通常在 ~/go/bin/ncmctl 或 /usr/local/bin/ncmctl。",
+            placeholder="留空表示使用随程序分发的版本",
+            hint="本程序已内置 ncmctl，一般不需要填这一项。",
         )
 
         self.detected = QLabel("")
@@ -47,16 +65,53 @@ class SettingsPage(BasePage):
         card.add_row_of(detect)
         self.content.addWidget(card)
 
+        #: 当前解析到的是不是随包分发的那份。自更新按钮据此决定是否可用
+        self._using_bundled = False
+
         self._detect()
 
     def _detect(self) -> None:
         found = ncmctl.find_binary(self.binary_path.path())
-        if found:
-            self.detected.setText(f"✅ 当前使用：{found}")
-        else:
+        bundled = ncmctl.bundled_binary()
+        self._using_bundled = _same_file(found, bundled)
+
+        if not found:
+            self._using_bundled = False
             self.detected.setText(
-                "⚠ 未找到 ncmctl。请在上面指定完整路径，或先安装 ncmctl。"
+                "⚠ 未找到 ncmctl。请在上面指定完整路径。"
             )
+        elif self._using_bundled:
+            self.detected.setText(
+                f"✅ 当前使用：随程序分发的 v{NCMCTL_VERSION}"
+                f"<br><code>{found}</code>"
+            )
+        else:
+            # 外部版本只有真问过才知道，异步去问，别把界面卡住
+            self.detected.setText(f"✅ 当前使用：<code>{found}</code>（查询版本…）")
+            self._probe_version(found)
+
+        self._sync_update_button()
+
+    def _probe_version(self, binary: str) -> None:
+        """后台跑 ``ncmctl --version``，回来后补进提示文字。"""
+        self._probe = BackgroundTask(
+            lambda: ncmctl.probe_version(binary, self.opts()), parent=self
+        )
+
+        def done(version: object) -> None:
+            # 探测期间用户可能又点了「重新探测」，那就别用旧结果盖上去
+            if not _same_file(ncmctl.find_binary(self.binary_path.path()), binary):
+                return
+            text = f"v{version}" if version else "版本未知"
+            self.detected.setText(f"✅ 当前使用：{text}<br><code>{binary}</code>")
+
+        self._probe.done.connect(done)
+        self._probe.failed.connect(
+            lambda _msg: self.detected.setText(
+                f"✅ 当前使用：<code>{binary}</code>（版本未知）"
+            )
+        )
+        self._probe.start()
 
     # -------------------------------------------------------------- 全局参数
 
@@ -121,10 +176,36 @@ class SettingsPage(BasePage):
             hint="国内网络直连 GitHub 常常失败，留空通常最省事。",
         )
 
-        run = danger_button("立即更新")
-        run.clicked.connect(self._update)
-        card.add_row_of(run)
+        self.update_button = danger_button("立即更新")
+        self.update_button.clicked.connect(self._update)
+        card.add_row_of(self.update_button)
+
+        self.update_note = QLabel("")
+        self.update_note.setObjectName("Hint")
+        self.update_note.setWordWrap(True)
+        card.add_widget(self.update_note)
+
         self.content.addWidget(card)
+
+    def _sync_update_button(self) -> None:
+        """随包分发的那份不能自更新，把按钮关掉并说明原因。
+
+        内置副本要么在 AppImage 的只读挂载里，要么在单文件包的临时解包目录里，
+        ``ncmctl update`` 想原地覆盖自己必然会失败、或者改了也在退出时被丢掉。
+        与其让用户点了之后收到一句莫名其妙的写入错误，不如直接说清楚。
+        """
+        if getattr(self, "update_button", None) is None:
+            return
+        blocked = self._using_bundled
+        self.update_button.setEnabled(not blocked)
+        if blocked:
+            self.update_note.setText(
+                f"当前使用的是随本程序分发的 ncmctl v{NCMCTL_VERSION}，"
+                "它随本程序一同更新，无法单独升级。<br>"
+                "想用自己的 ncmctl 并自行更新，请在上方「可执行文件」里指定它的路径。"
+            )
+        else:
+            self.update_note.setText("")
 
     def _update(self) -> None:
         proxy = self.update_proxy.text().strip()
@@ -160,6 +241,14 @@ class SettingsPage(BasePage):
         note.setObjectName("Hint")
         note.setWordWrap(True)
         card.add_widget(note)
+
+        bundled = QLabel(
+            f"随本程序分发的 ncmctl 为 <b>v{NCMCTL_VERSION}</b>，"
+            "以 MIT 许可发布，版权归 chaunsin 所有。"
+        )
+        bundled.setObjectName("Hint")
+        bundled.setWordWrap(True)
+        card.add_widget(bundled)
 
         open_dir = ghost_button("打开配置目录")
         open_dir.clicked.connect(self._open_config_dir)

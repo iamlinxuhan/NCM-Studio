@@ -1,34 +1,87 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 打包配置，三平台共用。
 
-    pip install pyinstaller
+    python3 scripts/fetch_ncmctl.py          # 先取 ncmctl 到 vendor/
     pyinstaller ncmctl-gui.spec --noconfirm
 
-产物落在 ``dist/``，三个平台都是一个**单文件可执行程序**：
+两种产物形态，用环境变量 ``NCMGUI_MODE`` 切换：
 
-* Linux   → ``dist/ncmctl-gui``
-* macOS   → ``dist/ncmctl-gui``（Unix 可执行文件，没做 .app 封装）
-* Windows → ``dist/ncmctl-gui.exe``
+* ``onefile``（默认）—— 单个可执行文件。Windows / macOS 用这个。
+* ``onedir`` —— 一个目录树（可执行文件 + ``_internal/``）。Linux 用这个，
+  因为 AppImage 必须建在目录树上：onefile 在运行时会把自己再解包一次，套进
+  AppImage 就成了双重解包，启动慢且白占一份临时空间。
 
-名字可以用环境变量 ``NCMGUI_BUILD_NAME`` 覆盖，CI 里靠它区分架构。
+名字可以用 ``NCMGUI_BUILD_NAME`` 覆盖，CI 里靠它区分平台。
 
-**不把 ncmctl 本体打进去**：它是独立的 Go 程序，官方就有各平台 Release，
-让用户自己装、自己升级，比跟着这里重新打包省事得多。程序启动时按
-「PATH → 常见安装目录 → 设置页指定的路径」的顺序去找它。
+**ncmctl 本体是打包进去的。** 本程序是它的图形前端，界面里每个按钮都对应它的
+一个子命令，两者必须一起测、一起发。版本钉在 ``ncmgui.NCMCTL_VERSION``，
+由 ``scripts/fetch_ncmctl.py`` 下载并校验后放进 ``vendor/``。
+
+用户想用自己的 ncmctl，在「设置」页填路径即可 —— 那一项优先级高于内置副本。
 """
 
 import os
 import sys
+import warnings
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
+
+HERE = Path(SPECPATH)
+
+MODE = os.environ.get("NCMGUI_MODE", "onefile").strip().lower()
+ONEDIR = MODE in {"onedir", "dir", "appimage"}
+NAME = os.environ.get("NCMGUI_BUILD_NAME", "ncmctl-gui")
+
+#: CI 里设成 1，表示「这个产物必须有 ncmctl」。缺了就报错而不是警告 ——
+#: 一个不含 ncmctl 的包发出去，用户那边是直接不能用
+REQUIRE_NCMCTL = os.environ.get("NCMGUI_BUNDLE_NCMCTL") == "1"
+
+datas: list = []
+binaries: list = []
+hiddenimports: list = []
 
 # Windows 上 pywinpty 除了 Python 扩展之外还带几个**非 .pyd 的二进制**：
 # conpty.dll、OpenConsole.exe、winpty.dll、winpty-agent.exe。PyInstaller 的
 # 常规依赖分析只看得到 .pyd，这几个会全部漏掉——而 ConPTY 后端运行时要按
 # 相对路径找到它们。collect_all 把整个包连同这些文件一起收进来。
-datas, binaries, hiddenimports = [], [], []
 if sys.platform == "win32":
     datas, binaries, hiddenimports = collect_all("winpty")
+
+# ── 图标 ────────────────────────────────────────────────────────────────────
+# 放进包里的这份供 Qt 窗口图标使用（ncmgui/resources.py 按相对位置找它）。
+# AppImage 与 Windows 可执行文件用的是 packaging/ 下的同一份源文件。
+icon_png = HERE / "packaging" / "ncmctl-gui.png"
+if icon_png.is_file():
+    datas.append((str(icon_png), "ncmgui/assets"))
+else:
+    warnings.warn(f"缺少图标 {icon_png}，窗口图标将不可用")
+
+# ── ncmctl ──────────────────────────────────────────────────────────────────
+# 放 binaries 而不是 datas：binaries 会被**无条件** chmod 0755，datas 则要看
+# 源文件本身有没有执行位。万一某次 checkout 或下载丢了权限位，datas 会静默退化
+# 成一个不可执行的普通文件，直到用户点下载才报 Permission denied —— 那是最难
+# 查的一类打包 bug。
+helper_name = "ncmctl.exe" if sys.platform == "win32" else "ncmctl"
+helper = HERE / "vendor" / helper_name
+if helper.is_file():
+    binaries.append((str(helper), "."))
+else:
+    if REQUIRE_NCMCTL:
+        raise SystemExit(
+            f"NCMGUI_BUNDLE_NCMCTL=1 但找不到 {helper}\n"
+            "先跑 python3 scripts/fetch_ncmctl.py"
+        )
+    warnings.warn(f"未找到 {helper}，本次产物不含 ncmctl")
+
+# 分发第三方二进制必须带上它的许可。ncmctl 是 MIT
+#
+# 注意 datas 元组的第二项是**目标目录**而不是文件名 —— 源文件叫什么，落地就还
+# 叫什么。所以这里给它们单独一个目录，避免要和本程序自己的 LICENSE 挤在一起。
+for license_name in ("LICENSE", "README.md"):
+    license_file = HERE / "vendor" / license_name
+    if license_file.is_file():
+        datas.append((str(license_file), "ncmgui/assets/ncmctl"))
 
 a = Analysis(
     ["main.py"],
@@ -55,13 +108,10 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name=os.environ.get("NCMGUI_BUILD_NAME", "ncmctl-gui"),
+# icon= 只在 Windows / macOS 生效，Linux 的图标完全由 AppImage 那边的 AppDir 决定
+exe_icon = HERE / "packaging" / ("ncmctl-gui.ico" if sys.platform == "win32" else "ncmctl-gui.png")
+exe_kwargs = dict(
+    name=NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -69,10 +119,28 @@ exe = EXE(
     runtime_tmpdir=None,
     # 不要另外弹一个黑框控制台：所有输出都走界面里的作业控制台。
     # ncmctl 子进程有它自己的伪终端，跟这个开关没有关系。
+    # （Linux 上这个参数本就无效，启动器总是同一个。）
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(exe_icon) if exe_icon.is_file() else None,
 )
+
+if ONEDIR:
+    # exclude_binaries=True 是必须的：否则 EXE 会自己打成一个 onefile 包，
+    # COLLECT 再收一遍，两头都不对
+    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **exe_kwargs)
+    COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name=NAME,
+    )
+else:
+    exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], **exe_kwargs)

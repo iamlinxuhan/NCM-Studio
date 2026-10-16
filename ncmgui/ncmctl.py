@@ -17,6 +17,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,17 +135,55 @@ def clamp(value: int, low: int, high: int) -> int:
 # 可执行文件与登录状态探测
 # --------------------------------------------------------------------------- #
 
+def bundled_binary() -> str | None:
+    """随程序分发的 ncmctl，没有则返回 None。
+
+    两处会放这个东西：
+
+    * 打包后 —— 跟本程序在同一个 bundle 里，解包目录由 ``sys._MEIPASS`` 给出
+      （onefile 是临时目录，onedir 是 ``_internal``，这个属性在两种模式下都可用）。
+    * 源码运行 —— 仓库里的 ``vendor/``，跑过 ``scripts/fetch_ncmctl.py`` 就有。
+
+    源码运行也认 ``vendor/``，是为了让开发和打包后的行为一致：我们分发的就是
+    那个版本，开发时也用它，免得出现「本地好好的、打包后行为不一样」。
+    想用自己的 ncmctl，在设置页填路径即可 —— 那一项优先级更高。
+    """
+    candidates: list[Path] = []
+
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidates.append(Path(base) / BINARY_NAME)
+
+    candidates.append(Path(__file__).resolve().parent.parent / "vendor" / BINARY_NAME)
+
+    for candidate in candidates:
+        if _is_executable(candidate):
+            return str(candidate)
+    return None
+
+
 def find_binary(explicit: str = "") -> str | None:
-    """定位 ncmctl 可执行文件，找不到返回 None。"""
+    """定位 ncmctl 可执行文件，找不到返回 None。
+
+    顺序：**设置页指定的路径 → 随包分发的 → PATH → 常见安装目录**。
+
+    随包那份排在 PATH 前面，是为了让绝大多数用户拿到的永远是测过的那个版本 ——
+    界面里每个按钮都对应 ncmctl 的一个子命令，版本对不上就会出现「有这个按钮
+    但命令不支持」。想用自己的（比如更新的）在设置页填路径，那一项优先级最高。
+    """
     explicit = (explicit or "").strip()
     if explicit:
         found = shutil.which(explicit)
         if found:
             return found
         candidate = Path(explicit).expanduser()
-        if _is_executable(candidate):
-            return str(candidate)
-        return None
+        # 显式指定了却找不到，如实返回 None 让界面报错。不能悄悄退回随包的那份，
+        # 否则用户填错的路径永远发现不了
+        return str(candidate) if _is_executable(candidate) else None
+
+    bundled = bundled_binary()
+    if bundled:
+        return bundled
 
     found = shutil.which(BINARY_NAME)
     if found:
@@ -655,6 +694,36 @@ def build_version(opts: GlobalOpts | None = None) -> list[str]:
     return (opts or GlobalOpts()).apply(["--version"])
 
 
+#: ``--version`` 输出里的版本行。它先打一个 ASCII 艺术字，再打
+#: `` Version: <tab>0.8.1`` —— 所以认冒号后面的字段，而不是抓第一个
+#: 长得像版本号的东西（艺术字里就有数字和点）。
+_VERSION_RE = re.compile(r"Version:\s*(\S+)")
+
+
+def probe_version(binary: str, opts: GlobalOpts | None = None) -> str | None:
+    """跑一次 ``ncmctl --version`` 取出版本号；取不到返回 None。
+
+    这是个会起子进程的阻塞调用，别在界面线程里直接调 —— 用
+    :class:`ncmgui.workers.BackgroundTask` 包一层。
+
+    之所以要真的去问，是因为设置页允许用户指定自己的 ncmctl，那个版本
+    只有问过才知道。随包分发的那个版本是编译期就知道的，用不着跑。
+    """
+    if not binary:
+        return None
+    try:
+        result = subprocess.run(
+            [binary, *build_version(opts)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = _VERSION_RE.search(strip_ansi(result.stdout) + strip_ansi(result.stderr))
+    return match.group(1) if match else None
+
+
 # --------------------------------------------------------------------------- #
 # 自检
 # --------------------------------------------------------------------------- #
@@ -673,15 +742,50 @@ def _selftest() -> int:
         if got != want:
             failures.append(f"{name}\n    期望 {want}\n    实际 {got}")
 
+    module = sys.modules[__name__]
+
     # find_binary 的回退分支必须能跑完。它只在 PATH 命不中时才去翻常见安装
     # 目录，而开发机的 PATH 里通常就有 ncmctl —— 那条分支平时根本走不到，里
     # 面就是把名字写错了，自检也照样报「全部通过」。所以这里把 PATH 临时清掉
     # 逼它走一遍，而不是听凭运行环境决定测不测得到。
+    #
+    # 同时得把随包副本也屏蔽掉，否则它会先命中，回退循环照样执行不到 —— 守卫
+    # 又一次变成摆设。
     try:
-        with mock.patch.dict(os.environ, {"PATH": "/nonexistent-ncmgui-probe"}):
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent-ncmgui-probe"}), \
+                mock.patch.object(module, "bundled_binary", return_value=None):
             find_binary()
     except Exception as exc:
         failures.append(f"find_binary 回退分支抛异常：{exc!r}")
+
+    # 内置副本优先于 PATH —— 这是「锁定版本」的核心保证，写错顺序就等于没锁
+    with tempfile.TemporaryDirectory(prefix="ncmgui-selftest-") as tmpdir:
+        fake_dir = Path(tmpdir)
+        fake = fake_dir / BINARY_NAME
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+
+        bundled = bundled_binary()
+        check("vendor/ 里的 ncmctl 能被认出", bool(bundled), True)
+        check(
+            "随包副本的文件名是 ncmctl",
+            Path(bundled).name if bundled else None,
+            BINARY_NAME,
+        )
+
+        if bundled:
+            with mock.patch.dict(os.environ, {"PATH": str(fake_dir)}):
+                check(
+                    "PATH 上有别的 ncmctl 时仍然优先用随包的",
+                    find_binary(),
+                    bundled,
+                )
+            # 设置页填了路径则一切以它为准，这是留给用户的逃生口
+            check(
+                "设置页指定的路径优先级最高",
+                find_binary(str(fake)),
+                str(fake),
+            )
 
     fallbacks = _fallback_paths()
     check("回退候选非空", bool(fallbacks), True)

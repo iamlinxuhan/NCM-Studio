@@ -4,7 +4,17 @@ import sys
 
 APP_NAME = "ncmctl GUI"
 APP_ID = "ncmctl-gui"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+
+#: 随程序分发的 ncmctl 版本。
+#:
+#: 本程序是 ncmctl 的图形前端，界面里每个功能都对应它的一个子命令，所以两者
+#: 必须一起测、一起发。把版本钉死在这里，用户拿到的就是测过的那个组合，不会
+#: 因为自己装了个别的版本而出现「界面有这个按钮但命令不支持」这类问题。
+#:
+#: 代价是上游发新版时这里得跟着改、重新发版。scripts/fetch_ncmctl.py 按这个
+#: 值去下载对应产物，校验和也一并钉在那里。
+NCMCTL_VERSION = "0.8.1"
 
 
 def ensure_utf8_stdout() -> None:
@@ -24,4 +34,10 @@ def ensure_utf8_stdout() -> None:
             pass
 
 
-__all__ = ["APP_NAME", "APP_ID", "VERSION", "ensure_utf8_stdout"]
+__all__ = [
+    "APP_NAME",
+    "APP_ID",
+    "VERSION",
+    "NCMCTL_VERSION",
+    "ensure_utf8_stdout",
+]

@@ -32,18 +32,33 @@ ncmctl 的全部子命令都在界面里有对应入口：
 | 平台 | 文件 |
 | --- | --- |
 | Windows | `ncmctl-gui-windows-x86_64.exe` |
-| Linux | `ncmctl-gui-linux-x86_64` |
+| Linux | `ncmctl-gui-linux-x86_64.AppImage` |
 | macOS | `ncmctl-gui-macos-arm64` |
 
-都是单文件，双击即可，不需要装 Python。两个平台各有一次性的放行操作：
+都是单文件，双击即可，**不需要装 Python，也不需要单独装 ncmctl**。
 
 - **Windows**：SmartScreen 可能提示「已保护你的电脑」，点「更多信息 → 仍要运行」。
 - **macOS**：首次打开会被 Gatekeeper 拦下，右键点图标选「打开」，或在终端执行
   `xattr -d com.apple.quarantine ./ncmctl-gui-macos-arm64`。
+- **Linux**：给执行位就行，不需要 FUSE，也不需要 libfuse2。
+
+  ```bash
+  chmod +x ncmctl-gui-linux-x86_64.AppImage
+  ./ncmctl-gui-linux-x86_64.AppImage
+  ```
+
+  AppImage 自带全部依赖（含 Qt 用到的 xcb / xkbcommon / wayland 等系统库），
+  只有显卡驱动（libGL / libEGL / libdrm）是用你机器上的 —— 那一份必须用宿主
+  自己的，打包进去反而会把硬件加速顶掉。
+
+  > **glibc 下限是 2.35**，对应 Ubuntu 22.04 / Debian 12 及以上。
+  > 这由 PyQt6 的 manylinux 标签与构建机决定，打包格式换不掉。
+  > CI 里有一道检查（`packaging/check_glibc_floor.py`）卡着这个数，
+  > 免得哪天构建机升级后悄悄把老用户挡在门外。
 
 ### 从源码运行
 
-需要 Python 3.10+ 和**已经装好的 ncmctl**（本程序只是它的前端）。
+需要 Python 3.10+。ncmctl 不用你操心，下面这行会按平台下载并校验：
 
 ```bash
 git clone https://github.com/iamlinxuhan/ncmctl-GUI.git
@@ -51,6 +66,7 @@ cd ncmctl-GUI
 
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python scripts/fetch_ncmctl.py     # 下载 ncmctl 到 vendor/
 ```
 
 用 [uv](https://github.com/astral-sh/uv) 会快很多：
@@ -65,27 +81,36 @@ Windows 上把 `.venv/bin/python` 换成 `.venv\Scripts\python.exe`。
 > 如果你的发行版已经装了系统级 PyQt6 又不想重复下载，
 > 可以改用 `python3 -m venv --system-site-packages .venv`。
 
-## 先装 ncmctl
+## ncmctl 是内置的
 
-界面本身不带 ncmctl，需要你单独装。三种方式任选：
+界面里每个按钮都对应 ncmctl 的一个子命令，两者必须一起测、一起发。所以**版本是钉死的**：
+本程序分发的是 **ncmctl v0.8.1**（MIT 许可，版权归 [chaunsin](https://github.com/chaunsin/netease-cloud-music) 所有，
+许可证随产物一并分发）。升级本程序时它跟着一起升，你不用单独管。
 
-```bash
-# 1. 从官方 Release 下载二进制（最省事，含 Windows / macOS）
-#    https://github.com/chaunsin/netease-cloud-music/releases
+查找顺序是：
 
-# 2. 用 Go 安装
-go install github.com/chaunsin/netease-cloud-music/cmd/ncmctl@latest
+1. 「设置」页里指定的路径
+2. 随程序分发的那一份
+3. `PATH`
+4. 各平台常见安装目录
 
-# 3. 从源码编译
-git clone https://github.com/chaunsin/netease-cloud-music.git
-cd netease-cloud-music && make build
-```
+第 1 项优先级最高，是为了留个逃生口 —— 你想用自己那份（比如想跟上游新版本、
+或者要打某个自己编译的补丁），在「设置」页填上完整路径即可，填了就以它为准。
 
-装好后程序按这个顺序找它：**`PATH` → 各平台常见安装目录 → 「设置」页里指定的路径**。
-`PATH` 里没有、设置页也留空，启动时会直接提示「找不到 ncmctl」并告诉你去哪填，
-不会闷声失败。三个平台都试的常见目录包括 `~/go/bin`、`~/.local/bin`、`/usr/local/bin`、
-`/opt/homebrew/bin`，Windows 上另有 `%USERPROFILE%\go\bin`、`%LOCALAPPDATA%\Microsoft\WinGet\Links`、
-`%USERPROFILE%\scoop\shims` 和 Chocolatey 的安装目录。
+常见安装目录包括 `~/go/bin`、`~/.local/bin`、`/usr/local/bin`、`/opt/homebrew/bin`，
+Windows 上另有 `%USERPROFILE%\go\bin`、`%LOCALAPPDATA%\Microsoft\WinGet\Links`、
+`%USERPROFILE%\scoop\shims` 和 Chocolatey 的安装目录。四处都没有时，启动会直接提示
+「找不到 ncmctl」并告诉你去哪填，不会闷声失败。
+
+### 内置那一份不能自更新
+
+用内置版本时，「设置」页的「立即更新」是**灰的**，下面写着原因。这不是偷懒：
+
+内置副本要么在 AppImage 的只读挂载里，要么在单文件包的临时解包目录里。
+`ncmctl update` 想原地覆盖自己，前者必然失败，后者改了也会在退出时随临时目录一起丢掉。
+与其让你点了之后收到一句莫名其妙的写入错误，不如直接说清楚：**内置版本随本程序一同更新**。
+
+想自己更新 ncmctl，就在「设置」页指定一份你自己的，那一项不受此限制。
 
 ## 运行
 
@@ -218,26 +243,61 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 ### 自己打包
 
 ```bash
+python scripts/fetch_ncmctl.py          # 先把 ncmctl 取到 vendor/
 pip install pyinstaller
-pyinstaller ncmctl-gui.spec --noconfirm
+
+# Windows / macOS：单文件
+NCMGUI_BUNDLE_NCMCTL=1 pyinstaller ncmctl-gui.spec --noconfirm
+
+# Linux：onedir + AppImage
+NCMGUI_MODE=onedir NCMGUI_BUNDLE_NCMCTL=1 \
+  pyinstaller ncmctl-gui.spec --noconfirm
+bash packaging/make_appimage.sh \
+  dist/ncmctl-gui dist/ncmctl-gui-linux-x86_64.AppImage
 ```
 
-产物在 `dist/` 下，三个平台都是一个单文件可执行程序。
+`NCMGUI_BUNDLE_NCMCTL=1` 表示「这个产物必须有 ncmctl」，缺了直接报错而不是警告一下
+照常产出 —— 一个不含 ncmctl 的包发出去，用户那边是每个功能都用不了。
+
+Linux 之所以是 onedir 而不是单文件，是因为 AppImage 必须建在目录树上：单文件包在
+运行时还会把自己再解包一次，套进 AppImage 就成了双重解包，启动慢且白占一份临时空间。
 
 CI（`.github/workflows/build.yaml`）在推 `main` 时会三平台各打一次包（只出产物、
 不发 Release），用来尽早暴露某个平台特有的构建问题；打 `v*` tag 时才额外发 Release。
-Windows 上还会把产物拆开点一遍，确认 pywinpty 的 `conpty.dll` 等运行时文件确实
-打进去了 —— 这类文件不是 `.pyd`，PyInstaller 的依赖分析看不到，漏了也不会报错，
-只会在用户那边变成「一下载就失败」。
+
+CI 里有三类断言，都是同一个思路 —— **「打包成功」不等于「东西真的进去了」**：
+
+| 断言 | 防的是什么 |
+| --- | --- |
+| 清点 `conpty.dll` / `OpenConsole.exe` 等（Windows） | pywinpty 的非 `.pyd` 二进制不在依赖分析里，漏了不报错，只在用户那边变成「一下载就失败」 |
+| 清点内置的 `ncmctl`（三平台） | 同上，缺了的话整个界面一个功能都用不了 |
+| `check_glibc_floor.py`（Linux） | 构建机越新，收进去的系统库要求越高。在 Ubuntu 24.04 上打的包到 Debian 12 上会 `GLIBC_2.39 not found`，而构建、上传、发布全都不报错 |
+
+最后一条是最容易忽略的：PyInstaller 会把**构建机**的 libglib、libgtk、libstdc++、
+libxcb 一起收进产物，这些库在构建机的 glibc 上编译，于是产物的实际门槛被构建机决定，
+和 PyQt6 自己的 manylinux 标签没关系。所以 CI 里 Linux 任务**固定跑在 `ubuntu-22.04`
+上**，不要图省事改成 `ubuntu-latest` —— 那是目前唯一能同时满足 PyQt6（≥2.34）和
+Debian 12 / Ubuntu 22.04 用户（≤2.35）的档位。
 
 ### 代码结构
 
 ```
 main.py                入口，含 --self-test / --screenshot
 ncmctl-gui.spec        PyInstaller 打包配置（三平台共用）
+scripts/
+  fetch_ncmctl.py      下载并校验 ncmctl 到 vendor/（版本与 SHA-256 钉在里面）
+  make_icon.py         生成图标（纯几何绘制，不依赖字体）
+packaging/
+  ncmctl-gui.png/.ico  图标，已入库（免得构建期还要装 Pillow）
+  ncmctl-gui.desktop   Linux 桌面项
+  AppRun               AppImage 入口
+  bundle_libs.py       把 Qt 需要的系统库收进 AppDir
+  check_glibc_floor.py 检查产物真正能跑的最低 glibc，超线即失败
+  make_appimage.sh     组装 AppDir + 打 AppImage
 tests/
   gui_integration.py   下载页端到端测试（真实调接口、真实下载）
 ncmgui/
+  resources.py         包内资源定位（按 __file__，onefile / onedir 都成立）
   ncmctl.py            命令构建：把界面选择翻译成参数数组（不依赖 Qt）
   resolver.py          目标解析与查重：展开 id/链接 → 歌曲清单 → 比对输出目录（不依赖 Qt）
   runner.py            subprocess + pty 封装，流式输出为信号（POSIX / Windows 双后端）
@@ -263,6 +323,8 @@ ncmgui/
 ## 许可
 
 本程序是 ncmctl 的第三方前端。ncmctl 本身以 MIT 许可发布，版权归 chaunsin 所有。
+它的许可证与 README 会随产物一起分发（打包后在 `ncmgui/assets/ncmctl/` 下），
+这是分发第三方二进制应尽的义务，不是可有可无的点缀。
 
 本项目以 GPL-2.0 发布，见 [LICENSE](LICENSE)。
 

@@ -1,0 +1,20 @@
+#!/bin/sh
+# ncmctl GUI 的 AppImage 入口。
+#
+# AppImage 挂载后 $0 形如 /tmp/.mount_xxxx/AppRun，用 readlink -f 解析出 AppDir
+# 根目录，这样不管挂到哪、叫什么都找得到里面的程序。
+#
+# 必须 exec 真实路径，不能在别处放个软链接指过来：PyInstaller 的启动器是靠
+# 「自己所在目录」去找同级 _internal/ 的，路径一换就找不到运行库了。
+set -eu
+
+HERE=$(dirname "$(readlink -f "$0")")
+
+# 打包时收进来的系统库放在这里。AppImage 的挂载点本身也在加载路径上，
+# 这里显式加一遍是为了让 bundled 的库优先于宿主的同名库。
+if [ -d "$HERE/usr/lib" ]; then
+    LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH
+fi
+
+exec "$HERE/usr/bin/ncmctl-gui" "$@"

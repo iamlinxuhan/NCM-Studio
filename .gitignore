@@ -13,6 +13,14 @@ __pycache__/
 build/
 dist/
 
+# 由 scripts/fetch_ncmctl.py 下载来的 ncmctl 本体（约 20 MB，不入库）。
+# 版本与校验和钉在那个脚本里，要换版本改脚本，别把二进制提上来。
+vendor/
+
+# 最近一次打 tag 时 workflow 的临时目录
+squashfs-root/
+AppDir/
+
 # 编辑器
 .vscode/
 .idea/

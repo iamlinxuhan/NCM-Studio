@@ -21,12 +21,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ⚠ Linux 必须用 22.04，不要图省事写 ubuntu-latest。
+          #
+          # PyInstaller 会把**构建机**的系统库（libglib、libgtk、libstdc++、
+          # libxcb……）一并收进产物，这些库是在构建机的 glibc 上编译的。用
+          # ubuntu-latest（现在是 24.04，glibc 2.39）构建，产物就要求 2.39，
+          # 在 Debian 12（2.36）、Ubuntu 22.04（2.35）上直接
+          # "version `GLIBC_2.39' not found" 起不来 —— 而构建、上传、发布全程
+          # 不报错，等用户下载才发现。
+          #
+          # 22.04 的 glibc 是 2.35，恰好也是 PyQt6 的 manylinux_2_34 wheel 之
+          # 上最低的一档，于是产物的下限就是 2.35。要抬这个数，先想清楚是不是
+          # 真的不要老发行版的用户了 —— 下面 check_glibc_floor.py 会卡住。
           - target: linux-x86_64
-            os: ubuntu-latest
+            os: ubuntu-22.04
+            mode: onedir
+            artifact: dist/*.AppImage
           - target: windows-x86_64
             os: windows-latest
+            mode: onefile
+            artifact: dist/*.exe
           - target: macos-arm64
             os: macos-latest
+            mode: onefile
+            artifact: dist/ncmctl-gui-macos-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +59,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      # 这两个自检是纯函数，不联网、不需要 ncmctl 在场，正好用来卡住
+      # 版本钉在 ncmgui/__init__.py 的 NCMCTL_VERSION，校验和钉在脚本里。
+      # 少这一步产出的就是一个跑不起来的空壳 —— 本程序是 ncmctl 的图形前端，
+      # 界面里每个按钮都对应它的一个子命令，缺了它一个功能都用不了。
+      - name: 取 ncmctl
+        run: python scripts/fetch_ncmctl.py
+
+      # 这几个自检都是纯函数，不联网、不需要 ncmctl 在场，正好用来卡住
       # 「命令构建层被改坏了」这类问题
       - name: 离线自检
         run: |
@@ -50,14 +74,20 @@ jobs:
 
       - name: 打包
         env:
+          NCMGUI_MODE: ${{ matrix.mode }}
           NCMGUI_BUILD_NAME: ncmctl-gui-${{ matrix.target }}
+          # 缺了 ncmctl 就报错，而不是警告后照常产出 —— 见 spec 里的说明
+          NCMGUI_BUNDLE_NCMCTL: "1"
         run: pyinstaller ncmctl-gui.spec --noconfirm
 
-      # 这一条是专门给 Windows 兜底的。pywinpty 除了 Python 扩展之外还带几个
-      # 非 .pyd 的二进制，PyInstaller 的常规依赖分析看不到它们，全靠 spec 里那句
-      # collect_all("winpty")。而 collect_all 找不到包时只警告不报错 —— 少了
-      # conpty.dll，打包照样「成功」，用户那边却一开下载就报错。这个平台本地
-      # 又测不了，所以让 CI 把产物拆开点名清点。
+      # ── 下面两步都是在做同一件事：把「打包成功」和「东西真的进去了」分开 ──
+      #
+      # PyInstaller 少收一个文件时只会警告不会失败，产物照样能构建、能上传、
+      # 能发布。所以每个平台都要把产物拆开点名清点。
+
+      # pywinpty 除了 Python 扩展之外还带几个非 .pyd 的二进制（conpty.dll、
+      # OpenConsole.exe、winpty.dll、winpty-agent.exe），PyInstaller 的常规依赖
+      # 分析看不到它们，全靠 spec 里那句 collect_all("winpty")
       - name: 清点 Windows 产物里的 ConPTY 运行时
         if: runner.os == 'Windows'
         shell: pwsh
@@ -71,11 +101,55 @@ jobs:
           }
           Write-Host "ConPTY 运行时齐全：$($exe.Name)"
 
+      # 单文件包把 ncmctl 压在里面，只能翻归档目录
+      - name: 清点单文件包里的 ncmctl
+        if: runner.os != 'Linux'
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem dist/* | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+          pyi-archive_viewer -l $bin.FullName > toc.txt
+          $name = if ($IsWindows) { 'ncmctl.exe' } else { 'ncmctl' }
+          if (-not (Select-String -Path toc.txt -SimpleMatch -Pattern $name -Quiet)) {
+            throw "产物里没有内置的 $name —— 用户拿到的包一个功能都用不了"
+          }
+          Write-Host "内置 ncmctl 到位：$($bin.Name)"
+
+      # onedir 的 ncmctl 是散落的普通文件，检查执行位比翻归档更实在
+      # （binaries 会被无条件 chmod 0755，datas 不会 —— 见 spec 里的说明）
+      - name: 组装 AppImage
+        if: runner.os == 'Linux'
+        env:
+          NCMGUI_MAX_GLIBC: "2.35"
+        run: |
+          test -x dist/ncmctl-gui-linux-x86_64/_internal/ncmctl \
+            || { echo "产物里的 ncmctl 缺失或不可执行"; exit 1; }
+          bash packaging/make_appimage.sh \
+            dist/ncmctl-gui-linux-x86_64 \
+            dist/ncmctl-gui-linux-x86_64.AppImage
+
+      # 真跑一次。前面那些清点只能证明文件在，证明不了它能启动 ——
+      # AppRun 的可执行文件名、内置路径解析、Qt 平台插件，全都要跑起来才知道。
+      - name: 冒烟测试
+        if: runner.os == 'Linux'
+        run: |
+          ./dist/ncmctl-gui-linux-x86_64.AppImage --self-test
+          # FUSE 不可用时 runtime 会自己降级为解包运行 —— 这条路径专门验一下，
+          # 因为很多容器和精简发行版就是没有 /dev/fuse
+          ./dist/ncmctl-gui-linux-x86_64.AppImage --appimage-extract-and-run --self-test
+
+      - name: 冒烟测试（Windows / macOS）
+        if: runner.os != 'Linux'
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem dist/* | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+          & $bin.FullName --self-test
+          if ($LASTEXITCODE -ne 0) { throw "自检失败，退出码 $LASTEXITCODE" }
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: ncmctl-gui-${{ matrix.target }}
-          path: dist/
+          path: ${{ matrix.artifact }}
           if-no-files-found: error
 
   release:
