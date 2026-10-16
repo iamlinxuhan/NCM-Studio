@@ -41,7 +41,7 @@ import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -82,7 +82,23 @@ _FIELD = {
 # --------------------------------------------------------------------------- #
 
 #: ``[mm:ss]`` / ``[mm:ss.xx]`` / ``[mm:ss.xxx]``；毫秒位也见过用冒号的写法，一并认下。
-_TIMESTAMP_RE = re.compile(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
+#:
+#: 小数位**不设上限**（``\d+``）。位数只是精度，不是另一种格式：``.5`` 与 ``.500``
+#: 都是半秒。写死成 ``\d{1,3}`` 的话，接口哪天多给一位，这些行就会**认不出时间戳**
+#: —— 不报错、不中断，只是译文再也对不上、原样写出去，正是最难发现的那种坏法。
+#:
+#: 末尾那个 ``(-\d+)?`` 是实战里撞见的：接口给过 ``[00:00.00-1]``（本机曲库
+#: ``Meditacion Profunda - Aumenta La Productividad.flac`` 里就是），后面挂了个
+#: 看不懂的编号。认下它、**原样留着** —— 对齐只看前面的时间，而看不懂的东西不该
+#: 顺手删掉（万一哪家播放器认它呢）。
+_TIMESTAMP_RE = re.compile(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d+))?(-\d+)?\]")
+
+#: 长得像时间戳的标签：``[`` 后面跟着数字和分隔符。用来揪出"接口换了写法"——
+#: 见 :func:`unknown_timestamps`。只认这种形状，``[123]`` 这类方括号正文不会误报。
+_SUSPECT_RE = re.compile(r"\[\s*\d{1,4}\s*[:.]")
+
+#: 行首一个方括号标签（不含嵌套），用来逐段剥掉 ``[00:01.00][00:05.00]词`` 这类行首连排
+_LEADING_TAG_RE = re.compile(r"\[[^\[\]]*\]")
 
 #: ``[by:xxx]`` ``[ti:xxx]`` ``[offset:0]`` 这类 LRC 元数据标签
 _META_RE = re.compile(r"\[[a-zA-Z#]+:[^\]]*\]")
@@ -130,18 +146,19 @@ def _centiseconds(match: re.Match[str]) -> int:
 
     精度不统一是常态：原文常见 ``[00:00.000]``，翻译常见 ``[00:32.500]``，
     也有 ``[00:01.0]``。不归一化就永远对不上，翻译会整段丢失。
+
+    小数位是**秒的小数部分**：位数只表示精度，不改变含义，所以按位数换算而不是
+    逐个位数分支 —— ``.5`` = ``.50`` = ``.500`` = 半秒。这么写还有一个好处：
+    接口哪天给到四位、五位，这里照样算得对，不必回来加分支。
+
+    一律**截断**取整：毫秒截到厘秒最多偏早 9 毫秒，比任何播放器的刷新粒度都小，
+    而且是"早"这个安全方向（宁可早一点显示，不要晚一点）。
     """
     minutes = int(match.group(1))
     seconds = int(match.group(2))
     frac = match.group(3) or ""
-    if len(frac) == 3:
-        hundredths = int(frac) // 10
-    elif len(frac) == 2:
-        hundredths = int(frac)
-    elif len(frac) == 1:
-        hundredths = int(frac) * 10
-    else:
-        hundredths = 0
+    # 位数只表示精度：int(frac) / 10**len(frac) 就是秒的小数部分，乘 100 得厘秒
+    hundredths = int(frac) * 100 // 10 ** len(frac) if frac else 0
     return minutes * 6000 + seconds * 100 + hundredths
 
 
@@ -151,7 +168,10 @@ def _format_timestamp(match: re.Match[str]) -> str:
     绕一圈走归一化后的厘秒再回写，这样写出去的写法与对齐用的键永远一致。
     """
     total = _centiseconds(match)
-    return f"[{total // 6000:02d}:{total // 100 % 60:02d}.{total % 100:02d}]"
+    # 时间戳后面跟着的编号（``[00:00.00-1]`` 里的 ``-1``）不是我们写得出来的东西，
+    # 看不懂就原样带回去，不做删改
+    suffix = match.group(4) or ""
+    return f"[{total // 6000:02d}:{total // 100 % 60:02d}.{total % 100:02d}{suffix}]"
 
 
 def canonical_timestamps(text: str) -> str:
@@ -184,6 +204,38 @@ def outdated(text: str) -> bool:
     被判成过时。
     """
     return bool(text) and canonical_timestamps(text) != text
+
+
+def unknown_timestamps(text: str) -> list[str]:
+    """挑出"长得像时间戳、但认不出来"的标签。
+
+    这是防接口改写法的那道哨兵。解析已经放宽到任意位数的小数，但玩法不止一种：
+    万一哪天变成 ``[00:44,870]``（逗号）、``[44.870]``（没有分钟）或别的花样，
+    那一行就会被当成**没有时间戳的正文** —— 译文对不上、时间戳不被归一化，
+    结果是写出一份时间轴错乱的歌词，而全程**一句错都不报**。这是最难查的坏法，
+    所以宁可吵一点：认不出来就明说。
+
+    只看行首连续的那串方括号 —— 正文里出现 ``[...]``（``词[1]``）是歌词内容，
+    不是标签。元数据标签（``[by:...]`` / ``[offset:...]``）本来就没有时间戳，也不算。
+
+    认得出的时间戳为空列表；返回的都是原样的标签文本，直接给用户看。
+    """
+    found: list[str] = []
+    for line in (text or "").splitlines():
+        rest = line.lstrip()
+        while rest.startswith("["):
+            match = _LEADING_TAG_RE.match(rest)
+            if match is None:
+                break
+            tag = match.group(0)
+            if (
+                not _TIMESTAMP_RE.fullmatch(tag)
+                and not _META_RE.fullmatch(tag)
+                and _SUSPECT_RE.match(tag)
+            ):
+                found.append(tag)
+            rest = rest[match.end():].lstrip()
+    return found
 
 
 def merge_translation(original: str, translation: str) -> str:
@@ -512,6 +564,9 @@ class Outcome:
     status: str
     base: str
     detail: str = ""
+    #: 歌词里"像时间戳但认不出来"的标签，见 :func:`unknown_timestamps`。
+    #: 非空等于说接口换了写法，得让用户看见 —— 见 :meth:`Report.record`
+    odd: tuple[str, ...] = ()
 
 
 @dataclass
@@ -529,6 +584,8 @@ class Report:
     missing: int = 0
     #: 出错了（接口失败、写文件失败、格式不支持……）
     failed: int = 0
+    #: 歌词里有认不出来的时间戳写法的歌数（接口换了格式的征兆）
+    odd: int = 0
     problems: list[str] = field(default_factory=list)
 
     def record(self, outcome: Outcome) -> None:
@@ -545,6 +602,13 @@ class Report:
 
         if outcome.status in ("failed", "missing", "empty") and outcome.detail:
             self.problems.append(outcome.detail)
+
+        # 格式变了就是全库一起变，逐首列出来只会把真正的失败挤出 notes() 的限额，
+        # 所以只留第一条（带上实际认不出的那个标签），其余靠 summary() 里的计数交代
+        if outcome.odd:
+            self.odd += 1
+            if self.odd == 1:
+                self.problems.append(odd_note(outcome))
 
     def notes(self, limit: int = 20) -> list[str]:
         """值得逐条打出来的行（跳过不算，几百首歌会刷屏）。"""
@@ -565,7 +629,21 @@ class Report:
             parts.append(f"找不到文件 {self.missing} 首")
         if self.failed:
             parts.append(f"失败 {self.failed} 首")
+        if self.odd:
+            parts.append(f"{self.odd} 首有认不出的时间戳")
         return " · ".join(parts) if parts else "没有需要处理的歌词"
+
+
+def odd_note(outcome: Outcome) -> str:
+    """接口换了时间戳写法时，那句给人看的话。
+
+    措辞刻意说得具体（把认不出的那个标签原样摆出来）：看到 ``[00:44,870]`` 比看到
+    "格式异常"有用得多，用户能一眼判断是不是真出了问题，也不至于把正常文件当坏了。
+    """
+    return (
+        f"{outcome.base}：认不出的时间戳 {outcome.odd[0]}"
+        " —— 接口可能改了歌词格式，这一句的时间轴对不上"
+    )
 
 
 def apply(base: str, targets: Sequence[Path], lyric: Lyric, mode: str) -> Outcome:
@@ -577,11 +655,19 @@ def apply(base: str, targets: Sequence[Path], lyric: Lyric, mode: str) -> Outcom
     if not text.strip():
         return Outcome("empty", base, f"{base}：接口没有给出歌词（查无歌词或纯音乐）")
 
+    # 这里是**唯一**能发现"接口换了时间戳写法"的地方。解析已经放宽到任意位数的小数，
+    # 但花样是无穷的：逗号分隔、没有分钟位……认不出来的那些会以"正文"的身份原样混进
+    # 输出，译文对不上、时间轴错乱，而全程不报错。所以要主动查一遍，吵一点也比静默坏掉强
+    odd = tuple(unknown_timestamps(text))
+
     if mode == MODE_LRC:
-        return _write_lrc(base, targets, text)
-    if mode == MODE_EMBED:
-        return _write_embed(base, targets, text)
-    return Outcome("skipped", base)
+        outcome = _write_lrc(base, targets, text)
+    elif mode == MODE_EMBED:
+        outcome = _write_embed(base, targets, text)
+    else:
+        outcome = Outcome("skipped", base)
+
+    return replace(outcome, odd=odd)
 
 
 def _write_lrc(base: str, targets: Sequence[Path], text: str) -> Outcome:
@@ -703,11 +789,17 @@ def collect(
             done += 1
             position = done
             report.record(outcome)
+            # 格式变了是全库一起变，逐首报只会把面板刷满；这里只放第一条出声，
+            # 其余交给 summary() 的计数（``report.odd`` 刚在 record 里加过）
+            odd_line = odd_note(outcome) if outcome.odd and report.odd == 1 else ""
 
         if on_progress is not None:
             on_progress(position, len(items), base)
-        if on_note is not None and outcome.detail:
-            on_note(outcome.detail)
+        if on_note is not None:
+            if outcome.detail:
+                on_note(outcome.detail)
+            if odd_line:
+                on_note(odd_line)
 
     workers = max(1, min(int(parallel), len(items)))
     if workers == 1:
@@ -821,6 +913,58 @@ def _selftest() -> int:
     check("两位小数的不算过时", outdated("[00:01.00]第一句"), False)
     check("没有时间戳（纯文本歌词）不算过时", outdated("随便一段歌词"), False)
     check("空的不算过时（那是「还没有」而不是「过时」）", outdated(""), False)
+
+    # ---- 接口哪天改了写法：解析要照样认得出，认不出的要吭声。
+    #      这些用例是"防将来"的：上游多给或少给一位小数、换个分隔符，
+    #      都不该变成一份时间轴错乱却全程不报错的歌词
+    check(
+        "接口多给一位小数也认，一样截到厘秒",
+        canonical_timestamps("[00:44.8700]詞"),
+        "[00:44.87]詞",
+    )
+    check(
+        "小数位长度只表示精度，不改变含义（.5 就是 .500）",
+        (canonical_timestamps("[00:01.5]詞"), canonical_timestamps("[00:01.500]詞")),
+        ("[00:01.50]詞", "[00:01.50]詞"),
+    )
+    check(
+        "四位小数时译文照样对得上（精度一改就整段丢失才是要防的事）",
+        Lyric("[00:01.0000]原文", "[00:01.0000]译文").text(),
+        "[00:01.00]原文\n[00:01.00]译文\n",
+    )
+    check("认得出的写法不算可疑（四位也认得出）", unknown_timestamps("[00:44.8700]詞"), [])
+    # ``[00:00.00-1]`` 是接口真的给过的东西（曲库里那首 Meditacion Profunda 就是），
+    # 末尾挂了个看不懂的编号。认下来对齐，但别擅自删掉
+    check("时间戳后面挂编号也认得出", unknown_timestamps("[00:00.00-1] 作词 : X"), [])
+    check("挂了编号的照旧归一到两位小数、编号原样留着",
+          canonical_timestamps("[00:44.870-1]詞"), "[00:44.87-1]詞")
+    check("挂了编号的不算旧写法（不该为它反复重写文件）",
+          outdated("[00:00.00-1] 作词 : X"), False)
+    check("挂了编号的也能和译文对齐",
+          merge_translation("[00:01.00-1]a", "[00:01.00]b"),
+          "[00:01.00-1]a\n[00:01.00-1]b")
+    check("正常歌词里没有可疑标签", unknown_timestamps("[00:44.87]詞"), [])
+    check(
+        "元数据标签不算可疑（它们本来就没有时间戳）",
+        unknown_timestamps("[by:MMMMad-man]\n[offset:+350]\n[length:04:07.46]"),
+        [],
+    )
+    check("正文里的方括号不算可疑", unknown_timestamps("[00:01.00]词[1]句"), [])
+    check("没有标签的普通行不算可疑", unknown_timestamps("随便一段歌词"), [])
+    # 下面几条是"接口换了花样"的模拟：解析认不出它们，必须被挑出来 ——
+    # 挑不出来就等于悄悄交付一份时间轴错乱的歌词
+    check("逗号当分隔符会被挑出来", unknown_timestamps("[00:44,870]詞"), ["[00:44,870]"])
+    check("没有分钟位会被挑出来", unknown_timestamps("[44.870]詞"), ["[44.870]"])
+    check(
+        "行首连排的可疑标签都会挑出来",
+        unknown_timestamps("[00:44,870][01:02,500]詞"),
+        ["[00:44,870]", "[01:02,500]"],
+    )
+    check(
+        "可疑标签混在正常行里也挑得出来",
+        unknown_timestamps("[00:01.00]正常\n[00:44,870]可疑"),
+        ["[00:44,870]"],
+    )
 
     # ---- 接口响应
     lyric = parse(
@@ -1008,6 +1152,27 @@ def _selftest() -> int:
         report = collect([("甲 - 一", 1)], fake.lyric, root, MODE_LRC, parallel=1)
         check("problems 超过上限时截断并提示",
               len(Report(problems=[f"x{i}" for i in range(50)]).notes(3)), 4)
+
+        # ---- 接口哪天换了时间戳写法：歌词照写（认不出的只是那几行，整首丢掉更亏），
+        #      但必须**出声**。挑不出来的话，用户拿到的是时间轴错乱却没有任何提示的歌词
+        def _odd_lyric(_song_id: int) -> dict:
+            return {"lrc": {"lyric": "[00:01,000]第一句\n[00:02,500]第二句"}}
+
+        (root / "丁 - 换写法.flac").write_bytes(b"x")
+        seen_odd: list[str] = []
+        report = collect(
+            [("丁 - 换写法", 9)], _odd_lyric, root, MODE_LRC, parallel=1,
+            on_note=seen_odd.append,
+        )
+        check("换写法：歌词照样写下去", report.written, 1)
+        check("换写法：计进 odd", report.odd, 1)
+        check("换写法：汇总里点出来", "1 首有认不出的时间戳" in report.summary(), True)
+        check("换写法：面板上出一行提示", len(seen_odd), 1)
+        check("换写法：提示里带上原样的标签（看得到才知道是什么）",
+              "[00:01,000]" in seen_odd[0], True)
+        # 只出一次声。每首歌都念一遍会刷屏，而格式改变来就是全库一起变
+        check("换写法：第二次跑不再唠叨（已经写过了）",
+              collect([("丁 - 换写法", 9)], _odd_lyric, root, MODE_LRC, parallel=1).odd, 0)
 
     # ---- 进度回调
     with tempfile.TemporaryDirectory(prefix="ncmgui-lyrics-") as tmp:
