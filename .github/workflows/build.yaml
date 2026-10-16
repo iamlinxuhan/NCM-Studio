@@ -175,6 +175,11 @@ jobs:
             # 设个上限并说清原因，别让 CI 干等
             if (-not $p.WaitForExit(120000)) {
               $p.Kill()
+              # 日志要**先打再抛**：超时正是最需要看日志的那一次，而真正的
+              # traceback 就写在重定向出来的错误流里。若等成功之后再读，
+              # 失败时留下的只有一句"没有任何输出"，等于把唯一的线索丢掉。
+              Get-Content $out -ErrorAction SilentlyContinue | Write-Host
+              Get-Content "$out.err" -ErrorAction SilentlyContinue | Write-Host
               throw "自检超过 120 秒没有返回，可能弹出了错误对话框"
             }
             Get-Content $out -ErrorAction SilentlyContinue | Write-Host

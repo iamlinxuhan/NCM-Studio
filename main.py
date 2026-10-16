@@ -28,7 +28,7 @@ from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtGui import QGuiApplication, QIcon  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from ncmgui import APP_ID, APP_NAME, VERSION, theme  # noqa: E402
+from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
 from ncmgui.config import Config  # noqa: E402
 from ncmgui.resources import ICON_PATH  # noqa: E402
 from ncmgui.window import MainWindow  # noqa: E402
@@ -146,6 +146,16 @@ def main(argv: list[str] | None = None) -> int:
         args = [a for a in args if a != "--self-test"]
 
     if self_test or screenshot_dir:
+        # 这两条路径都要往标准输出打中文。Windows 上输出被重定向时 Python 用的是
+        # 本地编码（cp1252），`print("自检通过")` 直接 UnicodeEncodeError ——
+        # 而且崩在第一句话上，等于一个字都没打出来。
+        #
+        # 后果比"少打几行日志"严重得多：产物是 GUI 子系统程序（spec 里
+        # console=False），未捕获的异常会弹一个模态错误框等用户点确定，进程
+        # 永远不返回。CI 里没人去点，只能干等到超时，看到的却是"自检运行中，
+        # 没有任何输出"，真正的 traceback 早已写进没人读的错误流里。
+        ensure_utf8_stdout()
+
         # 没有显示环境时也能跑
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
