@@ -7,9 +7,13 @@ flac 里 ``format_tags`` 是空的，连 artist/title 都没有，歌词自然�
 
 歌词本身拿得到，而且一次能拿三份。``ncmctl curl Lyric`` 的响应里：
 
-* ``lrc.lyric`` —— 原文，标准 LRC 文本，带 ``[mm:ss.xx]`` 时间戳
+* ``lrc.lyric`` —— 原文，LRC 文本，时间戳带**毫秒**（``[00:44.870]``）
 * ``tlyric.lyric`` —— 中文翻译，**自带时间轴**，混着 ``[by:...]`` 这类无时间戳的元数据行
 * ``romalrc.lyric`` —— 罗马音，多数歌是空的
+
+**写出去的时间戳一律转成两位小数**（``[mm:ss.xx]``）。LRC 的小数位本该是百分秒，
+毫秒是 NetEase 的扩展写法；Elisa 25.04 的解析器把三位当百分秒再 ×10，一句歌词能晚
+出 9 秒，而 Debian trixie 装的正是这个版本（详见 :func:`canonical_timestamps`）。
 
 三种模式（值就是界面下拉框的 ``userData``）：
 
@@ -141,6 +145,47 @@ def _centiseconds(match: re.Match[str]) -> int:
     return minutes * 6000 + seconds * 100 + hundredths
 
 
+def _format_timestamp(match: re.Match[str]) -> str:
+    """一条时间戳 → ``[mm:ss.xx]``。
+
+    绕一圈走归一化后的厘秒再回写，这样写出去的写法与对齐用的键永远一致。
+    """
+    total = _centiseconds(match)
+    return f"[{total // 6000:02d}:{total // 100 % 60:02d}.{total % 100:02d}]"
+
+
+def canonical_timestamps(text: str) -> str:
+    """把文本里所有时间戳统一写成两位小数（``[mm:ss.xx]``）。
+
+    LRC 的小数位本来指百分秒，而接口给的是毫秒（``[00:44.870]``）。多数播放器
+    认三位，但 **Elisa 25.04 的解析器把三位小数当成百分秒累加再 ×10** ——
+    ``[00:44.870]`` 被算成 52.7 秒而不是 44.87 秒，整整晚 7.8 秒；误差随小数部分
+    在 0～9 秒之间乱跳（本机曲库实测：8366 个时间戳里 4693 个踩中，中位晚 4.6 秒）。
+    表现出来就是"这一句都唱完了，歌词还没翻过去"。
+
+    上游 2025-05-26 的 ``c0246707``（"support milliseconds of any length"）才修好，
+    而 Debian trixie 装的 Elisa 25.04.2 没有这个补丁 —— 不该指望用户为看歌词去升级
+    播放器。
+
+    两位小数是 LRC 的标准写法，新老播放器都算得对。代价是毫秒被截到厘秒：最多偏早
+    9 毫秒，比任何播放器的刷新粒度都小，而且是"早"这个安全方向。
+    """
+    return _TIMESTAMP_RE.sub(_format_timestamp, text)
+
+
+def outdated(text: str) -> bool:
+    """这份已有的歌词是不是旧写法，值得重写一遍。
+
+    光看"有没有歌词"会把旧写法的文件永远放过去：1.1.0 之前写出去的歌词带着毫秒
+    时间戳，正是 Elisa 25.04 会算错九秒的那种。拿"写出去应该长什么样"当判据，
+    重跑同一批就能**就地补上**，不用把文件删了重下。
+
+    :func:`canonical_timestamps` 是幂等的，所以这个判断稳定：改过的文件不会一直
+    被判成过时。
+    """
+    return bool(text) and canonical_timestamps(text) != text
+
+
 def merge_translation(original: str, translation: str) -> str:
     """把翻译逐行插到原文对应行的下面。
 
@@ -258,13 +303,19 @@ class Lyric:
         return not has_content(self.original) and not has_content(self.translation)
 
     def text(self) -> str:
-        """最终要写出去的文本；这首歌没有歌词时返回空串。"""
+        """最终要写出去的文本；这首歌没有歌词时返回空串。
+
+        这里是**唯一的出口**：``.lrc`` 与写标签两条路径都从这里拿文本，所以时间戳
+        的写法也统一在这一步落实（见 :func:`canonical_timestamps`）。
+        """
         if has_content(self.original):
-            return normalize(merge_translation(self.original, self.translation))
-        if has_content(self.translation):
+            body = merge_translation(self.original, self.translation)
+        elif has_content(self.translation):
             # 原文是占位串但翻译有内容：极少见，但宁可写翻译也别什么都不写
-            return normalize(self.translation)
-        return ""
+            body = self.translation
+        else:
+            return ""
+        return canonical_timestamps(normalize(body))
 
 
 def parse(payload: object) -> Lyric:
@@ -295,6 +346,16 @@ def _lyric_field(payload: object, key: str) -> str:
 def lrc_path(audio: Path) -> Path:
     """音频文件对应的 ``.lrc`` 路径：同名换后缀，放在它旁边。"""
     return audio.with_suffix(".lrc")
+
+
+def _read_text(path: Path) -> str:
+    """读一个小文本文件；不存在、读不动、内容是空的，一律当空串。"""
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def index_audio(directory: str | os.PathLike[str]) -> dict[str, list[Path]]:
@@ -528,7 +589,8 @@ def _write_lrc(base: str, targets: Sequence[Path], text: str) -> Outcome:
     for audio in targets:
         dest = lrc_path(audio)
         try:
-            if dest.is_file() and dest.stat().st_size > 0:
+            existing = _read_text(dest)
+            if existing and not outdated(existing):
                 continue
             dest.write_text(text, encoding="utf-8")
             written += 1
@@ -543,7 +605,8 @@ def _write_embed(base: str, targets: Sequence[Path], text: str) -> Outcome:
     written = 0
     for audio in targets:
         try:
-            if read_embedded(audio):
+            existing = read_embedded(audio)
+            if existing and not outdated(existing):
                 continue
             embed(audio, text)
             written += 1
@@ -557,24 +620,28 @@ def _write_embed(base: str, targets: Sequence[Path], text: str) -> Outcome:
 
 
 def satisfied(targets: Sequence[Path], mode: str) -> bool:
-    """这些文件是不是已经有歌词了。
+    """这些文件是不是已经有歌词了，而且写法就是现在这份。
 
     用来**省掉一次接口调用** —— 重复跑同一批（最常见的就是补下载之后再来一遍）
     时，几百首的曲库不该为了"每首都问一次然后全部跳过"而白跑几百个请求。
+
+    "有歌词"要连写法一起看（见 :func:`outdated`）：只认"有没有"的话，旧写法写下去
+    的文件会因为自己存在而被永久跳过，改正过的写法再也没机会落上去。
     """
     if not targets:
         return False
     if mode == MODE_LRC:
         for audio in targets:
-            dest = lrc_path(audio)
-            try:
-                if not dest.is_file() or dest.stat().st_size == 0:
-                    return False
-            except OSError:
+            text = _read_text(lrc_path(audio))
+            if not text or outdated(text):
                 return False
         return True
     if mode == MODE_EMBED:
-        return all(read_embedded(audio) for audio in targets)
+        for audio in targets:
+            text = read_embedded(audio)
+            if not text or outdated(text):
+                return False
+        return True
     return False
 
 
@@ -722,6 +789,39 @@ def _selftest() -> int:
         "[00:01.00]a\n[00:01.00]b",
     )
 
+    # ---- 时间戳统一成两位小数。Elisa 25.04 把三位小数当百分秒算，能差出 9 秒，
+    #      所以"写出去的文本里不许再有三位小数"是个必须守住的约束
+    check("三位小数截到厘秒", canonical_timestamps("[00:44.870]詞"), "[00:44.87]詞")
+    check("两位小数原样", canonical_timestamps("[01:23.45]詞"), "[01:23.45]詞")
+    check("一位小数补零", canonical_timestamps("[01:23.4]詞"), "[01:23.40]詞")
+    check("没有小数位补 00", canonical_timestamps("[01:23]詞"), "[01:23.00]詞")
+    check("小数位用冒号的写法也归到点",
+          canonical_timestamps("[00:01:500]詞"), "[00:01.50]詞")
+    check("一行多个时间戳都改写",
+          canonical_timestamps("[00:12.000][00:15.300]副歌"),
+          "[00:12.00][00:15.30]副歌")
+    check("分钟位超过两位不被截断",
+          canonical_timestamps("[123:45.678]詞"), "[123:45.67]詞")
+    check(
+        "元数据标签一个都不动",
+        canonical_timestamps("[by:MMMMad-man]\n[offset:+350]\n[length:04:07.46]"),
+        "[by:MMMMad-man]\n[offset:+350]\n[length:04:07.46]",
+    )
+    check(
+        "text() 里原文与译文的时间戳都变成两位小数",
+        Lyric("[00:01.000]原文", "[00:01.000]译文").text(),
+        "[00:01.00]原文\n[00:01.00]译文\n",
+    )
+    check(
+        "只有翻译时也一样归一到两位小数",
+        Lyric("[00:00.000]暂无歌词", "[00:01.000]译文").text(),
+        "[00:01.00]译文\n",
+    )
+    check("带毫秒的旧歌词算过时", outdated("[00:01.000]第一句"), True)
+    check("两位小数的不算过时", outdated("[00:01.00]第一句"), False)
+    check("没有时间戳（纯文本歌词）不算过时", outdated("随便一段歌词"), False)
+    check("空的不算过时（那是「还没有」而不是「过时」）", outdated(""), False)
+
     # ---- 接口响应
     lyric = parse(
         {
@@ -787,6 +887,15 @@ def _selftest() -> int:
         check("跳过时不改写内容", lrc.read_text("utf-8"), text)
         check("satisfied 认得出已经写过", satisfied([audio], MODE_LRC), True)
 
+        # 旧写法（带毫秒）写下去的文件得能就地改过来 —— 否则改正过的写法再没机会落上去
+        old_text = "[00:01.000]第一句\n[00:02.000]第二句\n"
+        lrc.write_text(old_text, encoding="utf-8")
+        check("旧写法的 .lrc 不算已写过", satisfied([audio], MODE_LRC), False)
+        outcome = apply("甲 - 歌", [audio], Lyric(old_text), MODE_LRC)
+        check("旧写法的 .lrc 会被重写", outcome.status, "ok")
+        check("重写后是两位小数", lrc.read_text("utf-8"), text)
+        check("重写后恢复幂等", satisfied([audio], MODE_LRC), True)
+
         check("找不到文件时是 missing",
               apply("甲 - 歌", [], Lyric("[00:01.00]x"), MODE_LRC).status, "missing")
         check("没有歌词时是 empty",
@@ -820,6 +929,15 @@ def _selftest() -> int:
                   apply("甲 - 歌", [flac], Lyric("[00:01.00]第一句"), MODE_EMBED).status,
                   "skipped")
             check("音频流没被动过（还是能解析）", FLAC(flac).info.sample_rate, 44100)
+
+            # 标签里的旧写法同样要能就地补上
+            old_text = "[00:01.000]第一句\n[00:02.000]译文\n"
+            embed(flac, old_text)
+            check("旧写法的标签不算已写过", satisfied([flac], MODE_EMBED), False)
+            outcome = apply("甲 - 歌", [flac], Lyric(old_text), MODE_EMBED)
+            check("旧写法的标签被重写", outcome.status, "ok")
+            check("重写后是两位小数", read_embedded(flac), payload)
+            check("重写后恢复幂等", satisfied([flac], MODE_EMBED), True)
 
             mp3 = root / "乙 - 歌.mp3"
             mp3.write_bytes(blank_mp3())
