@@ -159,8 +159,33 @@ jobs:
         shell: pwsh
         run: |
           $bin = Get-ChildItem dist/* | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
-          & $bin.FullName --self-test
-          if ($LASTEXITCODE -ne 0) { throw "自检失败，退出码 $LASTEXITCODE" }
+
+          if ($IsWindows) {
+            # spec 里 console=False，所以 Windows 产物是 **GUI 子系统**程序。PowerShell
+            # 的 `&` 对这类进程不会等待、也不会设置 $LASTEXITCODE（它保持 $null，
+            # 而 `$null -ne 0` 恒真），于是自检明明通过了也会报「退出码 」（后面空的）。
+            # 必须用 Start-Process 显式等待再读退出码。
+            #
+            # 输出重定向到文件而不是让它照常打到控制台：GUI 子系统进程不保证有控制台，
+            # 万一没有，自检那几行就白打了 —— 而这个日志正是排查失败的依据。
+            $out = Join-Path $env:RUNNER_TEMP 'self-test.log'
+            $p = Start-Process -FilePath $bin.FullName -ArgumentList '--self-test' `
+              -RedirectStandardOutput $out -RedirectStandardError "$out.err" -PassThru
+            # 自检里若抛异常，窗口子系统会弹一个模态对话框、进程永远不返回。
+            # 设个上限并说清原因，别让 CI 干等
+            if (-not $p.WaitForExit(120000)) {
+              $p.Kill()
+              throw "自检超过 120 秒没有返回，可能弹出了错误对话框"
+            }
+            Get-Content $out -ErrorAction SilentlyContinue | Write-Host
+            Get-Content "$out.err" -ErrorAction SilentlyContinue | Write-Host
+            if ($p.ExitCode -ne 0) { throw "自检失败，退出码 $($p.ExitCode)" }
+          }
+          else {
+            # macOS 的单文件产物照常继承终端的标准输出，`&` 直接可用
+            & $bin.FullName --self-test
+            if ($LASTEXITCODE -ne 0) { throw "自检失败，退出码 $LASTEXITCODE" }
+          }
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
