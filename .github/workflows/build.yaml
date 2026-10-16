@@ -137,6 +137,18 @@ jobs:
       - name: 冒烟测试
         if: runner.os == 'Linux'
         run: |
+          # runner 是个没装图形栈的服务器镜像，而 Qt 的 .so 是**硬链接**到
+          # libGL/libEGL 的（NEEDED，不是 dlopen）：宿主没有这两个，动态链接器
+          # 在 import PyQt6 那一行就直接拒绝加载，连 offscreen 都跑不到。
+          #
+          # 补在 runner 上，而不是把 GL 打进产物 —— 那正是 packaging/bundle_libs.py
+          # 里「图形驱动必须用用户机器上那份」要避免的（带一份软件渲染的进去会
+          # 顶掉用户的硬件加速）。桌面发行版本来就自带这一层，被这道断言拦下的
+          # 只有这种精简服务器镜像。
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libgl1 libegl1 libdrm2
+
           ./dist/ncmctl-gui-linux-x86_64.AppImage --self-test
           # FUSE 不可用时 runtime 会自己降级为解包运行 —— 这条路径专门验一下，
           # 因为很多容器和精简发行版就是没有 /dev/fuse
