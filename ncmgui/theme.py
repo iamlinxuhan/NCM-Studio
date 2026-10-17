@@ -293,10 +293,19 @@ QPushButton#Ghost[compact="true"] {
     font-size: 12px;
 }
 
-/* 播放条上的上一首/播放/下一首：按钮更大，图标也要跟着大 */
-QPushButton#Ghost[playback="true"] {
+/* 播放条上的控制键：平时只有图标，悬停才浮出一层淡底色。
+   不再画按钮边框 —— 一排方框在 70px 的条里显得又粗又挤 */
+QPushButton#Ghost[transport="flat"] {
     padding: 0px;
-    font-size: 18px;
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+}
+QPushButton#Ghost[transport="flat"]:hover {
+    background: $PANEL_ALT;
+}
+QPushButton#Ghost[transport="flat"]:disabled {
+    background: transparent;
 }
 
 QPushButton#Danger {
@@ -621,6 +630,43 @@ QLabel#NowPlayingTitle {
 QLabel#NowPlayingArtist {
     color: $TEXT_DIM;
     font-size: 11px;
+}
+
+/* 点喇叭后弹出的竖直音量条 */
+QWidget#VolumePopup {
+    background: $PANEL_ALT;
+    border: 1px solid $BORDER_HI;
+    border-radius: 9px;
+}
+QLabel#VolumeValue {
+    color: $TEXT_DIM;
+    font-size: 11px;
+    font-family: $MONO;
+}
+QSlider#VolumeSlider::groove:vertical {
+    width: 4px;
+    background: $BORDER;
+    border-radius: 2px;
+}
+/* Qt 的竖直滑条里 sub-page 在滑块上方、add-page 在下方；
+   这里要的是「已调到的音量」从底部填到滑块，所以填 add-page */
+QSlider#VolumeSlider::sub-page:vertical {
+    background: $BORDER;
+    border-radius: 2px;
+}
+QSlider#VolumeSlider::add-page:vertical {
+    background: $CYAN;
+    border-radius: 2px;
+}
+QSlider#VolumeSlider::handle:vertical {
+    background: $CYAN;
+    width: 12px;
+    height: 12px;
+    margin: 0 -5px;
+    border-radius: 6px;
+}
+QSlider#VolumeSlider::handle:vertical:hover {
+    background: $PURPLE;
 }
 
 /* ------------------------------------------------------------ 播放页 */

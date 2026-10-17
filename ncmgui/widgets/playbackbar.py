@@ -10,8 +10,20 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QMouseEvent, QPixmap
+import math
+
+from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -66,6 +78,257 @@ class SeekSlider(QSlider):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+
+def _speaker_pixmap(volume: int) -> QPixmap:
+    """画一个喇叭图标，避免依赖 emoji 字体（彩色 emoji 改不了颜色和大小）。
+
+    0 是带叉的静音图标，1–49 一道声波，50 以上两道。
+    """
+    volume = max(0, min(100, int(volume)))
+    pixmap = QPixmap(40, 40)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(2.0, 2.0)
+
+        color = QColor(theme.TEXT if volume > 0 else theme.TEXT_DIM)
+        painter.setPen(
+            QPen(
+                color,
+                1.5,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        painter.setBrush(color)
+
+        body = QPainterPath()
+        body.moveTo(2.8, 8.0)
+        body.lineTo(6.6, 8.0)
+        body.lineTo(11.2, 3.8)
+        body.lineTo(11.2, 16.2)
+        body.lineTo(6.6, 12.0)
+        body.lineTo(2.8, 12.0)
+        body.closeSubpath()
+        painter.drawPath(body)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if volume > 0:
+            painter.drawArc(QRectF(9.8, 6.4, 6.4, 7.2), -55 * 16, 110 * 16)
+            if volume >= 50:
+                painter.drawArc(QRectF(9.0, 4.2, 11.0, 11.6), -55 * 16, 110 * 16)
+        else:
+            painter.drawLine(QPoint(14, 8), QPoint(18, 12))
+            painter.drawLine(QPoint(18, 8), QPoint(14, 12))
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _arrow_head(
+    painter: QPainter, tip: QPointF, direction: QPointF, size: float = 2.5
+) -> None:
+    """在 ``tip`` 处画一个指向 ``direction`` 的实心小三角。"""
+    length = math.hypot(direction.x(), direction.y()) or 1.0
+    dx, dy = direction.x() / length, direction.y() / length
+    nx, ny = -dy, dx
+    base_x, base_y = tip.x() - dx * size, tip.y() - dy * size
+    half = size * 0.62
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                tip,
+                QPointF(base_x + nx * half, base_y + ny * half),
+                QPointF(base_x - nx * half, base_y - ny * half),
+            ]
+        )
+    )
+
+
+def _transport_pixmap(kind: str) -> QPixmap:
+    """上一首 / 播放 / 暂停 / 下一首的图标，线条和三角都自己画。"""
+    pixmap = QPixmap(40, 40)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(2.0, 2.0)
+        color = QColor(theme.TEXT)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+
+        if kind == "play":
+            triangle = QPainterPath()
+            triangle.moveTo(6.6, 4.2)
+            triangle.lineTo(16.0, 10.0)
+            triangle.lineTo(6.6, 15.8)
+            triangle.closeSubpath()
+            painter.drawPath(triangle)
+        elif kind == "pause":
+            painter.drawRoundedRect(QRectF(6.6, 4.4, 2.8, 11.2), 1.2, 1.2)
+            painter.drawRoundedRect(QRectF(11.2, 4.4, 2.8, 11.2), 1.2, 1.2)
+        elif kind == "prev":
+            painter.drawRoundedRect(QRectF(4.8, 4.6, 2.2, 10.8), 1.0, 1.0)
+            triangle = QPainterPath()
+            triangle.moveTo(15.4, 4.6)
+            triangle.lineTo(15.4, 15.4)
+            triangle.lineTo(7.4, 10.0)
+            triangle.closeSubpath()
+            painter.drawPath(triangle)
+        elif kind == "next":
+            painter.drawRoundedRect(QRectF(13.0, 4.6, 2.2, 10.8), 1.0, 1.0)
+            triangle = QPainterPath()
+            triangle.moveTo(4.6, 4.6)
+            triangle.lineTo(4.6, 15.4)
+            triangle.lineTo(12.6, 10.0)
+            triangle.closeSubpath()
+            painter.drawPath(triangle)
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _control_pixmap(kind: str) -> QPixmap:
+    """播放条上的模式/队列图标。
+
+    和喇叭一样用 QPainter 画：彩色 emoji 字体改不了颜色，纯文字又太占宽度。
+    所有图形都按 20×20 的逻辑坐标设计，实际画在 40×40 上缩小显示。
+    """
+    pixmap = QPixmap(40, 40)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(2.0, 2.0)
+
+        color = QColor(theme.TEXT)
+        painter.setPen(
+            QPen(
+                color,
+                1.6,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if kind in {"loop", "one"}:
+            # 缺口留在右上角，箭头顺着顺时针方向收尾
+            painter.drawArc(QRectF(3.4, 3.4, 13.2, 13.2), 15 * 16, -330 * 16)
+            theta = math.radians(45)
+            radius = 6.6
+            tip = QPointF(
+                10 + radius * math.cos(theta),
+                10 - radius * math.sin(theta),
+            )
+            painter.setBrush(color)
+            _arrow_head(
+                painter,
+                tip,
+                QPointF(math.sin(theta), math.cos(theta)),
+                2.6,
+            )
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if kind == "one":
+                font = QFont()
+                font.setPixelSize(8)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.setPen(color)
+                painter.drawText(
+                    QRectF(0, 0, 20, 20),
+                    Qt.AlignmentFlag.AlignCenter,
+                    "1",
+                )
+
+        elif kind == "shuffle":
+            upper = QPainterPath(QPointF(3.0, 13.4))
+            upper.cubicTo(QPointF(7.0, 13.4), QPointF(8.0, 6.6), QPointF(13.2, 6.6))
+            painter.drawPath(upper)
+            lower = QPainterPath(QPointF(3.0, 6.6))
+            lower.cubicTo(QPointF(7.0, 6.6), QPointF(8.0, 13.4), QPointF(13.2, 13.4))
+            painter.drawPath(lower)
+            painter.setBrush(color)
+            _arrow_head(painter, QPointF(15.8, 6.6), QPointF(1, 0), 2.4)
+            _arrow_head(painter, QPointF(15.8, 13.4), QPointF(1, 0), 2.4)
+
+        elif kind == "order":
+            for y in (6.8, 13.2):
+                painter.drawLine(QPointF(3.0, y), QPointF(14.4, y))
+                painter.setBrush(color)
+                _arrow_head(painter, QPointF(17.0, y), QPointF(1, 0), 2.4)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        elif kind == "queue":
+            triangle = QPainterPath()
+            triangle.moveTo(3.6, 4.6)
+            triangle.lineTo(3.6, 10.4)
+            triangle.lineTo(8.8, 7.5)
+            triangle.closeSubpath()
+            painter.setBrush(color)
+            painter.drawPath(triangle)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(QPointF(10.2, 7.5), QPointF(17.0, 7.5))
+            painter.drawLine(QPointF(3.6, 13.2), QPointF(17.0, 13.2))
+            painter.drawLine(QPointF(3.6, 16.4), QPointF(13.6, 16.4))
+    finally:
+        painter.end()
+    return pixmap
+
+
+class VolumePopup(QWidget):
+    """点喇叭后在按钮上方弹出的小面板：竖直音量条 + 百分比。
+
+    用 ``Qt.WindowType.Popup``：点面板外面任意处会自动收起，不需要自己
+    装事件过滤器。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setObjectName("VolumePopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 9)
+        layout.setSpacing(7)
+
+        self.slider = QSlider(Qt.Orientation.Vertical)
+        self.slider.setObjectName("VolumeSlider")
+        self.slider.setRange(0, 100)
+        self.slider.setFixedSize(24, 118)
+        self.slider.setToolTip("拖动调节音量")
+        layout.addWidget(self.slider, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self.value_label = QLabel("0%")
+        self.value_label.setObjectName("VolumeValue")
+        self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.value_label)
+
+        self.setMinimumWidth(62)
+
+    def show_above(self, anchor: QWidget) -> None:
+        """停在 ``anchor`` 正上方；超出屏幕时往回收。"""
+        self.adjustSize()
+        origin = anchor.mapToGlobal(QPoint(0, 0))
+        x = origin.x() + (anchor.width() - self.width()) // 2
+        y = origin.y() - self.height() - 8
+
+        screen = anchor.screen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = max(area.left() + 4, min(x, area.right() - self.width() - 3))
+            y = max(area.top() + 4, y)
+
+        self.move(x, y)
+        self.show()
+        self.slider.setFocus()
 
 
 class NowPlaying(QWidget):
@@ -208,13 +471,14 @@ class PlaybackBar(QWidget):
         layout.addWidget(self.now_playing)
         layout.addSpacing(2)
 
-        # 不用 ⏮/⏭/⏸：这几个码位会被彩色 emoji 字体接管，图标固定在
-        # 很小的字号上，和旁边的 ▶ 不齐。普通几何符号能跟着字号一起放大
-        self.prev_btn = self._glyph_button("◀◀", "|<", "上一首")
+        # 三个都是扁平的小图标，播放键只比上一首/下一首略大一点
+        self.prev_btn = self._transport_button("prev", "上一首", size=30)
         self.prev_btn.clicked.connect(self.playback.previous)
-        self.play_btn = self._glyph_button("▶", "播放", "播放 / 暂停", width=46)
+        self.play_btn = self._transport_button(
+            "play", "播放 / 暂停", size=32, icon_size=20
+        )
         self.play_btn.clicked.connect(self.playback.toggle)
-        self.next_btn = self._glyph_button("▶▶", ">|", "下一首")
+        self.next_btn = self._transport_button("next", "下一首", size=30)
         self.next_btn.clicked.connect(lambda: self.playback.next(manual=True))
         layout.addWidget(self.prev_btn)
         layout.addWidget(self.play_btn)
@@ -238,29 +502,46 @@ class PlaybackBar(QWidget):
         self.progress.clickedValue.connect(self._seek_to_value)
         layout.addWidget(self.progress, 1)
 
-        self.mode_btn = ghost_button(mode_label(self.playback.mode), compact=True)
-        # 四种模式的文案长短不一（顺序 / 列表循环），固定宽度才不会被撑来撑去
-        self.mode_btn.setFixedWidth(88)
+        self.mode_btn = self._icon_button(
+            self.playback.mode,
+            f"播放顺序：{mode_label(self.playback.mode)}（点击切换）",
+        )
         self.mode_btn.clicked.connect(self.playback.cycle_mode)
         layout.addWidget(self.mode_btn)
 
-        self.volume = QSlider(Qt.Orientation.Horizontal)
-        self.volume.setObjectName("PlaybackVolume")
-        self.volume.setRange(0, 100)
-        self.volume.setFixedWidth(86)
-        self.volume.valueChanged.connect(self.playback.set_volume)
-        layout.addWidget(self.volume)
+        # 音量收成一个喇叭按钮，点开才显示竖直滑条 —— 常驻的横条太占地方
+        self.volume_popup = VolumePopup(self)
+        self.volume_popup.slider.valueChanged.connect(self.playback.set_volume)
 
-        self.queue_btn = ghost_button("播放列表", compact=True)
+        self.volume_btn = ghost_button("", compact=True)
+        self.volume_btn.setProperty("transport", "flat")
+        self.volume_btn.setFixedSize(34, 30)
+        self.volume_btn.setIconSize(QSize(20, 20))
+        self.volume_btn.clicked.connect(lambda: self._toggle_volume_popup())
+        layout.addWidget(self.volume_btn)
+
+        self.queue_btn = self._icon_button("queue", "播放列表")
         self.queue_btn.clicked.connect(self.queueRequested.emit)
         layout.addWidget(self.queue_btn)
 
-    def _glyph_button(self, glyph: str, fallback: str, tip: str, width: int = 40) -> QPushButton:
-        button = ghost_button(theme.safe_glyph(glyph, fallback), compact=True)
-        # 播放条上的按钮比普通 compact 按钮再大一圈，图标也放大：
-        # 32×26 的小方块在 70px 的条里太不显眼
-        button.setProperty("playback", "true")
-        button.setFixedSize(width, 34)
+    def _transport_button(
+        self, kind: str, tip: str, size: int, icon_size: int = 18
+    ) -> QPushButton:
+        button = ghost_button("", compact=True)
+        button.setProperty("transport", "flat")
+        button.setFixedSize(size, size)
+        button.setIconSize(QSize(icon_size, icon_size))
+        button.setIcon(QIcon(_transport_pixmap(kind)))
+        button.setToolTip(tip)
+        return button
+
+    def _icon_button(self, kind: str, tip: str) -> QPushButton:
+        """无边框的自绘图标按钮，悬停时才浮出底色。"""
+        button = ghost_button("", compact=True)
+        button.setProperty("transport", "flat")
+        button.setFixedSize(34, 30)
+        button.setIconSize(QSize(20, 20))
+        button.setIcon(QIcon(_control_pixmap(kind)))
         button.setToolTip(tip)
         return button
 
@@ -301,8 +582,8 @@ class PlaybackBar(QWidget):
 
     def _on_state_changed(self, state: str) -> None:
         playing = state == STATE_PLAYING
-        self.play_btn.setText(
-            theme.safe_glyph("❚❚", "||") if playing else theme.safe_glyph("▶", "播放")
+        self.play_btn.setIcon(
+            QIcon(_transport_pixmap("pause" if playing else "play"))
         )
         self.play_btn.setToolTip("暂停" if playing else "播放")
         self.progress.setEnabled(
@@ -339,14 +620,23 @@ class PlaybackBar(QWidget):
 
     def _on_volume_changed(self, value: int) -> None:
         value = player.clamp_volume(value, self.playback.volume)
-        self.volume.blockSignals(True)
-        self.volume.setValue(value)
-        self.volume.blockSignals(False)
-        self.volume.setToolTip(f"音量 {value}%")
+        self.volume_btn.setIcon(QIcon(_speaker_pixmap(value)))
+        self.volume_btn.setToolTip(f"音量 {value}%（点击调节）")
+        # 面板里的滑条跟着外部音量走，但别再回发一次 set_volume
+        self.volume_popup.slider.blockSignals(True)
+        self.volume_popup.slider.setValue(value)
+        self.volume_popup.slider.blockSignals(False)
+        self.volume_popup.value_label.setText(f"{value}%")
+
+    def _toggle_volume_popup(self) -> None:
+        if self.volume_popup.isVisible():
+            self.volume_popup.hide()
+        else:
+            self.volume_popup.show_above(self.volume_btn)
 
     def _on_mode_changed(self, mode: str) -> None:
         label = mode_label(mode)
-        self.mode_btn.setText(label)
+        self.mode_btn.setIcon(QIcon(_control_pixmap(mode)))
         self.mode_btn.setToolTip(f"播放顺序：{label}（点击切换）")
 
     def _on_queue_changed(self) -> None:
@@ -377,7 +667,7 @@ class PlaybackBar(QWidget):
             self.time_label.setText(
                 f"{player.format_clock(position)} / {player.format_clock(duration)}"
             )
-        self.volume.setValue(player.clamp_volume(volume, 70))
+        self._on_volume_changed(volume)
         self._on_mode_changed(mode)
         self.prev_btn.setEnabled(True)
         self.next_btn.setEnabled(True)
