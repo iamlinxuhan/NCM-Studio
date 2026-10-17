@@ -509,6 +509,54 @@ def connect_ipc_socket(path: str, timeout: float = 2.0) -> socket.socket:
     return sock
 
 
+class SocketLineReader:
+    """在**非阻塞** socket 上按行读取。
+
+    mpv 的 IPC 是逐行 JSON。读写共用同一个 socket，而写方向必须保证
+    ``send`` 不会无限阻塞（见 :meth:`MpvPlayer._send_socket`），所以整个
+    socket 设为非阻塞。这里用 ``select`` 等数据、自己拼行缓冲；不再用
+    ``makefile``，因为它在非阻塞模式下的内部缓冲行为没有保证。
+
+    ``pump_events`` 只要求对象有 ``readline()`` 和 ``close()``。
+    """
+
+    def __init__(self, sock: socket.socket) -> None:
+        self._sock = sock
+        self._buffer = bytearray()
+
+    def readline(self) -> bytes:
+        while True:
+            index = self._buffer.find(b"\n")
+            if index >= 0:
+                line = bytes(self._buffer[: index + 1])
+                del self._buffer[: index + 1]
+                return line
+            try:
+                ready, _, _ = select.select([self._sock], [], [], None)
+            except (OSError, ValueError):
+                return b""
+            if not ready:  # pragma: no cover - 没有超时的 select 不会这样返回
+                continue
+            try:
+                chunk = self._sock.recv(65536)
+            except BlockingIOError:
+                continue
+            except (OSError, ValueError):
+                return b""
+            if not chunk:
+                # 对端关闭；缓冲里剩下的半行也交出去，由解析器决定
+                if self._buffer:
+                    line = bytes(self._buffer)
+                    self._buffer.clear()
+                    return line
+                return b""
+            self._buffer.extend(chunk)
+
+    def close(self) -> None:
+        # socket 由 MpvPlayer._writer 持有并负责关闭
+        self._buffer.clear()
+
+
 def pump_events(
     reader: io.BufferedReader,
     dispatch: Callable[[Message], None],
@@ -590,7 +638,7 @@ class MpvPlayer:
         self._process: subprocess.Popen | None = None
         self._endpoint: Endpoint | None = None
         self._writer: io.RawIOBase | io.BufferedIOBase | None = None
-        self._reader: io.BufferedReader | None = None
+        self._reader: io.BufferedReader | SocketLineReader | None = None
         self._threads: list[threading.Thread] = []
         self._write_lock = threading.Lock()
         self._closing = False
@@ -695,8 +743,12 @@ class MpvPlayer:
                     self._writer = raw
                 else:
                     sock = connect_ipc_socket(self._endpoint.value)
+                    # 读写共用一个 socket：设成非阻塞后，写方向才能用
+                    # select + send 做有界等待；读方向由 SocketLineReader
+                    # 自己 select 等数据，不会忙转
+                    sock.setblocking(False)
                     self._writer = sock  # type: ignore[assignment]
-                    self._reader = sock.makefile("rb")
+                    self._reader = SocketLineReader(sock)
                 return
             except OSError as exc:
                 last_error = exc
@@ -838,19 +890,15 @@ class MpvPlayer:
     def _send_socket(
         sock: socket.socket, data: bytes, timeout: float = IPC_WRITE_TIMEOUT
     ) -> None:
-        """分片写 socket，每片之前用 select 等可写，整体最多等 ``timeout`` 秒。
+        """分片写**非阻塞** socket，整体最多等 ``timeout`` 秒。
 
-        socket 本身保持阻塞（读线程要靠它一直等），所以不能靠 ``settimeout``
-        限制写。命令通常只有几十字节、socket 缓冲一下就收下，这里的等待几乎
-        从不发生；只有 mpv 被挂起、缓冲被写满时才会超时，主线程不会被拖死。
+        socket 由读线程共用，必须是非阻塞的：``select`` 只保证「现在至少
+        能写一点」，在阻塞 socket 上随后 ``send`` 一大块仍会等到整块写完，
+        mpv 被挂起时主线程就又卡死了。非阻塞 ``send`` 只会返回实际写入的
+        字节数，剩下的交给下一轮 select，超时由 deadline 统一控制。
         """
         view = memoryview(data)
         deadline = time.monotonic() + timeout
-        # 光靠 select 不够：它只保证「现在至少能写一点」，随后在**阻塞**
-        # socket 上 send 一大块仍然会一直等到整块写完。mpv 被挂起、缓冲区
-        # 只剩几十字节时，主线程就又卡住了。MSG_DONTWAIT 让每次 send 立刻
-        # 返回实际写入的字节数，超时由上面的 deadline 统一控制。
-        flags = getattr(socket, "MSG_DONTWAIT", 0)
         while view:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -862,7 +910,7 @@ class MpvPlayer:
             if not ready:
                 raise PlayerError("写入 mpv IPC 超时，播放器可能已经卡死")
             try:
-                sent = sock.send(view, flags)
+                sent = sock.send(view)
             except BlockingIOError:
                 # 这一瞬间又写不进去了，回到 select 继续等
                 continue
@@ -1166,6 +1214,7 @@ def _selftest() -> int:
         pair = socket.socketpair()
         try:
             pair[0].setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            pair[0].setblocking(False)
             timed_out = False
             try:
                 MpvPlayer._send_socket(pair[0], b"x" * (4 * 1024 * 1024), timeout=0.2)
@@ -1175,6 +1224,25 @@ def _selftest() -> int:
         finally:
             pair[0].close()
             pair[1].close()
+
+    # ---- 非阻塞按行读取：一次 recv 收到半行、多行都要拼对
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        reader = SocketLineReader(left)
+        right.sendall(b'{"event":"file-loaded"}\n{"event":"end')
+        right.sendall(b'-file","reason":"eof"}\n')
+        check("分行读取第一行", reader.readline(), b'{"event":"file-loaded"}\n')
+        check(
+            "跨多次 recv 拼出第二行",
+            reader.readline(),
+            b'{"event":"end-file","reason":"eof"}\n',
+        )
+        right.close()
+        check("对端关闭时读出 EOF", reader.readline(), b"")
+        reader.close()
+    finally:
+        left.close()
 
     # ---- 读线程主循环：不依赖 Unix socket，Windows 上同样覆盖
     class FlakyReader:
