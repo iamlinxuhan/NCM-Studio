@@ -11,7 +11,8 @@
   构建机的 glibc 为下限（CI 是 Ubuntu 22.04，glibc 2.35）。
 * **Windows**：用 zhongfly/mpv-winbuild 的**日期 tag**。它的 tag 一旦发布就不再
   变，所以可以像 ncmctl 那样把版本和 SHA-256 钉死在仓库里。产物是 ``.7z``，
-  解压需要 ``py7zr``（仅构建期依赖）或系统的 ``7z``。
+  解压优先用系统的 ``7z``（上游用了 BCJ2 过滤器，``py7zr`` 解不了），没有时
+  退回 ``py7zr``（仅构建期依赖）。
 * **macOS**：官方 ``git-release`` 是滚动 tag，旧产物会被覆盖；第三方构建又有嵌套
   签名的问题。首版**不随包**，退回探测系统 mpv（``brew install mpv``）。
 
@@ -24,6 +25,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -216,13 +218,30 @@ def _version_of(binary: Path) -> str:
 # Windows
 # --------------------------------------------------------------------------- #
 
+def _find_seven_zip() -> str | None:
+    """找 7z。除了 PATH，也看 Windows 的默认安装目录 —— runner 上常常是装了
+    但没进 PATH。"""
+    found = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+    if found:
+        return found
+    if sys.platform == "win32":
+        for key in ("ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(key)
+            if not root:
+                continue
+            candidate = Path(root) / "7-Zip" / "7z.exe"
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def _fetch_windows() -> int:
     try:
         import py7zr  # type: ignore[import-not-found]
     except ImportError:
         py7zr = None
 
-    seven_zip = shutil.which("7z") or shutil.which("7za")
+    seven_zip = _find_seven_zip()
 
     if py7zr is None and seven_zip is None:
         raise SystemExit(
@@ -256,13 +275,32 @@ def _fetch_windows() -> int:
 
         unpacked = Path(tmpdir) / "unpacked"
         unpacked.mkdir()
-        if py7zr is not None:
-            with py7zr.SevenZipFile(archive, mode="r") as handler:
-                handler.extractall(path=unpacked)
-        else:
-            subprocess.run(
+        # 优先用系统的 7z：上游开始用 BCJ2 过滤器压 mpv.exe，py7zr 不支持这种
+        # 编码（会直接抛 UnsupportedCompressionMethodError）。没有 7z 的机器上
+        # 再退回 py7zr —— 能解开旧包，新包则拿到一条说得清的报错。
+        errors: list[str] = []
+        extracted = False
+        if seven_zip is not None:
+            proc = subprocess.run(
                 [seven_zip, "x", "-y", f"-o{unpacked}", str(archive)],
-                check=True, capture_output=True,
+                capture_output=True, text=True,
+            )
+            if proc.returncode == 0:
+                extracted = True
+            else:
+                detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                errors.append(f"7z：{detail[0] if detail else proc.returncode}")
+        if not extracted and py7zr is not None:
+            try:
+                with py7zr.SevenZipFile(archive, mode="r") as handler:
+                    handler.extractall(path=unpacked)
+                extracted = True
+            except Exception as exc:  # noqa: BLE001 - 解压器的异常类型随版本变
+                errors.append(f"py7zr：{exc}")
+        if not extracted:
+            raise SystemExit(
+                "解不开 mpv 的 .7z：\n  " + "\n  ".join(errors) + "\n"
+                "装一个 7-Zip（或 7z 命令）后重试；py7zr 解不了 BCJ2 压缩。"
             )
 
         # 发行包可能把所有东西平铺在根上，也可能放进子目录，统一按文件名收

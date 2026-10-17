@@ -389,7 +389,7 @@ python scripts/fetch_ncmctl.py          # 先把 ncmctl 取到 vendor/
 python scripts/fetch_mpv.py             # 再把 mpv 取到 vendor/mpv/（macOS 跳过）
 pip install pyinstaller
 
-# Windows：单文件（构建前 pip install py7zr，用于解压 mpv 的 .7z）
+# Windows：单文件（解压 mpv 的 .7z 需要 7-Zip；没有时退回 pip install py7zr）
 NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncmctl-gui.spec --noconfirm
 
