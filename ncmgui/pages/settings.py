@@ -6,9 +6,9 @@ from pathlib import Path
 
 import os
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QLabel, QMessageBox, QProgressBar
+from PyQt6.QtWidgets import QLabel, QMessageBox, QProgressBar, QScrollArea
 
 from .. import NCMCTL_VERSION, VERSION, ncmctl, player, updater
 from ..config import config_dir
@@ -287,6 +287,8 @@ class SettingsPage(BasePage):
         )
 
         self.content.addWidget(card)
+        # 启动弹窗点「下载并安装」时要能滚到这张卡片，让用户看见进度条
+        self.app_update_card = card
 
         self._kind = updater.install_kind()
         self._target = updater.current_executable(self._kind)
@@ -439,6 +441,16 @@ class SettingsPage(BasePage):
         box.exec()
         if can_install:
             if box.clickedButton() is box.button(QMessageBox.StandardButton.Ok):
+                # 跳到设置页并滚到更新卡片：下载进度条就在那里
+                self.window.show_page("settings")
+                scroll = self.findChild(QScrollArea)
+                if scroll is not None:
+                    QTimer.singleShot(
+                        0,
+                        lambda: scroll.ensureWidgetVisible(
+                            self.app_update_card, 0, 24
+                        ),
+                    )
                 self._start_install()
         elif box.clickedButton() is open_btn:
             QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE))
