@@ -30,17 +30,19 @@ def _same_file(left: str | None, right: str | None) -> bool:
 
 class SettingsPage(BasePage):
     PAGE_TITLE = "设置"
-    PAGE_SUBTITLE = "ncmctl 可执行文件位置、全局参数与程序配置。"
+    PAGE_SUBTITLE = "程序更新、ncmctl 可执行文件位置、全局参数与程序配置。"
 
     def build(self) -> None:
+        # 更新卡片放最上面：启动检查发现新版后，用户点进设置第一眼就能看到
+        # 「发现 vX.Y.Z」和「下载并安装」，不用先滚过几屏配置
+        self._build_app_update_card()
         self._build_binary_card()
         self._build_player_card()
         self._build_global_card()
-        self._build_app_update_card()
         self._build_update_card()
         self._build_about_card()
-        # _build_binary_card 里的 _detect 跑在更新卡片存在之前，
-        # 那一次同步不到按钮，这里补一次
+        # _build_binary_card 里的 _detect 跑在「更新 ncmctl」卡片建出来之前，
+        # 那一次同步不到 update_button，这里补一次
         self._sync_update_button()
 
     # --------------------------------------------------------- ncmctl 定位
