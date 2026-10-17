@@ -22,17 +22,21 @@ from PyQt6.QtWidgets import (
 
 from . import APP_NAME, VERSION, ncmctl, theme
 from .config import Config
+from .images import CoverStore
 from .pages.account import AccountPage
 from .pages.cloud import CloudPage
 from .pages.download import DownloadPage
 from .pages.liked import LikedPage
 from .pages.ncm import NcmPage
+from .pages.player import PlayerPage
 from .pages.proxy import ProxyPage
 from .pages.settings import SettingsPage
 from .pages.tasks import TasksPage
 from .pages.tools import ToolsPage
+from .playback import PlaybackController
 from .widgets.card import Chip
 from .widgets.console import ConsolePanel, classify
+from .widgets.playbackbar import PlaybackBar
 
 #: (键, 图标, 名称, 页面类)
 NAV_ITEMS = (
@@ -61,6 +65,17 @@ class MainWindow(QMainWindow):
         self._logged_in = ncmctl.is_logged_in(cfg.get("home", ""))
         #: 截图/自检时置真，切页面不触发联网加载
         self.defer_page_loads = False
+
+        # 播放器与封面缓存要在建页之前就位：各页面在 build() 里直接订阅它们
+        self.covers = CoverStore(self)
+        self.playback = PlaybackController(
+            cfg,
+            binary=lambda: self.binary,
+            opts=self.global_opts,
+            parent=self,
+        )
+        #: 从播放页「返回」时回到的导航页
+        self._last_page_key = "account"
 
         self.setWindowTitle(f"{APP_NAME} · ncmctl 图形界面")
         self.resize(1180, 780)
@@ -142,6 +157,17 @@ class MainWindow(QMainWindow):
             self.pages[key] = page
             self.stack.addWidget(page)
 
+        # 播放页覆盖内容区但不是导航项：放在所有导航页之后，_nav_index 不变
+        self.player_page = PlayerPage(self)
+        self.stack.addWidget(self.player_page)
+
+        if "account" in self._nav_buttons:
+            self._nav_buttons["account"].setChecked(True)
+        self.playback.set_local_provider(self.pages["liked"].local_path)
+        self.playback.errorRaised.connect(self._on_playback_error)
+        self.playback.playerExited.connect(self._on_player_exited)
+        self.player_page.backRequested.connect(self.return_from_player)
+
         layout.addStretch(1)
 
         # 底部信息
@@ -220,7 +246,19 @@ class MainWindow(QMainWindow):
         # 初始没有作业，先把控制台收起来，把空间让给页面
         self._set_console_visible(False)
 
-        return self.splitter
+        # 底部播放条通栏常驻，切到哪一页都在
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        body_layout.addWidget(self.splitter, 1)
+        self.playback_bar = PlaybackBar(self)
+        self.playback_bar.openRequested.connect(self.open_player_page)
+        self.playback_bar.queueRequested.connect(
+            lambda: self.open_player_page(queue=True)
+        )
+        body_layout.addWidget(self.playback_bar)
+        return body
 
     def _build_statusbar(self) -> None:
         self.status_message = QLabel("")
@@ -238,6 +276,7 @@ class MainWindow(QMainWindow):
         index = self._nav_index.get(key)
         if index is None:
             return
+        self._last_page_key = key
         self.stack.setCurrentIndex(index)
         self._nav_buttons[key].setChecked(True)
         # 懒加载页面（如红心歌单）在这里才去取数据，启动时不必联网
@@ -247,6 +286,61 @@ class MainWindow(QMainWindow):
             try:
                 hook()
             except RuntimeError:
+                pass
+
+    def open_player_page(self, queue: bool | None = None) -> None:
+        """切到播放页；``queue`` 为真时顺带展开播放队列。"""
+        current = self.stack.currentWidget()
+        for key, page in self.pages.items():
+            if page is current:
+                self._last_page_key = key
+                break
+
+        # 播放页不是导航项，侧栏任何按钮都不该保持选中
+        self._nav_group.setExclusive(False)
+        for button in self._nav_buttons.values():
+            button.setChecked(False)
+        self._nav_group.setExclusive(True)
+
+        self.stack.setCurrentWidget(self.player_page)
+        if queue is not None:
+            self.player_page.set_queue_visible(queue)
+        hook = getattr(self.player_page, "on_show", None)
+        if callable(hook) and not self.defer_page_loads:
+            try:
+                hook()
+            except RuntimeError:
+                pass
+
+    def return_from_player(self) -> None:
+        self.show_page(self._last_page_key or "account")
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if (
+            event.key() == Qt.Key.Key_Escape
+            and self.stack.currentWidget() is self.player_page
+        ):
+            self.return_from_player()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _on_playback_error(self, message: str) -> None:
+        self.toast(f"播放失败：{message}")
+
+    def _on_player_exited(self, code: int) -> None:
+        self.toast("播放器已退出" + (f"（代码 {code}）" if code else ""))
+
+    def check_updates_on_start(self) -> None:
+        """启动后静默检查一次新版；失败不打扰用户。"""
+        if not self.cfg.get("update", {}).get("check_on_start", True):
+            return
+        page = self.pages.get("settings")
+        hook = getattr(page, "check_updates", None)
+        if callable(hook):
+            try:
+                hook(silent=True)
+            except (RuntimeError, TypeError):
                 pass
 
     # ============================================================== 作业调度
@@ -417,6 +511,10 @@ class MainWindow(QMainWindow):
             return
         self._logged_in = current
         self._refresh_login_ui()
+        if not current:
+            # 登出后红心歌单没了，正在播的队列也不该继续
+            self.playback.stop()
+            self.playback.clear_queue()
         self.loginChanged.emit(current)
         for page in self.pages.values():
             hook = getattr(page, "on_login_changed", None)
@@ -516,6 +614,10 @@ class MainWindow(QMainWindow):
 
         # 先收掉后台进程（播放器），再写配置 —— 播放器退出时会改音量之外的
         # 状态，配置采集必须排在其后。任一页面清理失败都不能阻断退出。
+        try:
+            self.playback.shutdown()
+        except Exception:  # noqa: BLE001 - 退出流程不能被播放器拖垮
+            pass
         for page in self.pages.values():
             hook = getattr(page, "shutdown", None)
             if not callable(hook):
@@ -525,5 +627,9 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001 - 退出流程不能被单个页面拖垮
                 pass
 
+        try:
+            self.playback.save_config()
+        except Exception:  # noqa: BLE001
+            pass
         self.save_all_config()
         super().closeEvent(event)

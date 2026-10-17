@@ -33,6 +33,8 @@ class BackgroundTask(QObject):
 
     #: 进度说明（人话，可直接显示给用户）
     progress = pyqtSignal(str)
+    #: 百分比 0～100；``-1`` 表示总长未知（下载时服务端没给 Content-Length）
+    percent = pyqtSignal(int)
     #: 成功，携带返回值
     done = pyqtSignal(object)
     #: 失败，携带面向用户的错误说明

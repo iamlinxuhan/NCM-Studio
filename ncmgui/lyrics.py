@@ -37,6 +37,7 @@ flac 里 ``format_tags`` 是空的，连 artist/title 都没有，歌词自然�
 
 from __future__ import annotations
 
+import bisect
 import os
 import re
 import threading
@@ -324,6 +325,87 @@ def _timestamped(text: str) -> dict[int, str]:
         if body:
             found.setdefault(_centiseconds(match), body)
     return found
+
+
+# --------------------------------------------------------------------------- #
+# 播放时逐行显示：展开多时间戳、按时间取当前行
+# --------------------------------------------------------------------------- #
+
+def parse_timed_lines(text: str) -> list[tuple[float, str]]:
+    """LRC → ``[(秒, 正文), ...]``，按时间升序。
+
+    与 :func:`_timestamped` 的区别是**一行里的多个时间戳全部展开**：副歌常见的
+    ``[00:12.00][00:15.30]副歌`` 在播放时要出现两次，只认第一个就会少一段。
+
+    无时间戳的行（``[by:...]`` 这类元数据、纯文本歌词）与空正文一律丢掉 ——
+    它们没有坐标，滚动歌词无从定位。完全相同的 ``(秒, 正文)`` 只保留一次，
+    免得同一句在同一时刻叠加两行。
+    """
+    found: list[tuple[float, str]] = []
+    seen: set[tuple[float, str]] = set()
+    for raw in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stamps = list(_TIMESTAMP_RE.finditer(raw))
+        if not stamps:
+            continue
+        body = _TIMESTAMP_RE.sub("", raw).strip()
+        if not body:
+            continue
+        for match in stamps:
+            item = (_centiseconds(match) / 100.0, body)
+            if item not in seen:
+                seen.add(item)
+                found.append(item)
+    # sort 是稳定的：同一时刻的多行保持原文件的先后
+    found.sort(key=lambda pair: pair[0])
+    return found
+
+
+def translation_map(text: str) -> dict[int, str]:
+    """译文 LRC → ``{厘秒: 译文}``，一行多个时间戳同样展开。
+
+    键用厘秒而不是浮点秒：``[00:01.0]`` 与 ``[00:01.000]`` 是同一时刻，浮点比较
+    容易在这一步把译文弄丢。
+    """
+    found: dict[int, str] = {}
+    for raw in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stamps = list(_TIMESTAMP_RE.finditer(raw))
+        if not stamps:
+            continue
+        body = _TIMESTAMP_RE.sub("", raw).strip()
+        if not body:
+            continue
+        for match in stamps:
+            found.setdefault(_centiseconds(match), body)
+    return found
+
+
+def line_index_at(lines: Sequence[tuple[float, str]], position: float | None) -> int:
+    """``position`` 秒时应该高亮第几行；还没到第一句返回 ``-1``。
+
+    ``lines`` 必须是 :func:`parse_timed_lines` 排好序的返回值。
+    """
+    if not lines or position is None:
+        return -1
+    try:
+        value = float(position)
+    except (TypeError, ValueError):
+        return -1
+    if value != value:  # NaN
+        return -1
+    times = [pair[0] for pair in lines]
+    return bisect.bisect_right(times, value) - 1
+
+
+def read_local(audio: Path) -> str:
+    """优先读音频旁边的 ``.lrc``，没有再读文件内嵌的歌词；都没有返回空串。
+
+    播放页不该直接碰 :func:`_read_text` / :func:`read_embedded` 这两个内部细节，
+    本地歌词的读取顺序集中在这里，改起来只有一处。
+    """
+    text = _read_text(lrc_path(audio))
+    if text.strip():
+        return text
+    return read_embedded(audio)
 
 
 def normalize(text: str) -> str:
@@ -880,6 +962,44 @@ def _selftest() -> int:
         merge_translation("[00:01.00]a", "[00:01.000]b"),
         "[00:01.00]a\n[00:01.00]b",
     )
+
+    # ---- 播放时逐行显示
+    timed = parse_timed_lines(
+        "[by:某人]\n[00:02.00]第二句\n[00:01.00][00:03.50]副歌\n[00:04.00]  "
+    )
+    check(
+        "多时间戳展开、按时间排序、元数据与空行丢掉",
+        timed,
+        [(1.0, "副歌"), (2.0, "第二句"), (3.5, "副歌")],
+    )
+    check("没有歌词文本时为空", parse_timed_lines("[by:x]"), [])
+    check("同一时刻同一句不重复", parse_timed_lines("[00:01.00][00:01.0]同一句"),
+          [(1.0, "同一句")])
+    check("同一时刻不同句都保留", parse_timed_lines("[00:01.00]甲\n[00:01.00]乙"),
+          [(1.0, "甲"), (1.0, "乙")])
+    check("还没到第一句是 -1", line_index_at(timed, 0.5), -1)
+    check("正到第一句", line_index_at(timed, 1.0), 0)
+    check("两句之间停在前一句", line_index_at(timed, 1.99), 0)
+    check("正到第三句", line_index_at(timed, 3.5), 2)
+    check("超过最后一句停在最后", line_index_at(timed, 99), 2)
+    check("没有歌词时是 -1", line_index_at([], 10), -1)
+    check("位置未知时是 -1", line_index_at(timed, None), -1)
+    check(
+        "译文按厘秒对齐，多时间戳也展开",
+        translation_map("[00:01.0][00:02.000]译\n[by:x]"),
+        {100: "译", 200: "译"},
+    )
+    check("译文里没有时间戳的行丢掉", translation_map("[by:x]\n纯文本"), {})
+
+    # ---- 本地歌词读取：.lrc 优先于内嵌
+    with tempfile.TemporaryDirectory(prefix="ncmgui-lyrics-") as tmp:
+        local = Path(tmp) / "甲 - 歌.flac"
+        local.write_bytes(b"x")
+        check("都没有时读不到", read_local(local), "")
+        lrc_path(local).write_text("[00:01.00]本地\n", encoding="utf-8")
+        check("优先读同名 .lrc", read_local(local), "[00:01.00]本地\n")
+        lrc_path(local).unlink()
+        check("删掉 .lrc 后回到空（内嵌也读不出）", read_local(local), "")
 
     # ---- 时间戳统一成两位小数。Elisa 25.04 把三位小数当百分秒算，能差出 9 秒，
     #      所以"写出去的文本里不许再有三位小数"是个必须守住的约束

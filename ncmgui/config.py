@@ -118,11 +118,19 @@ def _defaults() -> dict[str, Any]:
             "parallel": 3,
             "regexp": "",
         },
-        # 流媒体播放。mpv_path 留空表示「随包 → PATH → 常见目录」依次探测
+        # 流媒体播放。mpv_path 留空表示「随包 → PATH → 常见目录」依次探测。
+        # local_dir 留空表示「本地音乐默认打开下载目录」（download.output）。
         "player": {
             "mpv_path": "",
             "level": "exhigh",
             "volume": 70,
+            "mode": "loop",
+            "local_dir": "",
+        },
+        # 自动更新。git_proxy 为空走系统代理，direct 表示直连
+        "update": {
+            "git_proxy": "",
+            "check_on_start": True,
         },
         "crypto": {"output": ""},
         "curl": {"output": "", "kind": "weapi", "timeout": "15s"},

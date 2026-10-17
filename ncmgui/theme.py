@@ -586,6 +586,76 @@ QSlider::handle:horizontal:hover { background: $PURPLE; }
 
 QSlider::handle:horizontal:disabled { background: $BORDER_HI; }
 
+/* ------------------------------------------------------------ 播放条 */
+
+QWidget#PlaybackBar {
+    background: $PANEL;
+    border-top: 1px solid $BORDER;
+}
+
+QLabel#PlaybackCover { background: transparent; }
+
+QLabel#PlaybackTitle {
+    color: $TEXT;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#PlaybackArtist, QLabel#PlaybackTime {
+    color: $TEXT_DIM;
+    font-size: 11px;
+}
+
+QLabel#PlaybackTime { font-family: $MONO; }
+
+/* ------------------------------------------------------------ 播放页 */
+
+QLabel#PlayerTitle {
+    color: $TEXT;
+    font-size: 26px;
+    font-weight: 700;
+}
+
+QLabel#PlayerArtist {
+    color: $CYAN;
+    font-size: 14px;
+}
+
+QLabel#PlayerMeta {
+    color: $TEXT_MUTE;
+    font-size: 12px;
+}
+
+QScrollArea#LyricsArea, QWidget#LyricsBody {
+    background: transparent;
+    border: none;
+}
+
+QLabel#LyricLine {
+    color: $TEXT_DIM;
+    font-size: 15px;
+    padding: 2px 6px;
+}
+
+QLabel#LyricLine[current="true"] {
+    color: $CYAN;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+QLabel#LyricLine[translation="true"] {
+    color: $TEXT_MUTE;
+    font-size: 12px;
+}
+
+QLabel#LyricLine[current="true"][translation="true"] {
+    color: $TEXT_DIM;
+    font-size: 12px;
+    font-weight: 400;
+}
+
+QListView#QueueList { font-size: 12px; }
+
 /* ------------------------------------------------------------ 终端区 */
 
 QPlainTextEdit#Console {

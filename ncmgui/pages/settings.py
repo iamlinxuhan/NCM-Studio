@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QLabel
+import os
 
-from .. import NCMCTL_VERSION, ncmctl, player
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtWidgets import QLabel, QMessageBox, QProgressBar
+
+from .. import NCMCTL_VERSION, VERSION, ncmctl, player, updater
 from ..config import config_dir
 from ..widgets.card import accent_button, danger_button, ghost_button
 from ..widgets.form import FormCard
@@ -34,6 +36,7 @@ class SettingsPage(BasePage):
         self._build_binary_card()
         self._build_player_card()
         self._build_global_card()
+        self._build_app_update_card()
         self._build_update_card()
         self._build_about_card()
         # _build_binary_card 里的 _detect 跑在更新卡片存在之前，
@@ -228,6 +231,268 @@ class SettingsPage(BasePage):
         self._detect()
         self.toast("已恢复默认设置。")
 
+    # ------------------------------------------------------------ 更新本程序
+
+    def _build_app_update_card(self) -> None:
+        card = FormCard(
+            "更新本程序",
+            "从 GitHub Release 读取最新版本，下载后校验 SHA-256，再替换当前程序并重启。"
+            "源码运行时只能手动 git pull。",
+        )
+
+        self.app_version = QLabel(f"当前版本：<b>v{VERSION}</b>")
+        self.app_version.setObjectName("Hint")
+        card.add_widget(self.app_version)
+
+        self.app_status = QLabel("尚未检查更新。")
+        self.app_status.setObjectName("Hint")
+        self.app_status.setWordWrap(True)
+        card.add_widget(self.app_status)
+
+        self.app_notes = QLabel("")
+        self.app_notes.setObjectName("Hint")
+        self.app_notes.setWordWrap(True)
+        self.app_notes.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.app_notes.setVisible(False)
+        card.add_widget(self.app_notes)
+
+        self.app_progress = QProgressBar()
+        self.app_progress.setRange(0, 100)
+        self.app_progress.setVisible(False)
+        card.add_widget(self.app_progress)
+
+        self.app_check_btn = ghost_button("检查更新")
+        self.app_check_btn.clicked.connect(lambda: self.check_updates())
+        self.app_install_btn = accent_button("下载并安装")
+        self.app_install_btn.clicked.connect(self._install_app_update)
+        self.app_release_btn = ghost_button("打开 Release 页")
+        self.app_release_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE))
+        )
+        card.add_row_of(
+            self.app_check_btn, self.app_install_btn, self.app_release_btn
+        )
+
+        self.app_proxy = card.add_line(
+            "GitHub 代理", value=self.cfg.get("update.git_proxy", ""),
+            placeholder="留空走系统代理；填 direct 强制直连",
+            hint="检查更新和下载安装包都走这个设置。",
+        )
+        self.app_check_on_start = card.add_switch(
+            "每次启动检查更新",
+            bool(self.cfg.get("update.check_on_start", True)),
+            hint="只在后台静默检查，发现新版会在状态栏提示，不会自动安装。",
+        )
+
+        self.content.addWidget(card)
+
+        self._kind = updater.install_kind()
+        self._target = updater.current_executable(self._kind)
+        self._release = None
+        self._app_asset = None
+        self._update_task = None
+        self._installing = False
+        self._sync_app_buttons()
+
+    def _sync_app_buttons(self) -> None:
+        kind = self._kind
+        can_install = (
+            kind not in ("source", "unsupported")
+            and self._target is not None
+            and self._app_asset is not None
+            and not self._installing
+        )
+        self.app_install_btn.setEnabled(can_install)
+        self.app_check_btn.setEnabled(not self._installing)
+        if kind == "source":
+            self.app_install_btn.setToolTip("源码运行：请 git pull，或在 Release 页手动下载")
+        elif kind == "unsupported":
+            self.app_install_btn.setToolTip(
+                "当前运行方式（例如未使用 AppImage 的 Linux 包）不支持自动替换"
+            )
+        else:
+            self.app_install_btn.setToolTip("下载、校验并替换当前程序，然后重启")
+
+    def check_updates(self, silent: bool = False) -> None:
+        """查询 GitHub 最新 Release。``silent=True`` 时不弹错误框。"""
+        if self._update_task is not None and self._update_task.is_running:
+            return
+        proxy = self.app_proxy.text().strip()
+        self.cfg.set("update.git_proxy", proxy)
+        self.app_status.setText("正在检查更新…")
+        self.app_progress.setVisible(False)
+        self._app_asset = None
+        self._sync_app_buttons()
+
+        task = BackgroundTask(lambda: updater.fetch_release(proxy), parent=self)
+        self._update_task = task
+        task.done.connect(lambda release: self._on_release(release, silent))
+        task.failed.connect(lambda message: self._on_check_failed(message, silent))
+        task.start()
+
+    def _on_check_failed(self, message: str, silent: bool) -> None:
+        if silent:
+            self.app_status.setText("暂时无法检查更新（网络或 GitHub 限流）。")
+            return
+        self.app_status.setText(f"检查更新失败：{message}")
+        QMessageBox.warning(self, "检查更新失败", message)
+
+    def _on_release(self, release, silent: bool) -> None:
+        self._release = release
+        name = updater.asset_name()
+        asset = release.asset(name) if name else None
+        self._app_asset = asset
+
+        if not updater.is_newer(release.tag, VERSION):
+            self.app_status.setText(
+                f"当前已是最新版本（v{VERSION}）。"
+                if release.tag
+                else f"当前版本 v{VERSION}。"
+            )
+            self.app_notes.setVisible(False)
+            self._sync_app_buttons()
+            return
+
+        detail = f"发现新版本 <b>{release.tag}</b>（当前 v{VERSION}）"
+        if release.published_at:
+            detail += f"，发布于 {release.published_at[:10]}"
+        if asset is not None:
+            detail += f"<br>安装包：{asset.name} · {asset.size_mb}"
+        else:
+            detail += "<br>该 Release 没有适用于当前平台的安装包。"
+        self.app_status.setText(detail)
+
+        notes = (release.notes or "").strip()
+        if notes:
+            if len(notes) > 1200:
+                notes = notes[:1200] + "…"
+            self.app_notes.setText(notes)
+            self.app_notes.setVisible(True)
+        else:
+            self.app_notes.setVisible(False)
+
+        self._sync_app_buttons()
+        if silent:
+            self.window.toast(f"发现新版本 {release.tag}，可在设置中安装。")
+
+    def _install_app_update(self) -> None:
+        release, asset, target = self._release, self._app_asset, self._target
+        kind = self._kind
+        if release is None or asset is None or target is None:
+            return
+        if kind in ("source", "unsupported"):
+            QMessageBox.information(
+                self,
+                "无法自动安装",
+                "当前运行方式不支持自动替换。<br><br>"
+                f"请到 <a href='{updater.RELEASES_PAGE}'>{updater.RELEASES_PAGE}</a> 手动下载。",
+            )
+            return
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("确认安装更新")
+        box.setText(
+            f"将安装 <b>{release.tag}</b>（{asset.size_mb}）。<br><br>"
+            "下载后会校验 SHA-256，然后替换当前程序并重启。"
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        box.button(QMessageBox.StandardButton.Ok).setText("下载并安装")
+        box.button(QMessageBox.StandardButton.Cancel).setText("取消")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Ok:
+            return
+
+        proxy = self.app_proxy.text().strip()
+        new = target.with_name(target.name + ".new")
+        part = new.with_name(new.name + ".part")
+
+        holder: dict[str, BackgroundTask] = {}
+
+        def work():
+            checksums = updater.fetch_checksums(release, proxy)
+            expected = checksums.get(asset.name, "")
+            if not expected:
+                raise updater.UpdateError(
+                    f"SHA256SUMS 里没有 {asset.name}，已中止安装。"
+                )
+            task = holder["task"]
+            updater.download(
+                asset.url,
+                part,
+                lambda done, total: task.percent.emit(
+                    int(done * 100 / total) if total > 0 else -1
+                ),
+                proxy,
+            )
+            updater.verify(part, expected)
+            try:
+                os.replace(part, new)
+            except OSError as exc:
+                raise updater.UpdateError(f"无法准备新文件：{exc}") from exc
+            return str(new)
+
+        task = BackgroundTask(work, parent=self)
+        holder["task"] = task
+        self._update_task = task
+        self._installing = True
+        self.app_progress.setRange(0, 100)
+        self.app_progress.setValue(0)
+        self.app_progress.setVisible(True)
+        self.app_status.setText(f"正在下载 {release.tag}…")
+        self._sync_app_buttons()
+
+        task.percent.connect(self._on_download_percent)
+        task.done.connect(lambda path: self._on_downloaded(Path(str(path)), target, kind))
+        task.failed.connect(self._on_install_failed)
+        task.start()
+
+    def _on_download_percent(self, value: int) -> None:
+        if value < 0:
+            self.app_progress.setRange(0, 0)
+            self.app_status.setText("正在下载…（总大小未知）")
+            return
+        if self.app_progress.maximum() == 0:
+            self.app_progress.setRange(0, 100)
+        self.app_progress.setValue(value)
+        self.app_status.setText(f"正在下载… {value}%")
+
+    def _on_downloaded(self, new: Path, target: Path, kind: str) -> None:
+        try:
+            updater.install(new, target, kind)
+        except updater.UpdateError as exc:
+            self._on_install_failed(str(exc))
+            return
+
+        self.app_progress.setVisible(False)
+        self._installing = False
+        self._sync_app_buttons()
+        self.app_status.setText("更新已就绪，正在重启…")
+        try:
+            updater.restart(kind, target)
+        except updater.UpdateError as exc:
+            QMessageBox.warning(
+                self, "重启失败", f"{exc}<br><br>请手动启动新版本：{target}"
+            )
+            return
+        self.window.close()
+
+    def _on_install_failed(self, message: str) -> None:
+        self._installing = False
+        self.app_progress.setVisible(False)
+        self._sync_app_buttons()
+        self.app_status.setText(f"安装失败：{message}")
+        QMessageBox.warning(
+            self,
+            "安装更新失败",
+            f"{message}<br><br>当前版本仍可继续使用。"
+            f"也可以到 <a href='{updater.RELEASES_PAGE}'>{updater.RELEASES_PAGE}</a> 手动下载。",
+        )
+
     # ---------------------------------------------------------------- 更新
 
     def _build_update_card(self) -> None:
@@ -340,3 +605,5 @@ class SettingsPage(BasePage):
         self.cfg.set("config_file", self.config_file.path())
         self.cfg.set("debug", self.debug.isChecked())
         self.cfg.set("update.proxy", self.update_proxy.text().strip())
+        self.cfg.set("update.git_proxy", self.app_proxy.text().strip())
+        self.cfg.set("update.check_on_start", self.app_check_on_start.isChecked())

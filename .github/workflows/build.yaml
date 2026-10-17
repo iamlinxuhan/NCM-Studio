@@ -101,6 +101,10 @@ jobs:
           # 一个静默跳过等于没测，所以这里先明确它必须在
           python -c "import mutagen"
           python -m ncmgui.lyrics
+          # 封面地址改写与 LRU 缓存
+          python -m ncmgui.images
+          # Release 版本比较、资产名、SHA256SUMS 解析、安装形态分支
+          python -m ncmgui.updater
 
       - name: 打包
         env:
@@ -278,6 +282,25 @@ jobs:
           # 产物名已经带了平台后缀，合并到一处不会互相覆盖
           path: dist
           merge-multiple: true
+
+      # 自动更新器按这三个文件名找安装包，缺一个那个平台的用户就永远更新不了；
+      # SHA256SUMS 也必须存在 —— 更新器宁可拒绝安装，也不会装一个没校验的文件。
+      # 这两个条件在发布前就该失败，而不是等用户点「下载并安装」才发现。
+      - name: 校验发布资产
+        run: |
+          cd dist
+          for f in \
+            ncmctl-gui-linux-x86_64.AppImage \
+            ncmctl-gui-windows-x86_64.exe \
+            ncmctl-gui-macos-arm64
+          do
+            test -f "$f" || { echo "缺少资产：$f"; exit 1; }
+          done
+          sha256sum \
+            ncmctl-gui-linux-x86_64.AppImage \
+            ncmctl-gui-windows-x86_64.exe \
+            ncmctl-gui-macos-arm64 > SHA256SUMS
+          cat SHA256SUMS
 
       - name: 创建 Release
         env:

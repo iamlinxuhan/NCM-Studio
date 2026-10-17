@@ -24,8 +24,16 @@ from pathlib import Path
 # 允许直接 `python main.py` 而不必先安装成包
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PyQt6.QtCore import Qt  # noqa: E402
-from PyQt6.QtGui import QGuiApplication, QIcon  # noqa: E402
+from PyQt6.QtCore import QTimer, Qt  # noqa: E402
+from PyQt6.QtGui import (  # noqa: E402
+    QColor,
+    QFont,
+    QGuiApplication,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPixmap,
+)
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
@@ -93,6 +101,43 @@ def _self_test(window: MainWindow) -> int:
                 problems.append(f"红心歌单表头不对：{headers}")
         if getattr(liked, "_player", None) is not None:
             problems.append("自检时不该启动播放器")
+
+    # 播放页不是导航页：它在栈里，但启动时不该是当前页，也不该拉起 mpv
+    if getattr(window, "player_page", None) is None:
+        problems.append("主窗口没有播放页")
+    elif window.stack.currentWidget() is window.player_page:
+        problems.append("启动时不该停在播放页")
+    playback = getattr(window, "playback", None)
+    if playback is None:
+        problems.append("主窗口没有播放控制器")
+    elif playback.player_running:
+        problems.append("自检时不该启动 mpv")
+    else:
+        # 播放顺序的四种取值都是纯逻辑，离线可验
+        for mode in ("order", "loop", "one", "shuffle"):
+            playback.set_mode(mode)
+            if playback.mode != mode:
+                problems.append(f"播放顺序切换到 {mode} 没有生效")
+        playback.set_mode("loop")
+
+    # 红心表格第 0 列的 ▶/⏸ 只由模型状态决定，和当前有没有 mpv 无关
+    source = getattr(liked, "model", None)
+    if source is not None:
+        from ncmgui.resolver import Song
+
+        source.set_songs([Song(id=1, name="自检", artists=("测试",))])
+        source.set_playing(1)
+        source.set_paused(False)
+        playing_marker = source.data(source.index(0, 0), Qt.ItemDataRole.DisplayRole)
+        source.set_paused(True)
+        paused_marker = source.data(source.index(0, 0), Qt.ItemDataRole.DisplayRole)
+        if playing_marker != theme.safe_glyph("⏸", "❚❚"):
+            problems.append(f"播放中的行标记应为 ⏸，实际 {playing_marker!r}")
+        if paused_marker != "▶":
+            problems.append(f"暂停时的行标记应为 ▶，实际 {paused_marker!r}")
+        source.set_playing(None)
+        source.set_paused(False)
+        source.set_songs([])
 
     # 播放器 IPC 的编解码是纯 Python，离线验得到；mpv 二进制本身由 CI 另行冒烟
     try:
@@ -166,6 +211,86 @@ def _self_test(window: MainWindow) -> int:
     return 0
 
 
+def _demo_cover(size: int = 420) -> QPixmap:
+    """截图用的封面：渐变底 + 一个抽象的月亮/海浪，不依赖任何图片文件。"""
+    pixmap = QPixmap(size, size)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        gradient = QLinearGradient(0, 0, size, size)
+        gradient.setColorAt(0.0, QColor("#18284a"))
+        gradient.setColorAt(0.55, QColor("#3a2a63"))
+        gradient.setColorAt(1.0, QColor("#0b0d14"))
+        painter.fillRect(pixmap.rect(), gradient)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 229, 255, 46))
+        painter.drawEllipse(int(size * 0.18), int(size * 0.16), int(size * 0.5), int(size * 0.5))
+        painter.setBrush(QColor(190, 170, 255, 60))
+        painter.drawEllipse(int(size * 0.46), int(size * 0.1), int(size * 0.34), int(size * 0.34))
+
+        font = QFont()
+        font.setPixelSize(int(size * 0.11))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#f2f6ff"))
+        painter.drawText(
+            pixmap.rect().adjusted(0, 0, 0, -int(size * 0.16)),
+            Qt.AlignmentFlag.AlignCenter,
+            "夜航",
+        )
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _demo_songs():
+    from ncmgui.resolver import Song
+
+    titles = (
+        ("夜航", "沈以诚", "夜航", 222),
+        ("海边的房间", "房东的猫", "柔软", 245),
+        ("雨停了以后", "刘昊霖", "十城记", 198),
+        ("晚风心里吹", "阿梨粤", "晚风", 231),
+        ("星河入梦", "银河系", "漫游", 267),
+        ("关于你", "陈壹千", "关于你", 214),
+    )
+    return [
+        Song(
+            id=9001 + index,
+            name=name,
+            artists=(artist,),
+            album=album,
+            duration=seconds * 1000,  # Song.duration 是毫秒
+            pic_url="",
+        )
+        for index, (name, artist, album, seconds) in enumerate(titles)
+    ]
+
+
+def _demo_lyrics() -> list[tuple[float, str]]:
+    return [
+        (0.0, "夜航"),
+        (12.0, "作词：沈以诚"),
+        (18.0, "作曲：沈以诚"),
+        (26.0, "城市的灯一盏一盏熄灭"),
+        (34.5, "风把云吹向更远的海面"),
+        (43.0, "我数着舷窗外的星"),
+        (52.0, "像数着没说完的从前"),
+        (61.5, "如果夜色可以慢一点"),
+        (70.0, "让我再看一眼"),
+        (78.5, "那片被月光照亮的岸"),
+        (87.0, "和你转身时的侧脸"),
+        (96.0, "夜航的船不说话"),
+        (105.0, "只把思念推得很远"),
+        (114.0, "等天亮之前"),
+        (123.0, "我会回到你身边"),
+        (132.0, "——"),
+        (141.0, "风把云吹向更远的海面"),
+        (150.0, "我数着舷窗外的星"),
+    ]
+
+
 def _screenshot(window: MainWindow, target: str) -> int:
     """把每个页面渲染成 PNG。用于文档配图与界面回归检查。"""
     from ncmgui.window import NAV_ITEMS
@@ -186,6 +311,47 @@ def _screenshot(window: MainWindow, target: str) -> int:
             print(f"保存失败：{path}")
             return 1
         print(f"已保存 {path}  ({image.width()}x{image.height()})")
+
+    # 播放页不是导航页，单独摆一个演示状态：不联网、不起 mpv
+    songs = _demo_songs()
+    cover = _demo_cover()
+    page = window.player_page
+    page.set_demo(
+        songs[0],
+        cover,
+        _demo_lyrics(),
+        position=67.0,
+        duration=222.0,
+    )
+    window.playback_bar.set_demo(
+        songs[0], cover, position=67.0, duration=222.0, volume=70, mode="loop"
+    )
+    window.open_player_page(queue=False)
+    QApplication.processEvents()
+    image = window.grab()
+    path = out_dir / "10-player.png"
+    if not image.save(str(path)):
+        print(f"保存失败：{path}")
+        return 1
+    print(f"已保存 {path}  ({image.width()}x{image.height()})")
+
+    page.set_demo(
+        songs[0],
+        cover,
+        _demo_lyrics(),
+        queue=songs,
+        position=67.0,
+        duration=222.0,
+    )
+    window.open_player_page(queue=True)
+    for _ in range(3):
+        QApplication.processEvents()
+    image = window.grab()
+    path = out_dir / "11-player-queue.png"
+    if not image.save(str(path)):
+        print(f"保存失败：{path}")
+        return 1
+    print(f"已保存 {path}  ({image.width()}x{image.height()})")
 
     return 0
 
@@ -265,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
     if screenshot_dir:
         return _screenshot(window, screenshot_dir)
 
+    # 启动后稍等片刻再静默检查更新：先把主界面画出来，别让网络拖慢启动
+    QTimer.singleShot(2500, window.check_updates_on_start)
     return app.exec()
 
 

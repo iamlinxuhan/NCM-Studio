@@ -163,6 +163,10 @@ class Song:
     album: str = ""
     #: 时长，**毫秒**（接口的 ``dt`` 就是这个单位）
     duration: int = 0
+    #: 专辑封面地址（接口 ``al.picUrl``）。列表页与播放页用来显示封面
+    pic_url: str = ""
+    #: 本地文件路径。只有「本地音乐」队列会填，流媒体歌曲为空串
+    path: str = ""
 
     @property
     def base(self) -> str:
@@ -742,6 +746,11 @@ class Resolver:
                         fee=int(item.get("fee") or 0),
                         album=str(album.get("name") or "") if isinstance(album, dict) else "",
                         duration=duration,
+                        pic_url=(
+                            str(album.get("picUrl") or "")
+                            if isinstance(album, dict)
+                            else ""
+                        ),
                     )
                 )
             if total > batch:
