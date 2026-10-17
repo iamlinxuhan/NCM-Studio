@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QPainter, QPainterPath
-from PyQt6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PyQt6.QtWidgets import (
+    QApplication,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+)
 
 from .. import theme
 
@@ -27,11 +32,19 @@ class PlayMarkerDelegate(QStyledItemDelegate):
             super().paint(painter, option, index)
             return
 
-        # 先用默认绘制把交替行底色 / 选中高亮画出来，只是不带文字
+        # 先只把交替行底色 / 选中高亮画出来，不带文字。
+        #
+        # 这里不能调 super().paint()：QStyledItemDelegate.paint() 内部会再执行
+        # 一次 initStyleOption()，把 opt.text 从模型重新读回来（"❚❚"），于是
+        # 默认文字字形和下面的矢量图标会各画一遍、叠在一起 —— 看起来就是两个
+        # 暂停标记错位重叠。直接用样式画 CE_ItemViewItem 才能保证不画文字。
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         opt.text = ""
-        super().paint(painter, opt, index)
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget
+        )
 
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
         color = QColor(theme.CYAN if selected else theme.TEXT)

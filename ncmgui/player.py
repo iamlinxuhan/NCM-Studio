@@ -29,6 +29,7 @@ import io
 import json
 import os
 import random
+import select
 import shutil
 import socket
 import subprocess
@@ -50,6 +51,10 @@ MPV_BINARY_NAME = "mpv.exe" if _IS_WINDOWS else "mpv"
 #: 随包 mpv 在包里的相对目录。onefile 落在 ``_MEIPASS/mpv/``，
 #: onedir 落在 ``_internal/mpv/`` —— 两者都是 ``sys._MEIPASS`` 的子目录。
 BUNDLED_DIR = "mpv"
+
+#: 写 IPC 命令的最长等待。mpv 正常时一条命令瞬间就写完；进程被挂起或卡死时
+#: 不能让主线程跟着一起无限期阻塞。
+IPC_WRITE_TIMEOUT = 5.0
 
 #: PATH 里找不到时，依次翻这些目录。
 _COMMON_DIRS: tuple[str, ...] = (
@@ -504,6 +509,42 @@ def connect_ipc_socket(path: str, timeout: float = 2.0) -> socket.socket:
     return sock
 
 
+def pump_events(
+    reader: io.BufferedReader,
+    dispatch: Callable[[Message], None],
+    *,
+    is_closing: Callable[[], bool] = lambda: False,
+    on_lost: Callable[[], None] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """IPC 读线程的主循环：逐行解析并交给 ``dispatch``。
+
+    **一次读超时不等于连接断了**：mpv 暂停或空闲时可能长时间没有输出，这里
+    继续等。只有连接真的断开（``readline`` 返回空或抛错）才结束；如果这不是
+    主动关闭，调用 ``on_lost``，让上层重启播放器恢复事件通道。
+    """
+    lost = False
+    while not is_closing():
+        try:
+            line = reader.readline()
+        except (TimeoutError, socket.timeout):
+            continue
+        except (OSError, ValueError) as exc:
+            if not is_closing():
+                lost = True
+                if log is not None:
+                    log(f"mpv IPC 读线程退出：{exc}")
+            break
+        if not line:
+            lost = not is_closing()
+            break
+        message = parse_message(line)
+        if message is not None:
+            dispatch(message)
+    if lost and on_lost is not None:
+        on_lost()
+
+
 class MpvPlayer:
     """一个常驻 mpv 进程。
 
@@ -517,6 +558,8 @@ class MpvPlayer:
 
     :param on_exit: ``callback(退出码)``，进程**意外**结束时调用（主动 stop 不调）
     :param on_error: ``callback(说明)``，命令失败或连接异常时调用
+    :param on_lost: ``callback()``，IPC 读线程意外结束（不是主动 stop）时调用；
+        事件通道已断，上层应重启播放器
     :param env: 子进程环境；默认 :func:`child_env`
     :param extra: 追加到 mpv 命令行的参数（测试里用 ``--ao=null``）
     """
@@ -528,6 +571,7 @@ class MpvPlayer:
         on_event: Callable[[str, Mapping[str, object]], None] | None = None,
         on_exit: Callable[[int], None] | None = None,
         on_error: Callable[[str], None] | None = None,
+        on_lost: Callable[[], None] | None = None,
         env: Mapping[str, str] | None = None,
         extra: Sequence[str] = (),
         volume: int = 70,
@@ -539,6 +583,7 @@ class MpvPlayer:
         self._on_event = on_event
         self._on_exit = on_exit
         self._on_error = on_error
+        self._on_lost = on_lost
         self._extra = tuple(extra)
         self._env = dict(env) if env is not None else None
 
@@ -686,26 +731,23 @@ class MpvPlayer:
 
     def _start_reader(self) -> None:
         assert self._reader is not None
+        reader = self._reader
 
-        def read_loop() -> None:
-            while not self._closing:
-                try:
-                    line = self._reader.readline()
-                except (TimeoutError, socket.timeout):
-                    # 连接后已经恢复阻塞，这里只是兜底：读线程一旦退出，
-                    # 界面就再也收不到 file-loaded 了
-                    continue
-                except (OSError, ValueError) as exc:
-                    if not self._closing:
-                        self._log.append(f"mpv IPC 读线程退出：{exc}")
-                    break
-                if not line:
-                    break
-                message = parse_message(line)
-                if message is not None:
-                    self._dispatch(message)
+        def lost() -> None:
+            if self._on_lost is not None:
+                self._safe(self._on_lost)
 
-        thread = threading.Thread(target=read_loop, name="ncmgui-mpv-read", daemon=True)
+        thread = threading.Thread(
+            target=pump_events,
+            args=(reader, self._dispatch),
+            kwargs={
+                "is_closing": lambda: self._closing,
+                "on_lost": lost,
+                "log": self._log.append,
+            },
+            name="ncmgui-mpv-read",
+            daemon=True,
+        )
         thread.start()
         self._threads.append(thread)
 
@@ -733,7 +775,8 @@ class MpvPlayer:
         try:
             if process.poll() is None:
                 self._send(encode_command(["quit"]))
-        except OSError:
+        except (OSError, PlayerError):
+            # mpv 已经卡死或连接已经断了：下面直接 terminate
             pass
 
         try:
@@ -785,11 +828,49 @@ class MpvPlayer:
             raise PlayerError("mpv 还没有就绪")
         with self._write_lock:
             if isinstance(writer, socket.socket):
-                writer.sendall(data)
+                self._send_socket(writer, data)
             else:
                 written = writer.write(data)  # type: ignore[union-attr]
                 if written != len(data):  # pragma: no cover - 管道写一半很少见
                     raise PlayerError("写入 mpv IPC 时数据被截断")
+
+    @staticmethod
+    def _send_socket(
+        sock: socket.socket, data: bytes, timeout: float = IPC_WRITE_TIMEOUT
+    ) -> None:
+        """分片写 socket，每片之前用 select 等可写，整体最多等 ``timeout`` 秒。
+
+        socket 本身保持阻塞（读线程要靠它一直等），所以不能靠 ``settimeout``
+        限制写。命令通常只有几十字节、socket 缓冲一下就收下，这里的等待几乎
+        从不发生；只有 mpv 被挂起、缓冲被写满时才会超时，主线程不会被拖死。
+        """
+        view = memoryview(data)
+        deadline = time.monotonic() + timeout
+        # 光靠 select 不够：它只保证「现在至少能写一点」，随后在**阻塞**
+        # socket 上 send 一大块仍然会一直等到整块写完。mpv 被挂起、缓冲区
+        # 只剩几十字节时，主线程就又卡住了。MSG_DONTWAIT 让每次 send 立刻
+        # 返回实际写入的字节数，超时由上面的 deadline 统一控制。
+        flags = getattr(socket, "MSG_DONTWAIT", 0)
+        while view:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PlayerError("写入 mpv IPC 超时，播放器可能已经卡死")
+            try:
+                _, ready, _ = select.select([], [sock], [], remaining)
+            except (OSError, ValueError) as exc:
+                raise PlayerError(f"写入 mpv IPC 失败：{exc}") from exc
+            if not ready:
+                raise PlayerError("写入 mpv IPC 超时，播放器可能已经卡死")
+            try:
+                sent = sock.send(view, flags)
+            except BlockingIOError:
+                # 这一瞬间又写不进去了，回到 select 继续等
+                continue
+            except (OSError, ValueError) as exc:
+                raise PlayerError(f"写入 mpv IPC 失败：{exc}") from exc
+            if sent <= 0:
+                raise PlayerError("写入 mpv IPC 失败：连接已断开")
+            view = view[sent:]
 
     def command(self, *args: object, request_id: int | None = None) -> int:
         """发送一条原生命令，返回 request_id（未指定时自动分配）。"""
@@ -1077,6 +1158,61 @@ def _selftest() -> int:
             else:
                 failed = False
             check("IPC 连接失败抛 OSError", failed, True)
+
+    # ---- 写方向有界：对端不读时不能无限阻塞主线程
+    # （Windows 走命名管道，不是 socket，这条路径用不上；MSG_DONTWAIT
+    #  在那边也不一定有，所以只在 POSIX 上测）
+    if sys.platform != "win32":
+        pair = socket.socketpair()
+        try:
+            pair[0].setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            timed_out = False
+            try:
+                MpvPlayer._send_socket(pair[0], b"x" * (4 * 1024 * 1024), timeout=0.2)
+            except PlayerError:
+                timed_out = True
+            check("IPC 对端不读时写操作会超时", timed_out, True)
+        finally:
+            pair[0].close()
+            pair[1].close()
+
+    # ---- 读线程主循环：不依赖 Unix socket，Windows 上同样覆盖
+    class FlakyReader:
+        """前两次读超时，之后按顺序吐出预置的行。"""
+
+        def __init__(self, lines):
+            self.lines = list(lines)
+            self.timeouts = 0
+
+        def readline(self):
+            if self.timeouts < 2:
+                self.timeouts += 1
+                raise TimeoutError("timed out")
+            return self.lines.pop(0) if self.lines else b""
+
+    dispatched: list[str] = []
+    lost_calls: list[bool] = []
+    pump_events(
+        FlakyReader(
+            [
+                b'{"event":"file-loaded"}\n',
+                b'{"event":"end-file","reason":"eof"}\n',
+            ]
+        ),
+        lambda message: dispatched.append(message.name),
+        on_lost=lambda: lost_calls.append(True),
+    )
+    check("读超时后继续解析后续事件", dispatched, ["file-loaded", "end-file"])
+    check("连接断开时回调 on_lost", lost_calls, [True])
+
+    lost_calls = []
+    pump_events(
+        FlakyReader([]),
+        lambda message: None,
+        is_closing=lambda: True,
+        on_lost=lambda: lost_calls.append(True),
+    )
+    check("主动关闭不回调 on_lost", lost_calls, [])
 
     # ---- 查找优先级：显式路径最优先
     with tempfile.TemporaryDirectory(prefix="ncmgui-player-test-") as tmp:

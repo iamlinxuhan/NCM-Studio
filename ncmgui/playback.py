@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import random
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
@@ -74,6 +75,14 @@ STATE_ERROR = "error"
 #: 随机播放时记住多少首历史，供「上一首」回退
 _HISTORY_LIMIT = 200
 
+#: 发出 loadfile 之后最多等多久。本地文件与直链都是秒级加载，超过这个时间
+#: 还没有 ``file-loaded``，说明事件通道或 mpv 本身已经出问题了。
+_LOAD_TIMEOUT = 12.0
+
+#: 自动恢复的节流：60 秒内最多重启 3 次，避免 mpv 一崩就无限重生。
+_RECOVER_WINDOW = 60.0
+_RECOVER_LIMIT = 3
+
 
 class PlaybackController(QObject):
     """一份全局播放状态。窗口里只应该有这一个实例。"""
@@ -90,6 +99,10 @@ class PlaybackController(QObject):
     #: mpv 事件从读线程发回来，走队列连接
     _playerEvent = pyqtSignal(str, object)
     _playerFailed = pyqtSignal(str)
+    #: 事件通道断了 / mpv 进程意外退出。带上出事的那个 MpvPlayer 对象，
+    #: 免得旧播放器的迟到通知把刚换上的新播放器也当成死的
+    _playerLost = pyqtSignal(object)
+    _playerExited = pyqtSignal(object, int)
 
     def __init__(
         self,
@@ -124,9 +137,13 @@ class PlaybackController(QObject):
         self._wanted: tuple[int, Song, str] | None = None
         self._fetch_task: BackgroundTask | None = None
         self._awaiting_load = False
+        #: 这次装载开始的时刻；watchdog 据此判断 mpv 是否已经卡住
+        self._awaiting_since: float | None = None
         #: 装载完成前拖动的目标位置，file-loaded 之后再真正发给 mpv
         self._pending_seek: float | None = None
         self._shutting_down = False
+        #: 最近几次自动恢复的时刻，用于节流
+        self._recover_times: list[float] = []
 
         #: 进度外推的锚点：mpv 的 time-pos 按整秒节流，界面 250ms 刷一次
         self._anchor_pos = 0.0
@@ -134,7 +151,8 @@ class PlaybackController(QObject):
 
         self._playerEvent.connect(self._on_player_event)
         self._playerFailed.connect(self._on_player_error)
-        self.playerExited.connect(self._on_player_exited)
+        self._playerLost.connect(self._on_player_lost)
+        self._playerExited.connect(self._on_player_exited)
 
         self._ticker = QTimer(self)
         self._ticker.setInterval(250)
@@ -426,6 +444,11 @@ class PlaybackController(QObject):
     # ------------------------------------------------------------ 起播
 
     def _start_song(self, song: Song) -> None:
+        # 上一次取链如果还在飞，先把结果作废：否则它回来时会把刚点的新歌
+        # 顶掉（本地文件这条路以前不会推进 token）
+        self._play_token += 1
+        self._wanted = None
+
         self._current = song
         self._position = 0.0
         self._anchor_pos = 0.0
@@ -433,6 +456,8 @@ class PlaybackController(QObject):
         self._duration = song.duration / 1000 if song.duration else 0.0
         self._paused = False
         self._awaiting_load = True
+        #: 真正的装载时刻要等 _load() 发出命令；取链阶段不该被 watchdog 误判
+        self._awaiting_since = None
         self._pending_seek = None
         self.positionChanged.emit(0.0, self._duration)
         self._emit_track()
@@ -516,6 +541,9 @@ class PlaybackController(QObject):
             self._fail(str(exc))
             return
 
+        # 从这一刻起等 file-loaded；watchdog 会盯着，超时就重启播放器
+        self._awaiting_since = time.monotonic()
+
         if source is not None and getattr(source, "trial", False):
             self.errorRaised.emit(
                 f"《{self._current.name if self._current else ''}》只是试听片段 —— "
@@ -530,13 +558,28 @@ class PlaybackController(QObject):
         if binary is None:
             raise player.MpvNotFound(self._missing_mpv_message())
 
+        # 回调在 mpv 自己的线程里触发；先把对象放进 holder，回调才能把
+        # 「出事的是哪一个播放器」一并带回来。恢复流程里旧播放器的迟到
+        # 通知必须能和新播放器区分开。
+        holder: list[player.MpvPlayer] = []
+
+        def exited(code: int) -> None:
+            if holder:
+                self._playerExited.emit(holder[0], code)
+
+        def lost() -> None:
+            if holder:
+                self._playerLost.emit(holder[0])
+
         mpv = player.MpvPlayer(
             binary,
             on_event=self._playerEvent.emit,
-            on_exit=self.playerExited.emit,
+            on_exit=exited,
             on_error=self._playerFailed.emit,
+            on_lost=lost,
             volume=self._volume,
         )
+        holder.append(mpv)
         mpv.start()
         self._player = mpv
         return mpv
@@ -574,6 +617,7 @@ class PlaybackController(QObject):
 
         if kind == "file-loaded":
             self._awaiting_load = False
+            self._awaiting_since = None
             # mpv 用 --pause=yes 启动（防止进程一拉起就出声），装载完要按
             # 界面上的暂停状态同步一次 —— 装载期间用户可能已经点过暂停，
             # 无条件解除会把那次点击吞掉
@@ -611,6 +655,12 @@ class PlaybackController(QObject):
                 if value is None:
                     # 属性暂时不可用（比如 idle）时别当成 False，否则界面
                     # 会在用户刚点完暂停后被这次空事件改回播放
+                    return
+                if self._awaiting_load:
+                    # 装载期间 mpv 会自己回一条 pause=false（loadfile 之后
+                    # 我们显式解除过暂停）。用户在这期间点的暂停已经写进
+                    # _paused，别让这条回声把它覆盖掉 —— 否则从暂停状态
+                    # 自动恢复时，新播放器会直接开始播放。
                     return
                 self._paused = bool(value)
                 self._anchor_pos = self._position
@@ -654,17 +704,96 @@ class PlaybackController(QObject):
         self.next(manual=False)
         # order 模式在末尾停下时 next 已经把状态置 idle；这里不用再做什么
 
-    def _on_player_exited(self, code: int) -> None:
-        if self._shutting_down:
+    def _on_player_lost(self, gone: object) -> None:
+        """IPC 读线程断了：mpv 进程也许还在，但已经收不到任何事件。"""
+        if self._shutting_down or gone is not self._player:
+            return
+        self._recover_player("事件通道断开")
+
+    def _on_player_exited(self, gone: object, code: int) -> None:
+        if self._shutting_down or gone is not self._player:
+            # 主动停掉或已经被恢复流程替换掉的旧播放器，不用管
             return
         self._player = None
+
+        recoverable = (
+            self._current is not None
+            and self._state in (STATE_LOADING, STATE_PLAYING, STATE_PAUSED)
+        )
+        if recoverable:
+            # 自动恢复成功后不弹错误，用户只会听到音乐停一下又接上
+            self._recover_player(f"播放器意外退出（{code}）")
+            return
+
         self._set_state(STATE_IDLE)
+        self.playerExited.emit(code)
         self.errorRaised.emit(f"播放器意外退出（{code}），点播放可以重新启动。")
 
     def _on_player_error(self, message: str) -> None:
         if self._shutting_down:
             return
         self.errorRaised.emit(message)
+
+    def _recover_player(self, reason: str) -> None:
+        """mpv 死了或者卡住了：按原歌曲、原进度、原暂停状态重新拉起来。
+
+        只在真的有歌在播/在装载时调用。短时间内反复失败就停下并报错，
+        否则一个坏掉的 mpv 会陷入「崩溃 → 重启 → 再崩溃」的死循环。
+        """
+        if self._shutting_down:
+            return
+
+        gone = self._player
+        self._player = None
+        self._awaiting_load = False
+        self._awaiting_since = None
+        if gone is not None:
+            # stop() 可能要在退出命令上等几秒；别让它卡住界面线程
+            threading.Thread(
+                target=self._dispose_player,
+                args=(gone,),
+                name="ncmgui-mpv-dispose",
+                daemon=True,
+            ).start()
+
+        if self._current is None or self._state not in (
+            STATE_LOADING,
+            STATE_PLAYING,
+            STATE_PAUSED,
+        ):
+            self._set_state(STATE_IDLE)
+            return
+
+        now = time.monotonic()
+        self._recover_times = [
+            stamp for stamp in self._recover_times if now - stamp < _RECOVER_WINDOW
+        ]
+        if len(self._recover_times) >= _RECOVER_LIMIT:
+            self._fail(f"播放器连续出错（{reason}），已停止自动恢复，请重新点播。")
+            return
+        self._recover_times.append(now)
+
+        position = self._position
+        paused = self._paused
+        song = self._current
+
+        self._start_song(song)
+
+        # _start_song 会把进度清零、暂停状态复位；这里接回用户看到的位置
+        self._paused = paused
+        self._anchor_pos = position
+        self._anchor_at = time.monotonic()
+        if position > 0:
+            self._pending_seek = position
+            self._position = position
+            self.positionChanged.emit(position, self._duration)
+
+    @staticmethod
+    def _dispose_player(mpv: player.MpvPlayer) -> None:
+        try:
+            mpv.stop()
+        except Exception:  # noqa: BLE001 - 清理失败不该影响新的播放器
+            pass
 
     # ------------------------------------------------------------ 内部
 
@@ -675,6 +804,7 @@ class PlaybackController(QObject):
         return random.choice(choices)
 
     def _tick(self) -> None:
+        self._check_loading()
         if self._state != STATE_PLAYING or self._paused or self._current is None:
             return
         elapsed = max(0.0, time.monotonic() - self._anchor_at)
@@ -684,9 +814,30 @@ class PlaybackController(QObject):
         self._position = position
         self.positionChanged.emit(position, self._duration)
 
+    def _check_loading(self) -> None:
+        """装载看门狗：mpv 没崩、但 ``file-loaded`` 迟迟不来。
+
+        事件通道断掉时 ``on_lost`` 会通知；这里兜住另一种情况 —— 连接还在、
+        mpv 却因为某种原因不再响应。取链阶段（``_wanted`` / ``_fetch_task``）
+        不算，网络慢不能怪 mpv。
+        """
+        if (
+            self._state != STATE_LOADING
+            or not self._awaiting_load
+            or self._awaiting_since is None
+            or self._wanted is not None
+            or (self._fetch_task is not None and self._fetch_task.is_running)
+        ):
+            return
+        if time.monotonic() - self._awaiting_since <= _LOAD_TIMEOUT:
+            return
+        self._recover_player("加载超时")
+
     def _hard_stop(self) -> None:
         self._play_token += 1
         self._wanted = None
+        self._awaiting_load = False
+        self._awaiting_since = None
         if self._player is not None and self._player.running:
             try:
                 self._player.stop_playback()
@@ -694,6 +845,8 @@ class PlaybackController(QObject):
                 pass
 
     def _fail(self, message: str) -> None:
+        self._awaiting_load = False
+        self._awaiting_since = None
         self._set_state(STATE_ERROR)
         self.errorRaised.emit(message)
 
