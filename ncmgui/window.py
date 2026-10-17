@@ -333,14 +333,17 @@ class MainWindow(QMainWindow):
         self.toast("播放器已退出" + (f"（代码 {code}）" if code else ""))
 
     def check_updates_on_start(self) -> None:
-        """启动后静默检查一次新版；失败不打扰用户。"""
+        """启动后检查一次新版；发现新版直接弹窗问用户要不要安装。
+
+        检查本身失败仍然静默，不拿网络问题打扰启动。
+        """
         if not self.cfg.get("update", {}).get("check_on_start", True):
             return
         page = self.pages.get("settings")
         hook = getattr(page, "check_updates", None)
         if callable(hook):
             try:
-                hook(silent=True)
+                hook(silent=True, prompt=True)
             except (RuntimeError, TypeError):
                 pass
 

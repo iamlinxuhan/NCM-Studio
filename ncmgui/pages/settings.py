@@ -283,7 +283,7 @@ class SettingsPage(BasePage):
         self.app_check_on_start = card.add_switch(
             "每次启动检查更新",
             bool(self.cfg.get("update.check_on_start", True)),
-            hint="只在后台静默检查，发现新版会在状态栏提示，不会自动安装。",
+            hint="启动时在后台检查，发现新版会弹窗询问是否安装；检查失败不打扰。",
         )
 
         self.content.addWidget(card)
@@ -315,8 +315,12 @@ class SettingsPage(BasePage):
         else:
             self.app_install_btn.setToolTip("下载、校验并替换当前程序，然后重启")
 
-    def check_updates(self, silent: bool = False) -> None:
-        """查询 GitHub 最新 Release。``silent=True`` 时不弹错误框。"""
+    def check_updates(self, silent: bool = False, prompt: bool = False) -> None:
+        """查询 GitHub 最新 Release。
+
+        ``silent=True`` 时不弹检查失败的提示；``prompt=True`` 时发现新版就
+        直接弹窗问用户要不要安装（启动时用）。
+        """
         if self._update_task is not None and self._update_task.is_running:
             return
         proxy = self.app_proxy.text().strip()
@@ -328,7 +332,7 @@ class SettingsPage(BasePage):
 
         task = BackgroundTask(lambda: updater.fetch_release(proxy), parent=self)
         self._update_task = task
-        task.done.connect(lambda release: self._on_release(release, silent))
+        task.done.connect(lambda release: self._on_release(release, silent, prompt))
         task.failed.connect(lambda message: self._on_check_failed(message, silent))
         task.start()
 
@@ -339,7 +343,7 @@ class SettingsPage(BasePage):
         self.app_status.setText(f"检查更新失败：{message}")
         QMessageBox.warning(self, "检查更新失败", message)
 
-    def _on_release(self, release, silent: bool) -> None:
+    def _on_release(self, release, silent: bool, prompt: bool = False) -> None:
         self._release = release
         name = updater.asset_name()
         asset = release.asset(name) if name else None
@@ -374,8 +378,69 @@ class SettingsPage(BasePage):
             self.app_notes.setVisible(False)
 
         self._sync_app_buttons()
-        if silent:
+        if prompt:
+            # 启动时发现新版：直接问要不要装，而不是只在状态栏里提一句
+            self._prompt_app_update(release, asset)
+        elif silent:
             self.window.toast(f"发现新版本 {release.tag}，可在设置中安装。")
+
+    def _prompt_app_update(self, release, asset) -> None:
+        """启动检查发现新版时弹窗，让用户当场决定装不装。"""
+        can_install = (
+            self._kind not in ("source", "unsupported")
+            and self._target is not None
+            and asset is not None
+        )
+
+        # 挂在主窗口上：启动时设置页可能还没显示，挂在隐藏的页面上弹窗会跑偏
+        box = QMessageBox(self.window)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("发现新版本")
+        text = f"发现新版本 <b>{release.tag}</b>（当前 v{VERSION}）。"
+        if asset is not None:
+            text += f"<br>安装包：{asset.name} · {asset.size_mb}"
+        if can_install:
+            text += (
+                "<br><br>下载后会校验 SHA-256，然后替换当前程序并重启。"
+                "现在安装吗？"
+            )
+        elif asset is None:
+            text += "<br><br>该 Release 没有适用于当前平台的安装包，请到 Release 页查看。"
+        elif self._kind == "source":
+            text += "<br><br>源码运行不能自动替换，请到 Release 页下载或 git pull。"
+        else:
+            text += "<br><br>当前运行方式不支持自动安装，请到 Release 页手动下载。"
+        box.setText(text)
+
+        notes = (release.notes or "").strip()
+        if notes:
+            box.setDetailedText(notes[:4000])
+            # Qt 自带翻译没加载时这里显示英文，统一改成中文
+            for button in box.buttons():
+                if box.buttonRole(button) == QMessageBox.ButtonRole.ActionRole:
+                    button.setText("Release 说明")
+
+        open_btn = None
+        if can_install:
+            ok = QMessageBox.StandardButton.Ok
+            cancel = QMessageBox.StandardButton.Cancel
+            box.setStandardButtons(ok | cancel)
+            box.button(ok).setText("下载并安装")
+            box.button(cancel).setText("稍后再说")
+            box.setDefaultButton(cancel)
+        else:
+            open_btn = box.addButton(
+                "打开 Release 页", QMessageBox.ButtonRole.AcceptRole
+            )
+            box.addButton("稍后再说", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(open_btn)
+
+        box.exec()
+        if can_install:
+            if box.clickedButton() is box.button(QMessageBox.StandardButton.Ok):
+                self._start_install()
+        elif box.clickedButton() is open_btn:
+            QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE))
 
     def _install_app_update(self) -> None:
         release, asset, target = self._release, self._app_asset, self._target
@@ -405,6 +470,16 @@ class SettingsPage(BasePage):
         box.button(QMessageBox.StandardButton.Cancel).setText("取消")
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         if box.exec() != QMessageBox.StandardButton.Ok:
+            return
+        self._start_install()
+
+    def _start_install(self) -> None:
+        """真正开始下载、校验、替换；启动弹窗和「下载并安装」都走这里。"""
+        release, asset, target = self._release, self._app_asset, self._target
+        kind = self._kind
+        if release is None or asset is None or target is None:
+            return
+        if kind in ("source", "unsupported") or self._installing:
             return
 
         proxy = self.app_proxy.text().strip()

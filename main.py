@@ -440,7 +440,8 @@ def main(argv: list[str] | None = None) -> int:
     if screenshot_dir:
         return _screenshot(window, screenshot_dir)
 
-    # 启动后稍等片刻再静默检查更新：先把主界面画出来，别让网络拖慢启动
+    # 启动后稍等片刻再检查更新：先把主界面画出来，别让网络拖慢启动；
+    # 发现新版会弹窗询问是否安装
     QTimer.singleShot(2500, window.check_updates_on_start)
     return app.exec()
 
