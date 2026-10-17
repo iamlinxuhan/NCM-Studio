@@ -916,6 +916,11 @@ def smoke_test(binary: str, timeout: float = 20.0) -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 
 def _selftest() -> int:
+    # Windows 上输出被重定向时是 cp1252，中文失败说明会在 print 时再炸一次，
+    # 真正的失败项反而看不到
+    from . import ensure_utf8_stdout
+
+    ensure_utf8_stdout()
     failures: list[str] = []
 
     def check(name: str, got: object, want: object) -> None:
@@ -925,7 +930,9 @@ def _selftest() -> int:
     # ---- 端点
     unix = ipc_endpoint(windows=False, token="t1")
     check("POSIX 端点类型", unix.kind, "unix")
-    check("POSIX 端点在临时目录里", "/ncmgui-mpv-" in unix.value, True)
+    # Windows 的 os.path.join 用反斜杠，不能拿 "/ncmgui-mpv-" 去匹配整条路径；
+    # 断言目录名本身，Linux 与 Windows 都成立
+    check("POSIX 端点在临时目录里", "ncmgui-mpv-" in Path(unix.value).parent.name, True)
     check("POSIX 路径足够短", len(unix.value.encode()) < 100, True)
     shutil.rmtree(unix.cleanup_dir, ignore_errors=True)
 

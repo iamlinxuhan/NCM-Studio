@@ -588,10 +588,12 @@ def _selftest() -> int:
         else:
             check("源码运行拒绝安装", False, True)
 
-        # Windows 脚本只是生成文本，不执行
-        script = windows_replace_script(Path("C:/x/a.new"), Path("C:/x/a.exe"), 4321)
+        # Windows 脚本只是生成文本，不执行。路径片段要拿 str(Path) 现算 ——
+        # 在 Windows 上它会变成反斜杠，写死 "C:/x/a.new" 只在 Linux 上成立
+        new_path, target_path = Path("C:/x/a.new"), Path("C:/x/a.exe")
+        script = windows_replace_script(new_path, target_path, 4321)
         for fragment in ("Wait-Process -Id 4321", "Move-Item", "Start-Process",
-                         "'C:/x/a.new'", "'C:/x/a.exe'"):
+                         f"'{new_path}'", f"'{target_path}'"):
             check(f"Windows 脚本含 {fragment}", fragment in script, True)
         check("单引号被转义",
               "''" in windows_replace_script(Path("C:/it's/a.new"), Path("C:/it's/a.exe"), 1),
