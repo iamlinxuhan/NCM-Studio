@@ -37,6 +37,10 @@ NAME = os.environ.get("NCMGUI_BUILD_NAME", "ncmctl-gui")
 #: 一个不含 ncmctl 的包发出去，用户那边是直接不能用
 REQUIRE_NCMCTL = os.environ.get("NCMGUI_BUNDLE_NCMCTL") == "1"
 
+#: 同理，但针对 mpv。Linux / Windows 的产物必须带播放器，否则「流媒体播放」
+#: 这个主打功能在新机器上是坏的（用户还得自己去装 mpv）；macOS 不设这一项。
+REQUIRE_MPV = os.environ.get("NCMGUI_BUNDLE_MPV") == "1"
+
 datas: list = []
 binaries: list = []
 hiddenimports: list = []
@@ -82,6 +86,42 @@ for license_name in ("LICENSE", "README.md"):
     license_file = HERE / "vendor" / license_name
     if license_file.is_file():
         datas.append((str(license_file), "ncmgui/assets/ncmctl"))
+
+# ── mpv ─────────────────────────────────────────────────────────────────────
+# 「我喜欢的音乐」用 mpv 播流媒体。它落地到包里的 ``mpv/`` 目录 —— 与
+# ncmgui.player 里的 ``BUNDLED_DIR`` 一致；onefile 与 onedir 都会变成
+# ``_MEIPASS/mpv/``，所以 find_mpv() 只需要认这一个位置。
+#
+# Linux 上 mpv 是动态链接的，它的共享库放在 ``mpv/lib/``，由
+# player.child_env() 前置进 LD_LIBRARY_PATH；Windows 则是一堆 .dll 平铺在
+# ``mpv/`` 里。
+mpv_dir = HERE / "vendor" / "mpv"
+mpv_exe = mpv_dir / ("mpv.exe" if sys.platform == "win32" else "mpv")
+if mpv_exe.is_file():
+    binaries.append((str(mpv_exe), "mpv"))
+
+    lib_dir = mpv_dir / "lib"
+    if lib_dir.is_dir():
+        for lib in sorted(lib_dir.glob("*")):
+            if lib.is_file():
+                binaries.append((str(lib), "mpv/lib"))
+
+    for dll in sorted(mpv_dir.glob("*.dll")):
+        binaries.append((str(dll), "mpv"))
+
+    # 许可与来源说明。分发 GPL 二进制必须带上
+    for extra in sorted(mpv_dir.glob("COPYRIGHT*")) + sorted(mpv_dir.glob("LICENSE*")):
+        datas.append((str(extra), "ncmgui/assets/mpv"))
+    notice = mpv_dir / "NOTICE.txt"
+    if notice.is_file():
+        datas.append((str(notice), "ncmgui/assets/mpv"))
+else:
+    if REQUIRE_MPV:
+        raise SystemExit(
+            f"NCMGUI_BUNDLE_MPV=1 但找不到 {mpv_exe}\n"
+            "先跑 python3 scripts/fetch_mpv.py"
+        )
+    warnings.warn(f"未找到 {mpv_exe}，本次产物不含播放器")
 
 a = Analysis(
     ["main.py"],

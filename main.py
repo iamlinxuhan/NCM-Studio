@@ -40,7 +40,17 @@ def _self_test(window: MainWindow) -> int:
 
     problems: list[str] = []
 
-    expected = {"account", "download", "ncm", "cloud", "tasks", "proxy", "tools", "settings"}
+    expected = {
+        "account",
+        "liked",
+        "download",
+        "ncm",
+        "cloud",
+        "tasks",
+        "proxy",
+        "tools",
+        "settings",
+    }
     missing = expected - set(window.pages)
     if missing:
         problems.append(f"缺少页面：{sorted(missing)}")
@@ -66,6 +76,41 @@ def _self_test(window: MainWindow) -> int:
             f"（按钮 {'可用' if button.isEnabled() else '禁用'}，"
             f"当前 {'已登录' if window.is_logged_in() else '未登录'}）"
         )
+
+    # 红心歌单页在启动时**不应该**联网、也不应该拉起播放器 —— 用户可能只是想
+    # 下载几首歌，没必要为一个没打开过的页面付出 20 秒的接口等待
+    liked = window.pages.get("liked")
+    if liked is not None:
+        table = getattr(liked, "table", None)
+        model = table.model() if table is not None else None
+        if model is None:
+            problems.append("红心歌单页没有表格模型")
+        else:
+            headers = [model.headerData(i, Qt.Orientation.Horizontal) for i in range(model.columnCount())]
+            if len(headers) != 6:
+                problems.append(f"红心歌单表格应为 6 列，实际 {len(headers)} 列：{headers}")
+            elif headers[:3] != ["#", "歌名", "歌手"]:
+                problems.append(f"红心歌单表头不对：{headers}")
+        if getattr(liked, "_player", None) is not None:
+            problems.append("自检时不该启动播放器")
+
+    # 播放器 IPC 的编解码是纯 Python，离线验得到；mpv 二进制本身由 CI 另行冒烟
+    try:
+        from ncmgui import player as player_mod
+
+        line = player_mod.encode_command(["loadfile", "https://example.com/a.mp3", "replace"])
+        message = player_mod.parse_message(line.decode("utf-8"))
+        if message is None or message.raw.get("command") is None:
+            problems.append("播放器命令编码/解析往返失败")
+        elif message.raw["command"][2] != "replace":
+            problems.append("播放器命令参数在往返中被改动")
+        event = player_mod.parse_message('{"event": "end-file", "reason": "eof"}')
+        if event is None or event.kind != "event" or player_mod.end_reason(event) != "eof":
+            problems.append("播放器 end-file 事件解析异常")
+        if player_mod.format_clock(222) != "03:42":
+            problems.append("播放器时长格式化异常（222 秒不是 03:42）")
+    except Exception as exc:  # pragma: no cover - 自检路径
+        problems.append(f"播放器模块自检失败：{exc!r}")
 
     # 控制台的着色与进度覆盖逻辑是最容易写错的部分，单独跑一遍
     try:
@@ -128,6 +173,8 @@ def _screenshot(window: MainWindow, target: str) -> int:
     out_dir = Path(target).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 截图只是画界面，不该顺手去拉歌单
+    window.defer_page_loads = True
     window.resize(1180, 820)
     for index, (key, _glyph, _label, _cls) in enumerate(NAV_ITEMS):
         window.show_page(key)
@@ -158,6 +205,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if self_test:
         args = [a for a in args if a != "--self-test"]
+
+    # 必须在建 QApplication **之前**处理：这条命令的唯一用途就是在无显示环境
+    # （CI、SSH）里证明「随包的 mpv 真的能跑起来」。若先建 QApplication，
+    # 没有 X11/Wayland 时会直接失败，报的还是 Qt 的错误，看不出 mpv 的死活。
+    if "--mpv-version" in args:
+        ensure_utf8_stdout()
+        from ncmgui import player as player_mod
+
+        binary = player_mod.find_mpv()
+        if not binary:
+            print("未找到 mpv")
+            return 1
+        print(f"mpv：{binary}")
+        ok, output = player_mod.probe_mpv(binary)
+        print(output)
+        return 0 if ok else 1
 
     if self_test or screenshot_dir:
         # 这两条路径都要往标准输出打中文。Windows 上输出被重定向时 Python 用的是

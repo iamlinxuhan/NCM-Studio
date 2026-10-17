@@ -118,6 +118,12 @@ def _defaults() -> dict[str, Any]:
             "parallel": 3,
             "regexp": "",
         },
+        # 流媒体播放。mpv_path 留空表示「随包 → PATH → 常见目录」依次探测
+        "player": {
+            "mpv_path": "",
+            "level": "exhigh",
+            "volume": 70,
+        },
         "crypto": {"output": ""},
         "curl": {"output": "", "kind": "weapi", "timeout": "15s"},
         "proxy": {"listen": "127.0.0.1:9000", "max_body": "1MB"},

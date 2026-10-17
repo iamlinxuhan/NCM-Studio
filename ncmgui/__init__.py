@@ -4,7 +4,7 @@ import sys
 
 APP_NAME = "ncmctl GUI"
 APP_ID = "ncmctl-gui"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 #: 随程序分发的 ncmctl 版本。
 #:

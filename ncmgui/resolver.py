@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from . import ncmctl
+from .player import AudioSource, format_clock
 
 #: 与 ncmctl ``internal/ncmctl/utils.go`` 的 urlPattern 保持一致
 URL_RE = re.compile(r"/(song|artist|album|playlist)\?id=(\d+)")
@@ -60,6 +61,31 @@ PLAYLIST_URL = "https://music.163.com/playlist?id={}"
 
 class ResolveError(RuntimeError):
     """解析目标或调用 API 失败。消息直接面向用户，不夹带英文堆栈。"""
+
+
+class SongUrlError(ResolveError):
+    """取播放地址失败。
+
+    ``SongDownloadUrlV1`` 把失败原因放在 ``data.code`` 里，顶层 ``code`` 仍是 200，
+    所以 :meth:`Resolver._curl` 不会替我们拦下来 —— 这个异常就是那一层的翻译。
+    """
+
+    #: 网易云接口的失败码；拿不到时为 0
+    code: int
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def retryable(self) -> bool:
+        """-103 是限流，过一会儿重试有意义。"""
+        return self.code == -103
+
+    @property
+    def needs_login(self) -> bool:
+        """301 表示登录失效。"""
+        return self.code == 301
 
 
 # --------------------------------------------------------------------------- #
@@ -133,10 +159,24 @@ class Song:
     artists: tuple[str, ...] = ()
     #: 付费类型，含义见 ``_FEE_LABELS``；0 表示免费
     fee: int = 0
+    #: 专辑名。列表页要显示，下载用不到；默认空串保证老调用点不受影响
+    album: str = ""
+    #: 时长，**毫秒**（接口的 ``dt`` 就是这个单位）
+    duration: int = 0
 
     @property
     def base(self) -> str:
         return song_base(self.name, self.artists)
+
+    @property
+    def duration_text(self) -> str:
+        """``03:42`` 这样的时长；接口没给时是 ``--:--``。"""
+        return format_clock(self.duration / 1000 if self.duration else None)
+
+    @property
+    def search_text(self) -> str:
+        """列表页搜索用的合并文本：歌名 + 歌手 + 专辑。"""
+        return " ".join(part for part in (self.name, *self.artists, self.album) if part)
 
     @property
     def display(self) -> str:
@@ -332,6 +372,68 @@ class FeeTagger:
 # 输出目录扫描
 # --------------------------------------------------------------------------- #
 
+def order_songs(ids: Sequence[int], songs: Iterable[Song]) -> list[Song]:
+    """按给定的 ID 顺序重排歌曲清单。
+
+    ``SongDetail`` 是分批请求的，接口不保证返回顺序与请求顺序一致；而列表页的
+    序号、上一首/下一首都依赖歌单的原始顺序。少了的 id 直接跳过（下架/无版权）。
+    """
+    by_id = {song.id: song for song in songs}
+    return [by_id[song_id] for song_id in ids if song_id in by_id]
+
+
+#: ``SongDownloadUrlV1`` 的 ``data.code`` 含义。与网易云的约定一致
+_URL_ERRORS = {
+    404: "歌曲不存在或已下架（版权受限）",
+    -103: "请求过于频繁，请稍后再试",
+    -105: "需要 VIP 会员或购买后才能播放这首歌",
+    -110: "当前账号或网络无权播放（可能登录失效或受地区限制）",
+    301: "登录已失效，请重新登录",
+}
+
+
+def parse_song_url(payload: dict) -> AudioSource:
+    """把 ``SongDownloadUrlV1`` 的响应翻译成播放地址。
+
+    **失败码在 ``data.code`` 里**，顶层 ``code`` 通常仍是 200 —— 只看顶层会把
+    「无版权」「要会员」当成成功，然后拿着空 URL 去调 mpv。
+    """
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise SongUrlError(0, "接口没有返回播放地址（可能已下架或没有版权）")
+
+    raw_code = data.get("code")
+    if raw_code is None:
+        raw_code = payload.get("code")
+    try:
+        code = int(raw_code or 0)
+    except (TypeError, ValueError):
+        code = 0
+
+    if code != 200:
+        message = _URL_ERRORS.get(code) or str(
+            data.get("message") or f"接口返回 code={code}"
+        )
+        raise SongUrlError(code, message)
+
+    url = str(data.get("url") or "").strip()
+    if not url:
+        raise SongUrlError(code, "接口没有返回播放地址（可能已下架或没有版权）")
+
+    try:
+        expi = int(data.get("expi") or 600)
+    except (TypeError, ValueError):
+        expi = 600
+
+    return AudioSource(
+        url=url,
+        level=str(data.get("level") or ""),
+        expi=expi,
+        # freeTrialInfo 非空 = 这是 30 秒试听片段
+        trial=bool(data.get("freeTrialInfo")),
+    )
+
+
 def existing_bases(directory: str | os.PathLike[str]) -> set[str]:
     """列出目录下所有文件名的主干（含 ncmctl 的 ``(N)`` 变体）。
 
@@ -507,6 +609,31 @@ class Resolver:
         # 老账号：歌单 ID 就是 UID
         return uid, "我喜欢的音乐"
 
+    def liked_songs(self) -> list[Song]:
+        """取「我喜欢的音乐」的完整歌曲清单，保持歌单顺序。"""
+        playlist_id, name = self.liked_playlist()
+        self.notify(f"正在读取「{name}」…")
+
+        ids = self.expand("playlist", playlist_id)
+        self.notify(f"「{name}」共 {len(ids)} 首，正在获取歌曲信息…")
+
+        songs = order_songs(ids, self.song_details(ids))
+        if not songs:
+            raise ResolveError("红心歌单里没有可用的歌曲（曲目可能都已下架）")
+        return songs
+
+    def song_url(self, song_id: int, level: str = "exhigh") -> AudioSource:
+        """取一首歌的播放直链。
+
+        ``level`` 取值与下载页一致：standard / higher / exhigh / lossless / hires。
+        非会员请求高音质时，接口通常退回一个能给的档位（``AudioSource.level``
+        是**实际**拿到的），拿不到就是 :class:`SongUrlError`。
+        """
+        payload = self._curl(
+            "SongDownloadUrlV1", {"id": str(song_id), "level": level}
+        )
+        return parse_song_url(payload)
+
     # ------------------------------------------------------------- 目标展开
 
     def expand(self, kind: str, target_id: int) -> list[int]:
@@ -600,6 +727,11 @@ class Resolver:
                     song_id = int(item["id"])
                 except (KeyError, TypeError, ValueError):
                     continue
+                album = item.get("al") or {}
+                try:
+                    duration = int(item.get("dt") or 0)
+                except (TypeError, ValueError):
+                    duration = 0
                 songs.append(
                     Song(
                         id=song_id,
@@ -608,6 +740,8 @@ class Resolver:
                             (artist.get("name") or "") for artist in item.get("ar") or []
                         ),
                         fee=int(item.get("fee") or 0),
+                        album=str(album.get("name") or "") if isinstance(album, dict) else "",
+                        duration=duration,
                     )
                 )
             if total > batch:
@@ -861,6 +995,100 @@ def _selftest() -> int:
           "[VIP]" in vip_only and "付费专辑" not in vip_only, True)
     check("全免费时不出现图例", "标记含义" not in Plan(songs=[free]).details(), True)
     check("全免费时 report 不提会员", "需会员" not in Plan(songs=[free]).report(), True)
+
+    # ---- 列表页需要的附加字段（都带默认值，老调用点不受影响）
+    plain = Song(7, "晴天", ("周杰伦",))
+    check("album 默认空串", plain.album, "")
+    check("duration 默认 0", plain.duration, 0)
+    check("没有时长显示 --:--", plain.duration_text, "--:--")
+    check("时长格式化", Song(8, "x", duration=222000).duration_text, "03:42")
+    check("超过一小时", Song(9, "x", duration=3661000).duration_text, "1:01:01")
+    check(
+        "搜索文本含歌名歌手专辑",
+        Song(10, "晴天", ("周杰伦",), album="叶惠美").search_text,
+        "晴天 周杰伦 叶惠美",
+    )
+
+    # SongDetail 不保证顺序；列表序号和上一首/下一首都按歌单顺序来
+    a, b, c = Song(1, "a"), Song(2, "b"), Song(3, "c")
+    check("按歌单顺序重排", [s.id for s in order_songs([3, 1, 2], [a, b, c])], [3, 1, 2])
+    check("缺失的 id 跳过", [s.id for s in order_songs([1, 99, 2], [a, b])], [1, 2])
+    check("重复 id 保留两次", [s.id for s in order_songs([1, 1], [a])], [1, 1])
+    check("空输入", order_songs([], []), [])
+
+    # ---- 播放直链：失败码在 data.code 里，顶层 code 仍是 200
+    stream = parse_song_url(
+        {
+            "code": 200,
+            "data": {
+                "code": 200,
+                "url": "https://m801.music.126.net/x.flac",
+                "level": "exhigh",
+                "expi": 1200,
+            },
+        }
+    )
+    check("直链 URL", stream.url, "https://m801.music.126.net/x.flac")
+    check("直链音质", stream.level, "exhigh")
+    check("直链有效期", stream.expi, 1200)
+    check("不是试听", stream.trial, False)
+
+    trial = parse_song_url(
+        {"code": 200, "data": {"code": 200, "url": "u", "freeTrialInfo": {"start": 0}}}
+    )
+    check("freeTrialInfo 标记为试听", trial.trial, True)
+    check("expi 缺省值", trial.expi, 600)
+
+    for code, needle in (
+        (404, "下架"),
+        (-103, "频繁"),
+        (-105, "VIP"),
+        (-110, "无权"),
+        (301, "登录"),
+    ):
+        try:
+            parse_song_url({"code": 200, "data": {"code": code, "url": ""}})
+        except SongUrlError as exc:
+            check(f"code={code} 的提示", needle in str(exc), True)
+            check(f"code={code} 保留原始码", exc.code, code)
+        else:
+            failures.append(f"data.code={code} 应当抛 SongUrlError")
+
+    for code in (-103, 404):
+        try:
+            parse_song_url({"code": 200, "data": {"code": code, "url": ""}})
+        except SongUrlError as exc:
+            check(f"code={code} 是否可重试", exc.retryable, code == -103)
+
+    try:
+        parse_song_url({"code": 200, "data": {"code": 200, "url": ""}})
+    except SongUrlError as exc:
+        check("空 URL 也报错", "播放地址" in str(exc), True)
+    else:
+        failures.append("空 URL 应当抛 SongUrlError")
+
+    try:
+        parse_song_url({"code": 200, "data": None})
+    except SongUrlError:
+        pass
+    else:
+        failures.append("data 不是对象时应当抛 SongUrlError")
+
+    # ---- song_url 的请求形状：id 是字符串，level 原样传
+    class _FakeResolver(Resolver):
+        def __init__(self) -> None:  # 跳过父类的 ncmctl 依赖
+            self.calls: list[tuple[str, dict]] = []
+
+        def _curl(self, method: str, data: dict) -> dict:
+            self.calls.append((method, data))
+            return {"code": 200, "data": {"code": 200, "url": "u", "level": "standard"}}
+
+    fake = _FakeResolver()
+    result = fake.song_url(123, "lossless")
+    check("song_url 调用的方法", fake.calls[0][0], "SongDownloadUrlV1")
+    check("song_url 的 id 是字符串", fake.calls[0][1]["id"], "123")
+    check("song_url 透传音质", fake.calls[0][1]["level"], "lossless")
+    check("song_url 返回 URL", result.url, "u")
 
     # ---- 目录不存在时不应抛错
     check("不存在的目录返回空集合", existing_bases("/nonexistent/nope"), set())

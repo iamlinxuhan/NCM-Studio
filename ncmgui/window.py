@@ -25,6 +25,7 @@ from .config import Config
 from .pages.account import AccountPage
 from .pages.cloud import CloudPage
 from .pages.download import DownloadPage
+from .pages.liked import LikedPage
 from .pages.ncm import NcmPage
 from .pages.proxy import ProxyPage
 from .pages.settings import SettingsPage
@@ -36,6 +37,7 @@ from .widgets.console import ConsolePanel, classify
 #: (键, 图标, 名称, 页面类)
 NAV_ITEMS = (
     ("account", "◈", "账号", AccountPage),
+    ("liked", "♡", "我喜欢的音乐", LikedPage),
     ("download", "▼", "下载", DownloadPage),
     ("ncm", "◇", "NCM 解码", NcmPage),
     ("cloud", "☁", "云盘上传", CloudPage),
@@ -57,6 +59,8 @@ class MainWindow(QMainWindow):
         self.cfg = cfg
         self.binary = ncmctl.find_binary(cfg.get("ncmctl_path", ""))
         self._logged_in = ncmctl.is_logged_in(cfg.get("home", ""))
+        #: 截图/自检时置真，切页面不触发联网加载
+        self.defer_page_loads = False
 
         self.setWindowTitle(f"{APP_NAME} · ncmctl 图形界面")
         self.resize(1180, 780)
@@ -236,6 +240,14 @@ class MainWindow(QMainWindow):
             return
         self.stack.setCurrentIndex(index)
         self._nav_buttons[key].setChecked(True)
+        # 懒加载页面（如红心歌单）在这里才去取数据，启动时不必联网
+        page = self.pages.get(key)
+        hook = getattr(page, "on_show", None)
+        if callable(hook) and not self.defer_page_loads:
+            try:
+                hook()
+            except RuntimeError:
+                pass
 
     # ============================================================== 作业调度
 
@@ -501,6 +513,17 @@ class MainWindow(QMainWindow):
                 panel.runner.stop(grace_ms=600)
             for panel in running:
                 panel.runner.wait_for_finish(700)
+
+        # 先收掉后台进程（播放器），再写配置 —— 播放器退出时会改音量之外的
+        # 状态，配置采集必须排在其后。任一页面清理失败都不能阻断退出。
+        for page in self.pages.values():
+            hook = getattr(page, "shutdown", None)
+            if not callable(hook):
+                continue
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 - 退出流程不能被单个页面拖垮
+                pass
 
         self.save_all_config()
         super().closeEvent(event)

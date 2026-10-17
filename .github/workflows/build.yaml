@@ -37,14 +37,20 @@ jobs:
             os: ubuntu-22.04
             mode: onedir
             artifact: dist/*.AppImage
+            bundle_mpv: "1"
           - target: windows-x86_64
             os: windows-latest
             mode: onefile
             artifact: dist/*.exe
+            bundle_mpv: "1"
+          # macOS 首版**不随包** mpv：官方 git-release 是滚动 tag，旧产物会被
+          # 覆盖，无法像另外两个平台那样钉死版本与校验和。这里退回探测系统
+          # mpv（brew install mpv），所以 bundle_mpv 留空。
           - target: macos-arm64
             os: macos-latest
             mode: onefile
             artifact: dist/ncmctl-gui-macos-arm64
+            bundle_mpv: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +71,23 @@ jobs:
       - name: 取 ncmctl
         run: python scripts/fetch_ncmctl.py
 
+      # mpv 官方不发静态包，只能装发行版那份，再把 /usr/bin/mpv 与 ldd 闭包
+      # 一起收进 vendor/mpv/。版本无需钉死 —— 二进制和它的库是一起收的，
+      # 产物自洽；真正需要钉死的是 Windows 那边的下载包（见 fetch_mpv.py）。
+      - name: 安装 mpv（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends mpv
+
+      # .7z 解压，仅构建期需要
+      - name: 安装 py7zr（Windows）
+        if: runner.os == 'Windows'
+        run: pip install py7zr
+
+      - name: 取 mpv
+        run: python scripts/fetch_mpv.py
+
       # 这几个自检都是纯函数，不联网、不需要 ncmctl 在场，正好用来卡住
       # 「命令构建层被改坏了」这类问题。歌词那一步还会验一遍 mutagen 的
       # 标签往返 —— 那正是打包时最容易少收东西的地方。
@@ -72,6 +95,8 @@ jobs:
         run: |
           python -m ncmgui.ncmctl
           python -m ncmgui.resolver
+          # IPC 编解码、时长格式化、mpv 定位顺序，都是纯函数
+          python -m ncmgui.player
           # 少了 mutagen，歌词那步会打印一句"跳过标签往返测试"然后通过 ——
           # 一个静默跳过等于没测，所以这里先明确它必须在
           python -c "import mutagen"
@@ -83,6 +108,8 @@ jobs:
           NCMGUI_BUILD_NAME: ncmctl-gui-${{ matrix.target }}
           # 缺了 ncmctl 就报错，而不是警告后照常产出 —— 见 spec 里的说明
           NCMGUI_BUNDLE_NCMCTL: "1"
+          # Linux / Windows 必须带 mpv；macOS 留空（见上面 matrix 的注释）
+          NCMGUI_BUNDLE_MPV: ${{ matrix.bundle_mpv }}
         run: pyinstaller ncmctl-gui.spec --noconfirm
 
       # ── 下面两步都是在做同一件事：把「打包成功」和「东西真的进去了」分开 ──
@@ -119,6 +146,18 @@ jobs:
           }
           Write-Host "内置 ncmctl 到位：$($bin.Name)"
 
+      # mpv 也是 binaries 收进去的，落在 mpv/ 目录
+      - name: 清点单文件包里的 mpv
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem dist/* | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+          pyi-archive_viewer -l $bin.FullName > toc-mpv.txt
+          if (-not (Select-String -Path toc-mpv.txt -SimpleMatch -Pattern 'mpv/mpv.exe' -Quiet)) {
+            throw "产物里没有 mpv/mpv.exe —— 流媒体播放在新机器上会不可用"
+          }
+          Write-Host "内置 mpv 到位：$($bin.Name)"
+
       # onedir 的 ncmctl 是散落的普通文件，检查执行位比翻归档更实在
       # （binaries 会被无条件 chmod 0755，datas 不会 —— 见 spec 里的说明）
       - name: 组装 AppImage
@@ -128,6 +167,8 @@ jobs:
         run: |
           test -x dist/ncmctl-gui-linux-x86_64/_internal/ncmctl \
             || { echo "产物里的 ncmctl 缺失或不可执行"; exit 1; }
+          test -x dist/ncmctl-gui-linux-x86_64/_internal/mpv/mpv \
+            || { echo "产物里的 mpv 缺失或不可执行"; exit 1; }
           bash packaging/make_appimage.sh \
             dist/ncmctl-gui-linux-x86_64 \
             dist/ncmctl-gui-linux-x86_64.AppImage
@@ -153,6 +194,9 @@ jobs:
           # FUSE 不可用时 runtime 会自己降级为解包运行 —— 这条路径专门验一下，
           # 因为很多容器和精简发行版就是没有 /dev/fuse
           ./dist/ncmctl-gui-linux-x86_64.AppImage --appimage-extract-and-run --self-test
+          # 文件在、有执行位，都证明不了它能跑：``ldd`` 闭包少一个 .so 时，
+          # 失败要到用户点播放才发生。真启动一次 mpv —— 这是唯一可靠的证据
+          ./dist/ncmctl-gui-linux-x86_64.AppImage --mpv-version
 
       - name: 冒烟测试（Windows / macOS）
         if: runner.os != 'Linux'
@@ -185,6 +229,21 @@ jobs:
             Get-Content $out -ErrorAction SilentlyContinue | Write-Host
             Get-Content "$out.err" -ErrorAction SilentlyContinue | Write-Host
             if ($p.ExitCode -ne 0) { throw "自检失败，退出码 $($p.ExitCode)" }
+
+            # 同样用 Start-Process：--mpv-version 是 GUI 子系统程序的一条
+            # 命令行子功能，输出必须重定向，退出码也必须显式等待
+            $mpvOut = Join-Path $env:RUNNER_TEMP 'mpv-version.log'
+            $m = Start-Process -FilePath $bin.FullName -ArgumentList '--mpv-version' `
+              -RedirectStandardOutput $mpvOut -RedirectStandardError "$mpvOut.err" -PassThru
+            if (-not $m.WaitForExit(60000)) {
+              $m.Kill()
+              Get-Content $mpvOut -ErrorAction SilentlyContinue | Write-Host
+              Get-Content "$mpvOut.err" -ErrorAction SilentlyContinue | Write-Host
+              throw "mpv 版本探测超过 60 秒没有返回"
+            }
+            Get-Content $mpvOut -ErrorAction SilentlyContinue | Write-Host
+            Get-Content "$mpvOut.err" -ErrorAction SilentlyContinue | Write-Host
+            if ($m.ExitCode -ne 0) { throw "随包 mpv 起不来，退出码 $($m.ExitCode)" }
           }
           else {
             # macOS 的单文件产物照常继承终端的标准输出，`&` 直接可用

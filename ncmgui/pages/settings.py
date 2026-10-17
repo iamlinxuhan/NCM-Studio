@@ -8,7 +8,7 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QLabel
 
-from .. import NCMCTL_VERSION, ncmctl
+from .. import NCMCTL_VERSION, ncmctl, player
 from ..config import config_dir
 from ..widgets.card import accent_button, danger_button, ghost_button
 from ..widgets.form import FormCard
@@ -32,6 +32,7 @@ class SettingsPage(BasePage):
 
     def build(self) -> None:
         self._build_binary_card()
+        self._build_player_card()
         self._build_global_card()
         self._build_update_card()
         self._build_about_card()
@@ -112,6 +113,71 @@ class SettingsPage(BasePage):
             )
         )
         self._probe.start()
+
+    # -------------------------------------------------------------- 播放器
+
+    def _build_player_card(self) -> None:
+        card = FormCard(
+            "播放器（mpv）",
+            "「我喜欢的音乐」用随程序分发的 mpv 播放。Linux / Windows 的发行包已内置，"
+            "macOS 首版需要先执行 brew install mpv。留空表示依次尝试"
+            "「随包 → PATH → 常见安装目录」。",
+        )
+        self.mpv_path = card.add_path(
+            "mpv 可执行文件", mode="file",
+            value=self.cfg.get("player.mpv_path", ""),
+            placeholder="留空表示自动探测",
+            hint="填的路径不存在时会退回自动探测；当前实际使用的是哪一个见下方。",
+        )
+
+        self.mpv_detected = QLabel("")
+        self.mpv_detected.setObjectName("Hint")
+        self.mpv_detected.setWordWrap(True)
+        card.add_widget(self.mpv_detected)
+
+        detect = ghost_button("重新探测")
+        detect.clicked.connect(self._detect_mpv)
+        card.add_row_of(detect)
+        self.content.addWidget(card)
+
+        self._detect_mpv()
+
+    def _detect_mpv(self) -> None:
+        binary = player.find_mpv(self.mpv_path.path())
+        if not binary:
+            self.mpv_detected.setText(
+                "⚠ 未找到 mpv。流媒体播放将不可用：Linux 可执行 "
+                "<code>sudo apt install mpv</code>，"
+                "或在上面指定 mpv 的完整路径。"
+            )
+            return
+
+        self.mpv_detected.setText(f"✅ 当前使用：<code>{binary}</code>（查询版本…）")
+
+        # mpv --version 要起一个子进程，放后台跑；异常退出时保持「版本未知」
+        task = BackgroundTask(lambda: player.probe_mpv(binary), parent=self)
+
+        def done(result: object) -> None:
+            if not _same_file(player.find_mpv(self.mpv_path.path()), binary):
+                return  # 探测期间用户改了路径
+            ok, output = result  # type: ignore[misc]
+            if ok:
+                self.mpv_detected.setText(
+                    f"✅ 当前使用：<code>{binary}</code><br>{output or '版本未知'}"
+                )
+            else:
+                # 文件在、却跑不起来：多半是缺共享库（打包时漏收 .so）
+                self.mpv_detected.setText(
+                    f"⚠ 找到了 <code>{binary}</code>，但执行失败：{output or '无输出'}"
+                )
+
+        task.done.connect(done)
+        task.failed.connect(
+            lambda msg: self.mpv_detected.setText(
+                f"⚠ 找到了 <code>{binary}</code>，但无法执行：{msg}"
+            )
+        )
+        task.start()
 
     # -------------------------------------------------------------- 全局参数
 
@@ -269,6 +335,7 @@ class SettingsPage(BasePage):
 
     def save_config(self) -> None:
         self.cfg.set("ncmctl_path", self.binary_path.path())
+        self.cfg.set("player.mpv_path", self.mpv_path.path())
         self.cfg.set("home", self.home.path())
         self.cfg.set("config_file", self.config_file.path())
         self.cfg.set("debug", self.debug.isChecked())

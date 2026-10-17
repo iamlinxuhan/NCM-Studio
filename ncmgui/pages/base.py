@@ -26,30 +26,42 @@ class BasePage(QWidget):
     PAGE_TITLE = ""
     PAGE_SUBTITLE = ""
 
+    #: 内容是否包在 QScrollArea 里。表格页必须设 ``False``：表格自己有滚动条，
+    #: 再套一层会出现「滚轮到底后整页跟着动」、表格高度被内容撑开之类的怪现象。
+    SCROLLABLE = True
+
+    #: build() 之后是否在末尾加弹簧。滚动页需要它把内容顶到上方；
+    #: 非滚动页要让表格自己吃掉剩余高度，不能再加。
+    TRAILING_STRETCH = True
+
     def __init__(self, window: "MainWindow") -> None:
         super().__init__()
         self.window = window
         self.cfg = window.cfg
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-
         inner = QWidget()
         self.content = QVBoxLayout(inner)
         self.content.setContentsMargins(26, 22, 26, 26)
         self.content.setSpacing(16)
-        scroll.setWidget(inner)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(scroll)
+
+        if self.SCROLLABLE:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(inner)
+            root.addWidget(scroll)
+        else:
+            root.addWidget(inner, 1)
 
         if self.PAGE_TITLE:
             self.content.addWidget(page_header(self.PAGE_TITLE, self.PAGE_SUBTITLE))
 
         self.build()
-        self.content.addStretch(1)
+        if self.TRAILING_STRETCH:
+            self.content.addStretch(1)
 
     # ------------------------------------------------------------ 子类钩子
 
@@ -61,6 +73,12 @@ class BasePage(QWidget):
 
     def on_login_changed(self, logged_in: bool) -> None:
         """登录状态变化时的回调。子类按需覆盖。"""
+
+    def on_show(self) -> None:
+        """页面被切到前台时调用。子类按需覆盖（例如懒加载列表）。"""
+
+    def shutdown(self) -> None:
+        """窗口关闭前的清理。子类按需覆盖（例如关掉播放器子进程）。"""
 
     # ------------------------------------------------------------ 便捷方法
 

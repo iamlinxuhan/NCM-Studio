@@ -6,7 +6,9 @@
 二维码登录得盯着终端。这个程序把这些都收敛成侧边栏导航 + 表单 + 实时终端输出，
 重点解决**输出文件夹的可视化选择**和**长任务 / 扫码登录的可视化反馈**。
 
-![下载页](docs/screenshots/02-download.png)
+![我喜欢的音乐](docs/screenshots/02-liked.png)
+
+![下载页](docs/screenshots/03-download.png)
 
 ## 功能覆盖
 
@@ -15,6 +17,7 @@ ncmctl 的全部子命令都在界面里有对应入口：
 | 页面 | 对应命令 | 说明 |
 | --- | --- | --- |
 | 账号 | `login qrcode` / `phone` / `cookie` / `cookiecloud`、`logout` | 四种登录方式；扫码登录会在界面里显示二维码 |
+| 我喜欢的音乐 | `SongDownloadUrlV1` + 随包 mpv | 红心歌单列表，点一首即流播；搜索、播放中高亮、已下载标记 |
 | 下载 | `download` | 歌曲 ID、专辑 / 歌手 / 歌单链接；选音质、并发数、输出目录；**内置查重**与**歌词下载**，可一键搬空「我喜欢的音乐」 |
 | NCM 解码 | `ncm` | 把 `.ncm` 还原成 `.mp3` / `.flac`，纯本地操作 |
 | 云盘上传 | `cloud` | 上传单曲或整个文件夹，可按体积和正则过滤 |
@@ -241,6 +244,25 @@ ncmctl 的下载日志只有进度条和一句 `report total: ...`，**从不提
 > `fee` 的含义抄自 ncmctl 自己的注释（`api/weapi/song.go`）。未知的非 0
 > 取值一律按 `[VIP]` 处理，宁可多标不可漏标。
 
+## 流媒体播放
+
+侧边栏的「我喜欢的音乐」直接列出账号红心歌单（序号、歌名、歌手、专辑、时长），
+**点一行就开始播**，不必先下载。控制器提供播放 / 暂停、上一首 / 下一首、可拖动的
+进度条、音量和音质档位；一首播完自动接下一首。
+
+- **播放器是 mpv，且随包。** Linux 与 Windows 的产物里已经带了 mpv 及其依赖库，
+  新机器上不需要另装任何东西。macOS 首版不随包，先 `brew install mpv`（或在
+  「设置 → 播放器」里指定路径）。
+- **已下载的优先播本地文件。** 列表里的 `本地` 列有 `✓` 时说明输出目录里已经有这首，
+  点击后直接播文件，既省一次接口调用，也不受直链过期影响。
+- **直链是临时的。** 播放地址由 `SongDownloadUrlV1` 现取，约 20 分钟失效；界面只
+  缓存到过期前 60 秒，所以不存在「用到过期地址」的路径。
+- **播不了会明说。** 无版权、需要会员、该音质拿不到，都会在界面上给出具体原因；
+  播放出错时**不会**自动跳到下一首 —— 否则一张 VIP 歌单会在你离开座位时被静默跳完。
+
+音质档位与下载页相同（标准 / 较高 / 极高 / 无损 / Hi-Res），实际拿到的档位可能
+低于所选 —— 接口以降级后的结果为准，界面会按接口返回的 `level` 播放。
+
 ## 平台说明
 
 界面代码本身是跨平台的，麻烦的只有一处：**子进程的伪终端**。
@@ -280,6 +302,12 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 # 歌词处理的自检（纯函数，不联网；需要 mutagen 才能验标签往返）
 .venv/bin/python -m ncmgui.lyrics
 
+# 播放器 IPC 编解码与 mpv 定位（纯函数，不需要 mpv 在场）
+.venv/bin/python -m ncmgui.player
+
+# 证明随包的 mpv 真的能执行（打包产物自检用；源码运行则探测系统 mpv）
+.venv/bin/python main.py --mpv-version
+
 # 无头冒烟测试：构建整个界面、逐页实例化、跑一遍控制台逻辑
 .venv/bin/python main.py --self-test
 
@@ -295,20 +323,32 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 
 ```bash
 python scripts/fetch_ncmctl.py          # 先把 ncmctl 取到 vendor/
+python scripts/fetch_mpv.py             # 再把 mpv 取到 vendor/mpv/（macOS 跳过）
 pip install pyinstaller
 
-# Windows / macOS：单文件
+# Windows：单文件（构建前 pip install py7zr，用于解压 mpv 的 .7z）
+NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
+  pyinstaller ncmctl-gui.spec --noconfirm
+
+# macOS：单文件，不随包 mpv
 NCMGUI_BUNDLE_NCMCTL=1 pyinstaller ncmctl-gui.spec --noconfirm
 
 # Linux：onedir + AppImage
-NCMGUI_MODE=onedir NCMGUI_BUNDLE_NCMCTL=1 \
+NCMGUI_MODE=onedir NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncmctl-gui.spec --noconfirm
 bash packaging/make_appimage.sh \
   dist/ncmctl-gui dist/ncmctl-gui-linux-x86_64.AppImage
 ```
 
-`NCMGUI_BUNDLE_NCMCTL=1` 表示「这个产物必须有 ncmctl」，缺了直接报错而不是警告一下
-照常产出 —— 一个不含 ncmctl 的包发出去，用户那边是每个功能都用不了。
+`NCMGUI_BUNDLE_NCMCTL=1` / `NCMGUI_BUNDLE_MPV=1` 分别表示「这个产物必须有 ncmctl /
+mpv」，缺了直接报错而不是警告一下照常产出 —— 一个不含 ncmctl 的包发出去，用户那边
+是每个功能都用不了；不含 mpv 则是「点歌没反应」。
+
+Linux 上 `fetch_mpv.py` 收的是**构建机上装的那份 mpv**，所以要先
+`sudo apt-get install -y --no-install-recommends mpv`；它会把 `/usr/bin/mpv` 与
+`ldd` 闭包一起复制到 `vendor/mpv/`，其中 glibc 家族和图形驱动库按策略留给宿主机
+（理由同 `packaging/bundle_libs.py`）。Windows 那份从 zhongfly/mpv-winbuild 的日期
+tag 下载，版本与 SHA-256 钉在脚本里。
 
 Linux 之所以是 onedir 而不是单文件，是因为 AppImage 必须建在目录树上：单文件包在
 运行时还会把自己再解包一次，套进 AppImage 就成了双重解包，启动慢且白占一份临时空间。
@@ -322,6 +362,7 @@ CI 里有三类断言，都是同一个思路 —— **「打包成功」不等�
 | --- | --- |
 | 清点 `conpty.dll` / `OpenConsole.exe` 等（Windows） | pywinpty 的非 `.pyd` 二进制不在依赖分析里，漏了不报错，只在用户那边变成「一下载就失败」 |
 | 清点内置的 `ncmctl`（三平台） | 同上，缺了的话整个界面一个功能都用不了 |
+| 清点 `mpv` 并真跑一次 `--mpv-version`（Linux / Windows） | 文件在、有执行位都证明不了它能启动；少收一个 `.so` 要到用户点播放才暴露 |
 | `check_glibc_floor.py`（Linux） | 构建机越新，收进去的系统库要求越高。在 Ubuntu 24.04 上打的包到 Debian 12 上会 `GLIBC_2.39 not found`，而构建、上传、发布全都不报错 |
 
 最后一条是最容易忽略的：PyInstaller 会把**构建机**的 libglib、libgtk、libstdc++、
@@ -337,6 +378,7 @@ main.py                入口，含 --self-test / --screenshot
 ncmctl-gui.spec        PyInstaller 打包配置（三平台共用）
 scripts/
   fetch_ncmctl.py      下载并校验 ncmctl 到 vendor/（版本与 SHA-256 钉在里面）
+  fetch_mpv.py         收集 mpv 到 vendor/mpv/（Linux 走 apt + ldd，Windows 走钉死的 .7z）
   make_icon.py         生成图标（纯几何绘制，不依赖字体）
 packaging/
   ncmctl-gui.png/.ico  图标，已入库（免得构建期还要装 Pillow）
@@ -352,13 +394,14 @@ ncmgui/
   ncmctl.py            命令构建：把界面选择翻译成参数数组（不依赖 Qt）
   resolver.py          目标解析与查重：展开 id/链接 → 歌曲清单 → 比对输出目录（不依赖 Qt）
   lyrics.py            歌词：解析 LRC、合并翻译、写 .lrc 或写进音频标签（不依赖 Qt）
+  player.py            播放器：定位 mpv、JSON IPC 收发、事件解析、直链缓存（不依赖 Qt）
   runner.py            subprocess + pty 封装，流式输出为信号（POSIX / Windows 双后端）
   workers.py           后台任务（守护线程），用于不阻塞界面的解析
   config.py            配置持久化
   theme.py             调色板、全局 QSS、霓虹辉光
   window.py            侧边栏 + 页面栈 + 底部作业控制台
   widgets/             Card、PathPicker、PathList、FormCard、ConsolePanel
-  pages/               八个功能页
+  pages/               九个功能页（含「我喜欢的音乐」 liked.py）
 ```
 
 几条设计约定：
@@ -382,5 +425,10 @@ ncmgui/
 
 「写入音频标签」这一种歌词模式用到 [mutagen](https://mutagen.readthedocs.io/)，它同样以
 GPL-2.0-or-later 发布，向后兼容。默认的「独立 .lrc 文件」不需要它。
+
+流媒体播放用到的 [mpv](https://mpv.io/) 以 GPLv2+ 发布，它链接的 FFmpeg 等库各有
+自己的许可。Linux / Windows 的产物里随包分发 mpv，其来源、版本与版权文件放在
+`vendor/mpv/`，打包后位于 `ncmgui/assets/mpv/`（AppImage 与单文件包内的
+`mpv/` 目录旁）。本程序只以子进程方式调用 mpv，不修改其源码。
 
 作者：iamlinxuhan &lt;2276677131@qq.com&gt;

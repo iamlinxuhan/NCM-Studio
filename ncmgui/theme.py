@@ -528,6 +528,64 @@ QListWidget::item:selected, QListView::item:selected {
 
 QListWidget::item:hover, QListView::item:hover { background: $PANEL_HI; }
 
+/* 歌曲列表（我喜欢的音乐）—— 表格自己有滚动条，不再套 QScrollArea */
+
+QTableView, QTableWidget {
+    background: $PANEL_ALT;
+    alternate-background-color: $PANEL;
+    color: $TEXT;
+    border: 1px solid $BORDER;
+    border-radius: 6px;
+    gridline-color: transparent;
+    selection-background-color: rgba(0, 229, 255, 45);
+    selection-color: $CYAN;
+    outline: none;
+}
+
+QTableView::item { padding: 4px 8px; }
+
+QHeaderView::section {
+    background: $PANEL;
+    color: $TEXT_DIM;
+    border: none;
+    border-bottom: 1px solid $BORDER;
+    padding: 7px 8px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+QTableCornerButton::section { background: $PANEL; border: none; }
+
+/* 进度条 / 音量滑块 */
+
+QSlider::groove:horizontal {
+    height: 4px;
+    background: $BORDER;
+    border-radius: 2px;
+}
+
+QSlider::sub-page:horizontal {
+    background: $CYAN;
+    border-radius: 2px;
+}
+
+QSlider::add-page:horizontal {
+    background: $BORDER;
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+    background: $CYAN;
+    width: 12px;
+    height: 12px;
+    margin: -5px 0;
+    border-radius: 6px;
+}
+
+QSlider::handle:horizontal:hover { background: $PURPLE; }
+
+QSlider::handle:horizontal:disabled { background: $BORDER_HI; }
+
 /* ------------------------------------------------------------ 终端区 */
 
 QPlainTextEdit#Console {
