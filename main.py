@@ -316,13 +316,7 @@ def _screenshot(window: MainWindow, target: str) -> int:
     songs = _demo_songs()
     cover = _demo_cover()
     page = window.player_page
-    page.set_demo(
-        songs[0],
-        cover,
-        _demo_lyrics(),
-        position=67.0,
-        duration=222.0,
-    )
+    page.set_demo(songs[0], cover, _demo_lyrics(), position=67.0)
     window.playback_bar.set_demo(
         songs[0], cover, position=67.0, duration=222.0, volume=70, mode="loop"
     )
@@ -341,7 +335,6 @@ def _screenshot(window: MainWindow, target: str) -> int:
         _demo_lyrics(),
         queue=songs,
         position=67.0,
-        duration=222.0,
     )
     window.open_player_page(queue=True)
     for _ in range(3):

@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import images, lyrics, ncmctl, player, theme
+from .. import images, lyrics, ncmctl, theme
 from ..playback import (
     STATE_ERROR,
     STATE_IDLE,
@@ -45,7 +45,6 @@ from ..playback import (
 )
 from ..resolver import Resolver, Song
 from ..widgets.card import Card, ghost_button
-from ..widgets.playbackbar import SeekSlider
 from ..widgets.vinyl import VinylWidget
 from ..workers import BackgroundTask
 from .base import BasePage
@@ -137,7 +136,6 @@ class PlayerPage(BasePage):
         self._current_line = -1
         self._follow_until = 0.0
         self._scroll_anim: QPropertyAnimation | None = None
-        self._scrubbing = False
         self._queue_visible = False
         self._demo_mode = False
         self._placeholder = images.placeholder(330)
@@ -161,12 +159,17 @@ class PlayerPage(BasePage):
         self.back_btn.clicked.connect(self.backRequested.emit)
         self.state_label = QLabel("未在播放")
         self.state_label.setObjectName("Hint")
+        # 音质放在顶部：进度与时间由底部常驻播放条统一负责，播放页不再重复一套
+        self.level_label = QLabel("")
+        self.level_label.setObjectName("Hint")
         self.queue_btn = ghost_button("播放队列", compact=True)
         self.queue_btn.setCheckable(True)
         self.queue_btn.clicked.connect(self.toggle_queue)
         top.addWidget(self.back_btn)
         top.addStretch(1)
         top.addWidget(self.state_label)
+        top.addSpacing(8)
+        top.addWidget(self.level_label)
         top.addWidget(self.queue_btn)
         self.content.addLayout(top)
 
@@ -254,31 +257,7 @@ class PlayerPage(BasePage):
         self.splitter.setStretchFactor(2, 0)
         self.splitter.setSizes([360, 620, 280])
         self.content.addWidget(self.splitter, 1)
-
-        # 底部进度
-        bottom = QHBoxLayout()
-        bottom.setSpacing(10)
-        self.pos_label = QLabel("00:00")
-        self.pos_label.setObjectName("Hint")
-        self.pos_label.setMinimumWidth(44)
-        self.progress = SeekSlider(Qt.Orientation.Horizontal)
-        self.progress.setRange(0, 1000)
-        self.progress.setEnabled(False)
-        self.progress.sliderPressed.connect(self._on_scrub_start)
-        self.progress.sliderReleased.connect(self._on_scrub_end)
-        self.progress.sliderMoved.connect(self._on_scrub_move)
-        self.progress.clickedValue.connect(self._seek_to_value)
-        self.total_label = QLabel("--:--")
-        self.total_label.setObjectName("Hint")
-        self.total_label.setMinimumWidth(44)
-        self.level_label = QLabel("")
-        self.level_label.setObjectName("Hint")
-        bottom.addWidget(self.pos_label)
-        bottom.addWidget(self.progress, 1)
-        bottom.addWidget(self.total_label)
-        bottom.addSpacing(12)
-        bottom.addWidget(self.level_label)
-        self.content.addLayout(bottom)
+        self._refresh_meta()
 
     def _connect(self) -> None:
         self.playback.trackChanged.connect(self._on_track_changed)
@@ -301,9 +280,6 @@ class PlayerPage(BasePage):
             self.album_label.setText("")
             self.vinyl.set_art(self._placeholder)
             self._clear_lyrics("点一首歌，这里会显示歌词。")
-            self.progress.setEnabled(False)
-            self.pos_label.setText("00:00")
-            self.total_label.setText("--:--")
             return
 
         self._cover_id = int(song.id)
@@ -320,7 +296,6 @@ class PlayerPage(BasePage):
 
         if not self._demo_mode:
             self._load_lyrics(song)
-        self._refresh_progress_enabled()
 
     def _on_state_changed(self, state: str) -> None:
         playing = state == STATE_PLAYING
@@ -334,15 +309,6 @@ class PlayerPage(BasePage):
                 STATE_ERROR: "播放失败",
             }.get(state, state)
         )
-        self._refresh_progress_enabled()
-
-    def _refresh_progress_enabled(self) -> None:
-        enabled = (
-            self._current_song is not None
-            and self.playback.duration > 0
-            and self.playback.state not in (STATE_IDLE, STATE_ERROR)
-        )
-        self.progress.setEnabled(enabled)
 
     def _refresh_meta(self) -> None:
         level = self.playback.level
@@ -358,40 +324,11 @@ class PlayerPage(BasePage):
             return
         self.vinyl.set_art(pixmap)
 
-    # ---------------------------------------------------------------- 进度
+    # ------------------------------------------------------------ 播放位置
 
-    def _on_position_changed(self, position: float, duration: float) -> None:
-        # 本地音乐一开始不知道时长：mpv 报出 duration 之后才能拖动进度
-        if duration > 0 and not self.progress.isEnabled():
-            self.progress.setEnabled(True)
-        if not self._scrubbing:
-            if duration > 0:
-                self.progress.setValue(player.progress_value(position, duration))
-                self.total_label.setText(player.format_clock(duration))
-            else:
-                self.progress.setValue(0)
-                self.total_label.setText("--:--")
-            self.pos_label.setText(player.format_clock(position))
+    def _on_position_changed(self, position: float, _duration: float) -> None:
+        # 进度条与时间只在底部常驻播放条上有一份；这一页用位置来对齐歌词
         self._update_current_line(position)
-
-    def _on_scrub_start(self) -> None:
-        self._scrubbing = True
-
-    def _on_scrub_move(self, value: int) -> None:
-        duration = self.playback.duration
-        if duration > 0:
-            self.pos_label.setText(
-                player.format_clock(player.seek_seconds(value, duration))
-            )
-
-    def _on_scrub_end(self) -> None:
-        self._scrubbing = False
-        self._seek_to_value(self.progress.value())
-
-    def _seek_to_value(self, value: int) -> None:
-        duration = self.playback.duration
-        if duration > 0:
-            self.playback.seek(player.seek_seconds(value, duration))
 
     # ---------------------------------------------------------------- 歌词
 
@@ -605,7 +542,6 @@ class PlayerPage(BasePage):
         *,
         queue: Sequence[Song] = (),
         position: float = 0.0,
-        duration: float = 0.0,
     ) -> None:
         """截图用：不联网、不起 mpv，直接把播放页摆成一个正在播放的样子。"""
         self._demo_mode = True
@@ -614,8 +550,9 @@ class PlayerPage(BasePage):
             self.vinyl.set_art(cover)
         self._build_lyrics(lines, {})
         self._on_state_changed(STATE_PLAYING)
-        self._on_position_changed(position, duration)
-        self.progress.setEnabled(duration > 0)
+        # 截图不等 450ms 的唱臂动画，否则会拍到停在半路的样子
+        self.vinyl.finish_arm_animation()
+        self._on_position_changed(position, 0.0)
         if queue:
             self.queue_model.set_songs(queue, song.id)
             self.queue_count.setText(f"共 {len(queue)} 首")
