@@ -442,7 +442,10 @@ def main(argv: list[str] | None = None) -> int:
     theme.apply_theme(app)
 
     window = MainWindow(Config())
-    window.show()
+    if window.start_maximized:
+        window.showMaximized()
+    else:
+        window.show()
 
     if self_test:
         return _self_test(window)

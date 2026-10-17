@@ -80,14 +80,41 @@ class MainWindow(QMainWindow):
         self._last_page_key = "account"
 
         self.setWindowTitle(f"{APP_NAME} · 第三方音乐播放器")
-        self.resize(1180, 780)
         self.setMinimumSize(920, 620)
+        self._restore_window_size()
 
         self._build_ui()
         self._refresh_login_ui()
         self._poll_login()
 
     # ==================================================================== 构建
+
+    def _restore_window_size(self) -> None:
+        """按上次关闭时的大小打开；超出当前屏幕就缩回可用区域。"""
+        try:
+            width = int(self.cfg.get("window.width", 1180))
+            height = int(self.cfg.get("window.height", 780))
+        except (TypeError, ValueError):
+            width, height = 1180, 780
+        width = max(920, width)
+        height = max(620, height)
+        screen = self.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, max(920, available.width()))
+            height = min(height, max(620, available.height()))
+        self.resize(width, height)
+        # 真正最大化要等入口把界面建好再调用，这里只记下意图
+        self.start_maximized = bool(self.cfg.get("window.maximized", False))
+
+    def _save_window_size(self) -> None:
+        self.cfg.set("window.maximized", self.isMaximized())
+        # 最大化/全屏时尺寸就是屏幕尺寸，记下来反而会盖掉用户平时的窗口大小
+        if self.isMaximized() or self.isFullScreen():
+            return
+        size = self.size()
+        self.cfg.set("window.width", size.width())
+        self.cfg.set("window.height", size.height())
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -648,5 +675,6 @@ class MainWindow(QMainWindow):
             self.playback.save_config()
         except Exception:  # noqa: BLE001
             pass
+        self._save_window_size()
         self.save_all_config()
         super().closeEvent(event)

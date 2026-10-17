@@ -261,8 +261,7 @@ class PlayerPage(BasePage):
         self.queue_card.setVisible(False)
         self.splitter.addWidget(self.queue_card)
 
-        self.splitter.setStretchFactor(0, 0)
-        self.splitter.setStretchFactor(1, 1)
+        self._apply_stretch(self.DEFAULT_SPLIT[0])
         self.splitter.setStretchFactor(2, 0)
         self.splitter.setSizes([360, 620, 280])
         # 只记黑胶 : 歌词的比例；队列面板的宽度不持久化，收起后重新打开
@@ -547,11 +546,12 @@ class PlayerPage(BasePage):
             sizes = self.splitter.sizes()
             if len(sizes) == 3 and sizes[2] < 80:
                 total = max(1, sum(sizes))
-                queue = max(80, int(total * 0.22))
+                queue = max(self.queue_card.minimumWidth(), int(total * 0.22))
                 available = max(2, total - queue)
                 first_ratio, _ = self._current_ratios()
                 first = max(1, round(available * first_ratio))
                 self.splitter.setSizes([first, max(1, available - first), queue])
+                self._apply_stretch(first_ratio)
 
     # ------------------------------------------------------------ 分栏比例
 
@@ -582,6 +582,12 @@ class PlayerPage(BasePage):
         ratios = self._split_ratios()
         return (ratios[0], ratios[1]) if ratios else self._saved_split()
 
+    def _apply_stretch(self, first_ratio: float) -> None:
+        """把比例变成 QSplitter 的伸缩因子，窗口缩放时两栏才会一起缩放。"""
+        first = max(1, round(first_ratio * 1000))
+        self.splitter.setStretchFactor(0, first)
+        self.splitter.setStretchFactor(1, max(1, 1000 - first))
+
     def _on_split_moved(self, *_args) -> None:
         self._split_dirty = True
         self._split_timer.start()
@@ -594,6 +600,7 @@ class PlayerPage(BasePage):
         if not ratios:
             return
         self._split_dirty = False
+        self._apply_stretch(ratios[0])
         self.cfg.set("player.split", ratios)
         self.cfg.save()
 
@@ -616,6 +623,7 @@ class PlayerPage(BasePage):
         first_ratio, _ = self._saved_split()
         first = max(1, round(available * first_ratio))
         self.splitter.setSizes([first, max(1, available - first), queue])
+        self._apply_stretch(first_ratio)
         self._split_applied = True
 
     # ---------------------------------------------------------------- 演示
