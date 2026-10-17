@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 from . import APP_NAME, VERSION, ncmctl, theme
 from .config import Config
 from .images import CoverStore
+from .mpris import MprisService
 from .pages.account import AccountPage
 from .pages.cloud import CloudPage
 from .pages.download import DownloadPage
@@ -76,6 +77,9 @@ class MainWindow(QMainWindow):
             opts=self.global_opts,
             parent=self,
         )
+        #: 蓝牙耳机/系统媒体键走 MPRIS；真正 start() 由 main.py 决定，
+        #: 自检与截图不往会话总线上注册服务
+        self.mpris = MprisService(self.playback, self, parent=self)
         #: 从播放页「返回」时回到的导航页
         self._last_page_key = "account"
 
@@ -658,6 +662,10 @@ class MainWindow(QMainWindow):
 
         # 先收掉后台进程（播放器），再写配置 —— 播放器退出时会改音量之外的
         # 状态，配置采集必须排在其后。任一页面清理失败都不能阻断退出。
+        try:
+            self.mpris.shutdown()
+        except Exception:  # noqa: BLE001 - D-Bus 不可用不能挡住退出
+            pass
         try:
             self.playback.shutdown()
         except Exception:  # noqa: BLE001 - 退出流程不能被播放器拖垮

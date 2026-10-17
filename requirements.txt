@@ -33,6 +33,13 @@ pywinpty>=2.0; sys_platform == "win32"
 # 许可 GPL-2.0-or-later，与本项目一致。
 mutagen>=1.47
 
+# Linux：MPRIS 媒体控制（蓝牙耳机 / 键盘上的播放暂停键）。
+#
+# Linux 桌面通过 MPRIS（D-Bus）把耳机的 AVRCP 指令转给播放器；mpv 自己不实现
+# 这个接口，所以由 ncmgui/mpris.py 注册一份最小服务。dbus-next 是纯 Python
+# 实现，不需要 libdbus；Windows/macOS 用的是各自系统的媒体控件，不装它。
+dbus-next>=0.2.3; sys_platform == "linux"
+
 # 可选：二维码登录的兜底渲染。
 # ncmctl 会自己生成 qrcode.png，本程序优先直接显示它；
 # 只有在 PNG 没生成时，才用这个库把终端里打印的二维码内容渲染出来。

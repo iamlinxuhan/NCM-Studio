@@ -303,6 +303,21 @@ ncmctl 的下载日志只有进度条和一句 `report total: ...`，**从不提
 
 随机的「上一首」会回历史，不会随机到一个完全陌生的地方。
 
+### 蓝牙耳机与系统媒体键
+
+Linux 上程序启动时会向会话总线注册一份 MPRIS 服务
+（`org.mpris.MediaPlayer2.ncmstudio`）。蓝牙耳机传来的 AVRCP 指令由桌面的
+`mpris-proxy` 转成 MPRIS 调用，所以耳机上的**播放 / 暂停、上一首、下一首**
+都能直接控制本程序；GNOME / KDE 的键盘媒体键走的也是同一条路。
+
+mpv 自己不实现 MPRIS，随包 mpv 又用 `--no-config --load-scripts=no` 启动，
+所以这个接口由界面自己补（见 [ncmgui/mpris.py](ncmgui/mpris.py)）。它需要
+纯 Python 的 `dbus-next`，已写进 `requirements.txt` 的 Linux 条件依赖，打包时
+一并收进 AppImage。
+
+Windows 与 macOS 的媒体控制分别走 SMTC / Now Playing，目前还没有接入；
+这两个平台上的耳机按键暂时不会控制本程序。
+
 ### 播放本地音乐
 
 侧边栏的**「本地音乐」**页不用登录、也不联网：
@@ -310,7 +325,8 @@ ncmctl 的下载日志只有进度条和一句 `report total: ...`，**从不提
 - 目录默认是程序的下载目录（`~/音乐/NCM-Studio`），也可以在页面顶部的路径控件里
   换成任意文件夹；选择会记在 `player.local_dir`，下次打开直接落在这里；
 - 点表格任意一行即播，或用「播放全部」；
-- 递归扫描（最多 5000 个文件，跳过隐藏路径），表格第 0 列显示 `▶` / `⏸`；
+- 递归扫描（最多 5000 个文件，跳过隐藏路径），表格第 0 列跟着播放状态
+  显示暂停竖条或 `▶`；
 - 「音乐质量」列直接读文件头：FLAC 显示 `无损 44.1kHz/16bit`（超过 48kHz
   或 16bit 标 `Hi-Res`），MP3 / AAC 等显示 `极高 320 kbps`、`标准 128 kbps`
   这样的码率档位；读不出来时退回扩展名，坏文件不会影响整次扫描；
@@ -503,6 +519,7 @@ ncmgui/
   covers.py            封面：文件头识别、同名图片、读写音频标签里的封面（不依赖 Qt）
   player.py            播放器：定位 mpv、JSON IPC 收发、事件解析、直链缓存（不依赖 Qt）
   playback.py          全局播放控制：队列、四种播放顺序、进度外推与竞态保护
+  mpris.py             Linux MPRIS 服务：蓝牙耳机与系统媒体键（dbus-next）
   images.py            封面下载、放大、占位图与内存 LRU 缓存
   localmusic.py        本地音乐：文件名拆分、目录扫描（不依赖 Qt）
   updater.py           GitHub Release 检查、校验与自我替换（不依赖 Qt）
