@@ -387,34 +387,36 @@ def split_translation(text: str) -> tuple[str, str]:
     一样亮 —— 和流媒体的显示对不上。本地播放前先用这个函数还原成
     ``lrc`` / ``tlyric`` 两份，再走与在线歌词完全相同的解析和渲染。
 
-    判据是「相邻两行时间戳相同、正文不同」。原文里偶尔会有同一时刻的
-    重复句（时间戳与正文都一样），那种仍是原文，不会被误当成译文。
+    判据是「相邻两行时间戳相同」：:func:`merge_translation` 对每个时间戳
+    只会插一行译文，且紧跟在第一条原文后面，所以同时间戳的第二行必定是
+    译文。不能拿「正文不同」再筛一次 —— 公式类歌词（比如
+    ``sin（2π+α）=sinα``）的译文和原文就是一模一样的，筛掉就会把译文
+    留在原文里重复显示一遍。元数据行没有时间戳，不会参与配对。
 
     返回 ``(原文, 译文)``，两段都保留原始行（含元数据行）。
     """
     original: list[str] = []
     translation: list[str] = []
     previous_key: int | None = None
-    previous_body = ""
 
     for raw in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         stamps = list(_TIMESTAMP_RE.finditer(raw))
         if not stamps:
             # [by:...] 这类元数据跟着原文走；它也会打断「相邻」关系
             original.append(raw)
-            previous_key, previous_body = None, ""
+            previous_key = None
             continue
 
         key = _centiseconds(stamps[0])
         body = _TIMESTAMP_RE.sub("", raw).strip()
-        if body and key == previous_key and body != previous_body:
+        if body and key == previous_key:
             translation.append(raw)
             # 一行原文只配一行译文，第三行同时间戳的按原文处理
-            previous_key, previous_body = None, ""
+            previous_key = None
             continue
 
         original.append(raw)
-        previous_key, previous_body = key, body
+        previous_key = key
 
     return "\n".join(original), "\n".join(translation)
 
@@ -1012,9 +1014,14 @@ def _selftest() -> int:
         ("[00:01.00]千本桜\n[00:02.00]夜ニ紛レ", "[00:01.00]千本樱\n[00:02.00]夜中纷乱"),
     )
     check(
-        "同一句重复出现不会被当成译文",
-        split_translation("[00:01.00]副歌\n[00:01.00]副歌"),
-        ("[00:01.00]副歌\n[00:01.00]副歌", ""),
+        "译文和原文一字不差时仍拆成译文",
+        split_translation("[00:25.82]sin（2π+α）=sinα\n[00:25.82]sin（2π+α）=sinα"),
+        ("[00:25.82]sin（2π+α）=sinα", "[00:25.82]sin（2π+α）=sinα"),
+    )
+    check(
+        "同一时间戳的第三行按原文处理",
+        split_translation("[00:01.00]a\n[00:01.00]b\n[00:01.00]c"),
+        ("[00:01.00]a\n[00:01.00]c", "[00:01.00]b"),
     )
     check(
         "元数据行留在原文里",
