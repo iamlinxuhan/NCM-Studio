@@ -605,6 +605,24 @@ QLabel#PlaybackTime {
     font-family: $MONO;
 }
 
+/* 播放条左侧的「正在播放」，点一下打开播放页 */
+QWidget#NowPlaying {
+    background: transparent;
+    border-radius: 7px;
+}
+QWidget#NowPlaying:hover {
+    background: $PANEL_HI;
+}
+QLabel#NowPlayingTitle {
+    color: $TEXT;
+    font-size: 13px;
+    font-weight: 600;
+}
+QLabel#NowPlayingArtist {
+    color: $TEXT_DIM;
+    font-size: 11px;
+}
+
 /* ------------------------------------------------------------ 播放页 */
 
 QLabel#PlayerTitle {

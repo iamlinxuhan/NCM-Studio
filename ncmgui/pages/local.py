@@ -42,11 +42,12 @@ from .base import BasePage
 class LocalTableModel(QAbstractTableModel):
     """本地文件列表。和红心表格一样，第 0 列兼任播放/暂停标记。"""
 
-    HEADERS = ("#", "歌名", "歌手", "专辑")
+    HEADERS = ("#", "歌名", "歌手", "专辑", "音乐质量")
     COL_INDEX = 0
     COL_NAME = 1
     COL_ARTIST = 2
     COL_ALBUM = 3
+    COL_QUALITY = 4
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -88,6 +89,8 @@ class LocalTableModel(QAbstractTableModel):
                 return ", ".join(song.artists)
             if column == self.COL_ALBUM:
                 return song.album
+            if column == self.COL_QUALITY:
+                return song.quality
             return None
 
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -209,9 +212,14 @@ class LocalPage(BasePage):
         header.setSectionResizeMode(LocalTableModel.COL_NAME, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(LocalTableModel.COL_ARTIST, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(LocalTableModel.COL_ALBUM, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(
+            LocalTableModel.COL_QUALITY, QHeaderView.ResizeMode.Interactive
+        )
         self.table.setColumnWidth(LocalTableModel.COL_INDEX, 46)
-        self.table.setColumnWidth(LocalTableModel.COL_ARTIST, 200)
-        self.table.setColumnWidth(LocalTableModel.COL_ALBUM, 200)
+        self.table.setColumnWidth(LocalTableModel.COL_ARTIST, 180)
+        self.table.setColumnWidth(LocalTableModel.COL_ALBUM, 180)
+        # 「无损 44.1kHz/16bit」是这一列最长的常见取值
+        self.table.setColumnWidth(LocalTableModel.COL_QUALITY, 150)
 
         self.content.addWidget(self.table, 1)
 

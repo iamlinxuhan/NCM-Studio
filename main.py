@@ -109,8 +109,15 @@ def _self_test(window: MainWindow) -> int:
         model = getattr(local_page, "model", None)
         if model is None:
             problems.append("本地音乐页没有表格模型")
-        elif model.columnCount() != 4:
-            problems.append(f"本地音乐表格应为 4 列，实际 {model.columnCount()} 列")
+        elif model.columnCount() != 5:
+            problems.append(f"本地音乐表格应为 5 列，实际 {model.columnCount()} 列")
+        else:
+            headers = [
+                model.headerData(i, Qt.Orientation.Horizontal)
+                for i in range(model.columnCount())
+            ]
+            if headers != ["#", "歌名", "歌手", "专辑", "音乐质量"]:
+                problems.append(f"本地音乐表头不对：{headers}")
         picker = getattr(local_page, "path_picker", None)
         if picker is None or not picker.path():
             problems.append("本地音乐页没有默认目录")
@@ -261,12 +268,12 @@ def _demo_songs():
     from ncmgui.resolver import Song
 
     titles = (
-        ("夜航", "沈以诚", "夜航", 222),
-        ("海边的房间", "房东的猫", "柔软", 245),
-        ("雨停了以后", "刘昊霖", "十城记", 198),
-        ("晚风心里吹", "阿梨粤", "晚风", 231),
-        ("星河入梦", "银河系", "漫游", 267),
-        ("关于你", "陈壹千", "关于你", 214),
+        ("夜航", "沈以诚", "夜航", 222, "无损 44.1kHz/16bit"),
+        ("海边的房间", "房东的猫", "柔软", 245, "无损 48kHz/24bit"),
+        ("雨停了以后", "刘昊霖", "十城记", 198, "极高 320 kbps"),
+        ("晚风心里吹", "阿梨粤", "晚风", 231, "较高 192 kbps"),
+        ("星河入梦", "银河系", "漫游", 267, "标准 128 kbps"),
+        ("关于你", "陈壹千", "关于你", 214, "无损 44.1kHz/16bit"),
     )
     return [
         Song(
@@ -276,8 +283,10 @@ def _demo_songs():
             album=album,
             duration=seconds * 1000,  # Song.duration 是毫秒
             pic_url="",
+            # 截图里本地音乐页要展示「音乐质量」列；播放页不读这个字段
+            quality=quality,
         )
-        for index, (name, artist, album, seconds) in enumerate(titles)
+        for index, (name, artist, album, seconds, quality) in enumerate(titles)
     ]
 
 

@@ -167,6 +167,9 @@ class Song:
     pic_url: str = ""
     #: 本地文件路径。只有「本地音乐」队列会填，流媒体歌曲为空串
     path: str = ""
+    #: 本地文件的音质描述，如「无损 44.1kHz/16bit」「极高 320 kbps」。
+    #: 流媒体歌曲为空串 —— 那边的音质由播放时选的档位决定，不是文件属性
+    quality: str = ""
 
     @property
     def base(self) -> str:

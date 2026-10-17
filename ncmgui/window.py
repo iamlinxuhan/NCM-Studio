@@ -258,6 +258,9 @@ class MainWindow(QMainWindow):
         self.playback_bar.queueRequested.connect(
             lambda: self.open_player_page(queue=True)
         )
+        # 点播放条左侧的封面/歌名回到黑胶唱片页；从播放页「返回」之后
+        # 侧栏里没有它的入口，这里是唯一的直达路径
+        self.playback_bar.playerRequested.connect(self.open_player_page)
         body_layout.addWidget(self.playback_bar)
         return body
 

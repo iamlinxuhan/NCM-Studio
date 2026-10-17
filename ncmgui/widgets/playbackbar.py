@@ -1,7 +1,9 @@
 """全局底部播放条。
 
-不管当前在哪一页，这一条都在：上一首/播放/下一首、进度、音量和播放顺序。
-歌曲信息（封面、歌名、歌手）不在这里重复 —— 播放页的歌词上方已经有一份。
+不管当前在哪一页，这一条都在：封面/歌名、上一首/播放/下一首、进度、音量和
+播放顺序。左侧的歌曲信息可以点 —— 从播放页「返回」之后，这就是回到黑胶
+唱片那一页的入口。
+
 它只读 :class:`~ncmgui.playback.PlaybackController` 的状态，自己不留第二份 ——
 否则暂停状态在两个地方各记一份，迟早对不上。
 """
@@ -9,7 +11,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QMouseEvent, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -17,10 +19,11 @@ from PyQt6.QtWidgets import (
     QSlider,
     QStyle,
     QStyleOptionSlider,
+    QVBoxLayout,
     QWidget,
 )
 
-from .. import player, theme
+from .. import images, player, theme
 from ..playback import (
     STATE_ERROR,
     STATE_IDLE,
@@ -65,16 +68,117 @@ class SeekSlider(QSlider):
         super().mousePressEvent(event)
 
 
+class NowPlaying(QWidget):
+    """播放条左侧的「正在播放」：封面 + 歌名/歌手，点一下打开播放页。
+
+    播放页不是导航项，离开之后侧栏里没有入口；没有这一块，用户从播放页
+    返回就只能靠播放列表按钮 —— 不知道该点哪儿的人会被困在别的页面。
+    """
+
+    clicked = pyqtSignal()
+
+    #: 封面缩略图边长
+    COVER_SIZE = 46
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("NowPlaying")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("打开播放页")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(216)
+
+        self._placeholder = images.placeholder(self.COVER_SIZE)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(9)
+
+        self.cover = QLabel()
+        self.cover.setObjectName("NowPlayingCover")
+        self.cover.setFixedSize(self.COVER_SIZE, self.COVER_SIZE)
+        self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.cover)
+
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(2)
+        self.title = QLabel("未在播放")
+        self.title.setObjectName("NowPlayingTitle")
+        self.artist = QLabel("")
+        self.artist.setObjectName("NowPlayingArtist")
+        text.addWidget(self.title)
+        text.addWidget(self.artist)
+        layout.addLayout(text, 1)
+
+        # 事件统一交给这一层处理：点在封面或文字上也要能打开播放页
+        for widget in (self.cover, self.title, self.artist):
+            widget.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+            )
+
+        self.set_cover(None)
+
+    # ------------------------------------------------------------ 状态
+
+    def set_song(self, song) -> None:
+        if song is None:
+            self.title.setText("未在播放")
+            self.artist.setText("")
+            self.setToolTip("打开播放页")
+            return
+
+        name = getattr(song, "name", "") or "未知曲目"
+        artist = ", ".join(getattr(song, "artists", ()) or ()) or "未知歌手"
+        metrics = self.title.fontMetrics()
+        self.title.setText(
+            metrics.elidedText(name, Qt.TextElideMode.ElideRight, 152)
+        )
+        self.artist.setText(
+            self.artist.fontMetrics().elidedText(
+                artist, Qt.TextElideMode.ElideRight, 152
+            )
+        )
+        self.setToolTip(f"{name}\n{artist}\n点击打开播放页")
+
+    def set_cover(self, pixmap: QPixmap | None) -> None:
+        """缩略图；``None`` 用渐变占位图。"""
+        if pixmap is None or pixmap.isNull():
+            pixmap = self._placeholder
+        scaled = pixmap.scaled(
+            self.COVER_SIZE,
+            self.COVER_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.cover.setPixmap(scaled)
+
+    # ------------------------------------------------------------ 点击
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt 命名
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class PlaybackBar(QWidget):
     """窗口底部的常驻播放条。"""
 
     #: 用户点了「播放列表」：打开播放页并展开队列
     queueRequested = pyqtSignal()
+    #: 用户点了左侧歌曲信息：打开播放页（不展开队列）
+    playerRequested = pyqtSignal()
 
     def __init__(self, window, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.window = window
         self.playback = window.playback
+        self.covers = getattr(window, "covers", None)
 
         self._song = None
         self._scrubbing = False
@@ -97,6 +201,12 @@ class PlaybackBar(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 9, 14, 9)
         layout.setSpacing(10)
+
+        # 左侧「正在播放」同时充当回到播放页的入口
+        self.now_playing = NowPlaying(self)
+        self.now_playing.clicked.connect(self.playerRequested.emit)
+        layout.addWidget(self.now_playing)
+        layout.addSpacing(2)
 
         # 不用 ⏮/⏭/⏸：这几个码位会被彩色 emoji 字体接管，图标固定在
         # 很小的字号上，和旁边的 ▶ 不齐。普通几何符号能跟着字号一起放大
@@ -161,17 +271,33 @@ class PlaybackBar(QWidget):
         self.playback.volumeChanged.connect(self._on_volume_changed)
         self.playback.modeChanged.connect(self._on_mode_changed)
         self.playback.queueChanged.connect(self._on_queue_changed)
+        if self.covers is not None:
+            self.covers.coverReady.connect(self._on_cover_ready)
 
     # ---------------------------------------------------------------- 状态
 
     def _on_track_changed(self, song) -> None:
-        # 歌曲信息不在这条上显示（播放页歌词上方有一份），这里只关心
-        # 有没有歌可播 —— 它决定播放键和进度条是否可用
         self._song = song
+        self.now_playing.set_song(song)
+
+        cached = None
+        if song is not None and self.covers is not None:
+            cached = self.covers.get(getattr(song, "id", None))
+        self.now_playing.set_cover(cached)
+        if song is not None and cached is None and self.covers is not None:
+            # 和播放页共用同一个缓存/去重，不会下两次
+            self.covers.request(song)
+
         self.progress.setEnabled(
             song is not None and self.playback.duration > 0
         )
         self._on_state_changed(self.playback.state)
+
+    def _on_cover_ready(self, song_id: int, pixmap: QPixmap) -> None:
+        # 切歌很快时，上一首的封面可能后到
+        if self._song is None or int(getattr(self._song, "id", 0)) != int(song_id):
+            return
+        self.now_playing.set_cover(pixmap)
 
     def _on_state_changed(self, state: str) -> None:
         playing = state == STATE_PLAYING
@@ -242,6 +368,8 @@ class PlaybackBar(QWidget):
     ) -> None:
         """截图用：不经过播放控制器，把播放条摆成正在播放的样子。"""
         self._song = song
+        self.now_playing.set_song(song)
+        self.now_playing.set_cover(None)
         self._on_state_changed(STATE_PLAYING)
         self.progress.setEnabled(duration > 0)
         if duration > 0:
