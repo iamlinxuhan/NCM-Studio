@@ -427,7 +427,8 @@ class SettingsPage(BasePage):
             box.setStandardButtons(ok | cancel)
             box.button(ok).setText("下载并安装")
             box.button(cancel).setText("稍后再说")
-            box.setDefaultButton(cancel)
+            # 默认就是安装：发现新版本来就是为了装它，「稍后」才该多走一步
+            box.setDefaultButton(ok)
         else:
             open_btn = box.addButton(
                 "打开 Release 页", QMessageBox.ButtonRole.AcceptRole
