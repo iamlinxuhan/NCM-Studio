@@ -475,7 +475,7 @@ class PlaybackBar(QWidget):
         self.prev_btn = self._transport_button("prev", "上一首", size=30)
         self.prev_btn.clicked.connect(self.playback.previous)
         self.play_btn = self._transport_button(
-            "play", "播放 / 暂停", size=32, icon_size=20
+            "play", "播放 / 暂停", size=32, icon_size=25
         )
         self.play_btn.clicked.connect(self.playback.toggle)
         self.next_btn = self._transport_button("next", "下一首", size=30)
@@ -525,7 +525,7 @@ class PlaybackBar(QWidget):
         layout.addWidget(self.queue_btn)
 
     def _transport_button(
-        self, kind: str, tip: str, size: int, icon_size: int = 18
+        self, kind: str, tip: str, size: int, icon_size: int = 23
     ) -> QPushButton:
         button = ghost_button("", compact=True)
         button.setProperty("transport", "flat")
