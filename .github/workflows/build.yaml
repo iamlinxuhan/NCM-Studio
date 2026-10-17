@@ -157,10 +157,11 @@ jobs:
         run: |
           $bin = Get-ChildItem dist/* | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
           pyi-archive_viewer -l $bin.FullName > toc-mpv.txt
-          # 归档里的路径分隔符跟平台走：Windows 可能是 mpv\mpv.exe，
-          # 所以用正则同时认两种，而不是写死正斜杠
-          if (-not (Select-String -Path toc-mpv.txt -Pattern 'mpv[\\/]mpv\.exe' -Quiet)) {
-            throw "产物里没有 mpv/mpv.exe —— 流媒体播放在新机器上会不可用"
+          # 只看文件名，不拼路径：归档列表是 Python repr，Windows 上的
+          # mpv\mpv.exe 会打成 'mpv\\mpv.exe'，按分隔符匹配怎么都差一层。
+          # 归档里不会有第二个 mpv.exe，这个名字足够唯一
+          if (-not (Select-String -Path toc-mpv.txt -SimpleMatch -Pattern 'mpv.exe' -Quiet)) {
+            throw "产物里没有 mpv.exe —— 流媒体播放在新机器上会不可用"
           }
           Write-Host "内置 mpv 到位：$($bin.Name)"
 
