@@ -337,7 +337,13 @@ class PlayerPage(BasePage):
         local = str(getattr(song, "path", "") or "")
         if local:
             text = lyrics.read_local(Path(local))
-            self._apply_payload({"lrc": {"lyric": text}}, generation)
+            # 下载时译文被插在原文下一行（同一时间戳），这里拆回去，
+            # 让本地歌词也用和在线歌词一样的「原文 + 小号译文」排版
+            original, translated = lyrics.split_translation(text)
+            self._apply_payload(
+                {"lrc": {"lyric": original}, "tlyric": {"lyric": translated}},
+                generation,
+            )
             return
 
         if self.window.defer_page_loads:

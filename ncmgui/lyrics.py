@@ -379,6 +379,46 @@ def translation_map(text: str) -> dict[int, str]:
     return found
 
 
+def split_translation(text: str) -> tuple[str, str]:
+    """把「原文 + 译文」混排的 LRC 拆回两份文本。
+
+    下载歌词时 :meth:`Lyric.text` 会把译文紧插在原文的下一行，并沿用原文的
+    时间戳。播放这种本地文件时若把每一行都当原文，译文就会和原文一样大、
+    一样亮 —— 和流媒体的显示对不上。本地播放前先用这个函数还原成
+    ``lrc`` / ``tlyric`` 两份，再走与在线歌词完全相同的解析和渲染。
+
+    判据是「相邻两行时间戳相同、正文不同」。原文里偶尔会有同一时刻的
+    重复句（时间戳与正文都一样），那种仍是原文，不会被误当成译文。
+
+    返回 ``(原文, 译文)``，两段都保留原始行（含元数据行）。
+    """
+    original: list[str] = []
+    translation: list[str] = []
+    previous_key: int | None = None
+    previous_body = ""
+
+    for raw in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stamps = list(_TIMESTAMP_RE.finditer(raw))
+        if not stamps:
+            # [by:...] 这类元数据跟着原文走；它也会打断「相邻」关系
+            original.append(raw)
+            previous_key, previous_body = None, ""
+            continue
+
+        key = _centiseconds(stamps[0])
+        body = _TIMESTAMP_RE.sub("", raw).strip()
+        if body and key == previous_key and body != previous_body:
+            translation.append(raw)
+            # 一行原文只配一行译文，第三行同时间戳的按原文处理
+            previous_key, previous_body = None, ""
+            continue
+
+        original.append(raw)
+        previous_key, previous_body = key, body
+
+    return "\n".join(original), "\n".join(translation)
+
+
 def line_index_at(lines: Sequence[tuple[float, str]], position: float | None) -> int:
     """``position`` 秒时应该高亮第几行；还没到第一句返回 ``-1``。
 
@@ -961,6 +1001,30 @@ def _selftest() -> int:
         "毫秒位精度不同也对得上",
         merge_translation("[00:01.00]a", "[00:01.000]b"),
         "[00:01.00]a\n[00:01.00]b",
+    )
+
+    # ---- 本地 .lrc：把下载时混排的译文拆回去
+    check(
+        "合并过的本地歌词能拆回原文与译文",
+        split_translation(
+            "[00:01.00]千本桜\n[00:01.00]千本樱\n[00:02.00]夜ニ紛レ\n[00:02.00]夜中纷乱"
+        ),
+        ("[00:01.00]千本桜\n[00:02.00]夜ニ紛レ", "[00:01.00]千本樱\n[00:02.00]夜中纷乱"),
+    )
+    check(
+        "同一句重复出现不会被当成译文",
+        split_translation("[00:01.00]副歌\n[00:01.00]副歌"),
+        ("[00:01.00]副歌\n[00:01.00]副歌", ""),
+    )
+    check(
+        "元数据行留在原文里",
+        split_translation("[by:x]\n[00:01.00]a\n[00:01.00]b"),
+        ("[by:x]\n[00:01.00]a", "[00:01.00]b"),
+    )
+    check(
+        "没有译文时原样作为原文返回",
+        split_translation("[00:01.00]a\n[00:02.00]b"),
+        ("[00:01.00]a\n[00:02.00]b", ""),
     )
 
     # ---- 播放时逐行显示
