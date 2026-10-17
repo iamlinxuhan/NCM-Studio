@@ -20,6 +20,7 @@ from PyQt6.QtCore import (
     QModelIndex,
     QPropertyAnimation,
     Qt,
+    QTimer,
     pyqtSignal,
 )
 from PyQt6.QtGui import QColor, QFont, QPixmap
@@ -122,6 +123,10 @@ class PlayerPage(BasePage):
     SCROLLABLE = False
     TRAILING_STRETCH = False
 
+    #: 黑胶 : 歌词的默认宽度比例（来自最初的 360 : 620 布局）。
+    #: 用户拖动过就记在 ``player.split`` 里，下次启动按用户的比例来。
+    DEFAULT_SPLIT = (0.367, 0.633)
+
     backRequested = pyqtSignal()
 
     def build(self) -> None:
@@ -138,6 +143,13 @@ class PlayerPage(BasePage):
         self._scroll_anim: QPropertyAnimation | None = None
         self._queue_visible = False
         self._demo_mode = False
+        self._split_applied = False
+        self._split_dirty = False
+        # 拖动时每像素都写盘没必要，松手 400ms 后再记一次
+        self._split_timer = QTimer(self)
+        self._split_timer.setSingleShot(True)
+        self._split_timer.setInterval(400)
+        self._split_timer.timeout.connect(self._persist_split)
         self._placeholder = images.placeholder(330)
         self._cover_id: int | None = None
 
@@ -253,6 +265,9 @@ class PlayerPage(BasePage):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
         self.splitter.setSizes([360, 620, 280])
+        # 只记黑胶 : 歌词的比例；队列面板的宽度不持久化，收起后重新打开
+        # 仍按当前比例分配前两块
+        self.splitter.splitterMoved.connect(self._on_split_moved)
         self.content.addWidget(self.splitter, 1)
         self._refresh_meta()
 
@@ -532,9 +547,76 @@ class PlayerPage(BasePage):
             sizes = self.splitter.sizes()
             if len(sizes) == 3 and sizes[2] < 80:
                 total = max(1, sum(sizes))
-                self.splitter.setSizes(
-                    [int(total * 0.36), int(total * 0.40), int(total * 0.24)]
-                )
+                queue = max(80, int(total * 0.22))
+                available = max(2, total - queue)
+                first_ratio, _ = self._current_ratios()
+                first = max(1, round(available * first_ratio))
+                self.splitter.setSizes([first, max(1, available - first), queue])
+
+    # ------------------------------------------------------------ 分栏比例
+
+    def _split_ratios(self) -> list[float]:
+        """当前黑胶 : 歌词的宽度比例，队列面板不算在内。"""
+        sizes = self.splitter.sizes()
+        if len(sizes) < 2:
+            return []
+        first, second = max(0, sizes[0]), max(0, sizes[1])
+        total = first + second
+        if total <= 0:
+            return []
+        return [round(first / total, 4), round(second / total, 4)]
+
+    def _saved_split(self) -> tuple[float, float]:
+        saved = self.cfg.get("player.split", [])
+        try:
+            if isinstance(saved, (list, tuple)) and len(saved) == 2:
+                first, second = float(saved[0]), float(saved[1])
+                if first > 0 and second > 0:
+                    total = first + second
+                    return first / total, second / total
+        except (TypeError, ValueError):
+            pass
+        return self.DEFAULT_SPLIT
+
+    def _current_ratios(self) -> tuple[float, float]:
+        ratios = self._split_ratios()
+        return (ratios[0], ratios[1]) if ratios else self._saved_split()
+
+    def _on_split_moved(self, *_args) -> None:
+        self._split_dirty = True
+        self._split_timer.start()
+
+    def _persist_split(self) -> None:
+        # 只在用户真的拖过之后写；否则关闭窗口会把默认比例盖掉用户的记录
+        if not self._split_dirty:
+            return
+        ratios = self._split_ratios()
+        if not ratios:
+            return
+        self._split_dirty = False
+        self.cfg.set("player.split", ratios)
+        self.cfg.save()
+
+    def _restore_split(self) -> None:
+        """按上次保存的比例摆放黑胶与歌词；没有记录就保持默认。"""
+        if self._split_applied:
+            return
+        if not self.cfg.get("player.split"):
+            self._split_applied = True
+            return
+        sizes = self.splitter.sizes()
+        total = sum(sizes)
+        if len(sizes) < 2 or total <= 0:
+            # 页面还没完成布局，留到下次显示再试
+            return
+        queue = sizes[2] if len(sizes) > 2 else 0
+        available = total - queue
+        if available <= 0:
+            return
+        first_ratio, _ = self._saved_split()
+        first = max(1, round(available * first_ratio))
+        self.splitter.setSizes([first, max(1, available - first), queue])
+        self._split_applied = True
 
     # ---------------------------------------------------------------- 演示
 
@@ -563,3 +645,11 @@ class PlayerPage(BasePage):
 
     def on_show(self) -> None:
         self.set_queue_visible(self._queue_visible)
+        if not self._split_applied:
+            # 等 splitter 完成第一次布局，setSizes 才有实际宽度可分
+            QTimer.singleShot(0, self._restore_split)
+
+    def save_config(self) -> None:
+        # 退出时补记一次，免得最后一次拖动还在防抖里没落盘
+        self._split_timer.stop()
+        self._persist_split()

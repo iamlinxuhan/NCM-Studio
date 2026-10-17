@@ -176,6 +176,8 @@ def _defaults() -> dict[str, Any]:
             "volume": 70,
             "mode": "loop",
             "local_dir": "",
+            # 播放页里黑胶 : 歌词的宽度比例（[0.367, 0.633]），空表示用默认
+            "split": [],
         },
         # 自动更新。git_proxy 为空走系统代理，direct 表示直连
         "update": {

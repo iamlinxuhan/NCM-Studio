@@ -577,7 +577,8 @@ class MainWindow(QMainWindow):
         此时子控件可能已经不在了），所以这里容忍 RuntimeError —— 这种情况下
         设置本来就无从采集，不该让退出流程崩掉。
         """
-        for page in self.pages.values():
+        # 播放页不在导航里（self.pages 里没有），单独收一次分栏比例
+        for page in (*self.pages.values(), self.player_page):
             saver = getattr(page, "save_config", None)
             if not callable(saver):
                 continue
