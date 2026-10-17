@@ -8,9 +8,11 @@
 
 ![我喜欢的音乐](docs/screenshots/02-liked.png)
 
-![播放页：黑胶唱片与歌词](docs/screenshots/10-player.png)
+![本地音乐](docs/screenshots/03-local.png)
 
-![下载页](docs/screenshots/03-download.png)
+![播放页：黑胶唱片与歌词](docs/screenshots/11-player.png)
+
+![下载页](docs/screenshots/04-download.png)
 
 ## 功能覆盖
 
@@ -19,8 +21,9 @@ ncmctl 的全部子命令都在界面里有对应入口：
 | 页面 | 对应命令 | 说明 |
 | --- | --- | --- |
 | 账号 | `login qrcode` / `phone` / `cookie` / `cookiecloud`、`logout` | 四种登录方式；扫码登录会在界面里显示二维码 |
-| 我喜欢的音乐 | `SongDownloadUrlV1` + 随包 mpv | 红心歌单列表，点一首即流播；播放页、歌词、队列、四种播放顺序；也能直接播本地音乐 |
-| 下载 | `download` | 歌曲 ID、专辑 / 歌手 / 歌单链接；选音质、并发数、输出目录；**内置查重**与**歌词下载**，可一键搬空「我喜欢的音乐」 |
+| 我喜欢的音乐 | `SongDownloadUrlV1` + 随包 mpv | 红心歌单列表，点一首即流播；播放页、歌词、队列、四种播放顺序 |
+| 本地音乐 | 随包 mpv | 扫描下载目录或任意文件夹，点一首就播；默认 `~/音乐/ncmctl`，可自行选择 |
+| 下载 | `download` | 歌曲 ID、专辑 / 歌手 / 歌单链接；选音质、并发数、输出目录；**内置查重**与**歌词 / 封面下载**，可一键搬空「我喜欢的音乐」 |
 | NCM 解码 | `ncm` | 把 `.ncm` 还原成 `.mp3` / `.flac`，纯本地操作 |
 | 云盘上传 | `cloud` | 上传单曲或整个文件夹，可按体积和正则过滤 |
 | 账号任务 | `sign` / `scrobble` / `partner` / `task` | 单个任务立即执行，或挂成 cron 定时服务 |
@@ -138,6 +141,9 @@ Windows 上另有 `%USERPROFILE%\go\bin`、`%LOCALAPPDATA%\Microsoft\WinGet\Link
 macOS 是 `~/Music`；Windows 是 `%USERPROFILE%\Music`），在其下建 `ncmctl` 子目录，
 避免和已有曲库混在一起。所有选择都会持久化到配置文件，下次打开自动恢复。
 
+「本地音乐」页默认也打开这个下载目录，但可以单独换成任意文件夹（记在
+`player.local_dir`），不影响下载的输出目录。
+
 ## 查重与「下载我喜欢的音乐」
 
 这两项是 ncmctl 自己不提供、由界面补上的能力。
@@ -208,6 +214,23 @@ compatibility; download tag writing is not implemented"，实测下完的 flac �
   不是拿歌名去拼后缀：同一首歌可能落成 `.flac` 也可能 `.mp3`，重名时还会变成
   `歌曲(1).flac`，三种都得认。
 
+## 封面
+
+**ncmctl 同样不下载封面。** 封面地址就在解析结果的 `al.picUrl` 里，下载正常
+结束后界面会顺手补一轮（见 [ncmgui/covers.py](ncmgui/covers.py)）。「下载设置」里的
+**封面**也是三选一：
+
+| 选项 | 做什么 | 动你的文件吗 |
+| --- | --- | --- |
+| **保存为同名图片**（默认） | 音频旁边放一张同名图片：`歌手 - 歌名.flac` → `歌手 - 歌名.jpg` | 不动，只多一个图片文件 |
+| 写入音频标签（内嵌） | 写进 flac 的 picture、mp3 的 APIC、m4a 的 covr、ogg / opus 的 `metadata_block_picture` | **会改写文件本身** |
+| 不下载封面 | 什么都不做 | 不动 |
+
+- 图片地址会先升到 600×600（`?param=600y600`），避免把 130×130 的缩略图存下来；
+- 落盘前按**文件头**判断真实格式，接口返回 HTML / JSON 时不会存出一个打不开的 `.jpg`；
+- 已经有同名图片（或标签里已有封面）的直接跳过，重复跑不会重复下载；
+- 本地音乐播放时按「同名图片 → 内嵌封面」的顺序找图，离线也有封面。
+
 ## VIP / 付费歌曲的标注
 
 ncmctl 的下载日志只有进度条和一句 `report total: ...`，**从不提付费情况** ——
@@ -274,14 +297,17 @@ ncmctl 的下载日志只有进度条和一句 `report total: ...`，**从不提
 
 ### 播放本地音乐
 
-红心页底部的两个按钮不用登录、也不联网：
+侧边栏的**「本地音乐」**页不用登录、也不联网：
 
-- **本地音乐…**：选一个或多个音频文件，作为队列播放。文件对话框默认打开程序下载
-  目录，选过一次后会记住上次的目录。
-- **播放下载目录**：递归扫描下载目录（最多 5000 个文件，跳过隐藏路径），整目录
-  当作队列顺序播放。
+- 目录默认是程序的下载目录（`~/音乐/ncmctl`），也可以在页面顶部的路径控件里
+  换成任意文件夹；选择会记在 `player.local_dir`，下次打开直接落在这里；
+- 点表格任意一行即播，或用「播放全部」；
+- 递归扫描（最多 5000 个文件，跳过隐藏路径），表格第 0 列显示 `▶` / `⏸`；
+- 歌词优先找同名 `.lrc`，没有就读音频标签里的内嵌歌词；封面按「同名图片 →
+  内嵌封面」的顺序找，都没有就显示占位图。
 
-本地文件优先找同名 `.lrc`，没有就读音频标签里的内嵌歌词；都没有就显示「暂无歌词」。
+红心页底部还留着两个快捷入口：**本地音乐…**（选一个或多个文件）和
+**播放下载目录**（把整个下载目录当队列），适合临时听几首。
 
 ### 实现取舍
 
@@ -356,6 +382,9 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 
 # 歌词处理的自检（纯函数，不联网；需要 mutagen 才能验标签往返）
 .venv/bin/python -m ncmgui.lyrics
+
+# 封面：文件头识别、同名图片、flac / mp3 标签往返、跳过已有封面
+.venv/bin/python -m ncmgui.covers
 
 # 播放器 IPC 编解码与 mpv 定位（纯函数，不需要 mpv 在场）
 .venv/bin/python -m ncmgui.player
@@ -458,6 +487,7 @@ ncmgui/
   ncmctl.py            命令构建：把界面选择翻译成参数数组（不依赖 Qt）
   resolver.py          目标解析与查重：展开 id/链接 → 歌曲清单 → 比对输出目录（不依赖 Qt）
   lyrics.py            歌词：解析 LRC、合并翻译、写 .lrc 或写进音频标签（不依赖 Qt）
+  covers.py            封面：文件头识别、同名图片、读写音频标签里的封面（不依赖 Qt）
   player.py            播放器：定位 mpv、JSON IPC 收发、事件解析、直链缓存（不依赖 Qt）
   playback.py          全局播放控制：队列、四种播放顺序、进度外推与竞态保护
   images.py            封面下载、放大、占位图与内存 LRU 缓存
@@ -469,7 +499,7 @@ ncmgui/
   theme.py             调色板、全局 QSS、霓虹辉光
   window.py            侧边栏 + 页面栈 + 底部播放条 + 作业控制台
   widgets/             Card、FormCard、ConsolePanel、PlaybackBar、Vinyl
-  pages/               九个导航页 + 播放页（player.py，不是导航项）
+  pages/               十个导航页 + 播放页（player.py，不是导航项）
 ```
 
 几条设计约定：

@@ -104,6 +104,16 @@ def fetch(url: str, proxy: str = "", timeout: float = 10.0) -> bytes:
         raise RuntimeError(f"封面下载失败：{reason}") from exc
 
 
+def _read_local_artwork(path: str) -> bytes | None:
+    """本地音频的封面。惰性导入，避免 images ↔ covers 的循环依赖。"""
+    from .covers import read_artwork
+
+    try:
+        return read_artwork(path)
+    except Exception:  # noqa: BLE001 - 封面读不出来不该影响播放
+        return None
+
+
 def placeholder(size: int = 160) -> QPixmap:
     """没有封面时用的渐变方块，中间一个音符。
 
@@ -227,14 +237,19 @@ class CoverStore(QObject):
             return cached
 
         url = upgrade_url(str(getattr(song, "pic_url", "") or ""), self._size)
-        if not url:
+        local = str(getattr(song, "path", "") or "")
+        if not url and not local:
             return None
         with self._lock:
             if song_id in self._pending:
                 return None
             self._pending.add(song_id)
 
-        task = BackgroundTask(lambda: self._fetcher(url), parent=self)
+        if local:
+            # 本地文件不联网：同名图片或内嵌封面，读不到就不显示
+            task = BackgroundTask(lambda: _read_local_artwork(local), parent=self)
+        else:
+            task = BackgroundTask(lambda: self._fetcher(url), parent=self)
         self._tasks.add(task)
 
         def done(data: object) -> None:

@@ -6,8 +6,9 @@
 * **查重** —— ncmctl 遇到同名文件只会改写成 ``歌曲(1).flac`` 接着下，
   不会跳过。这里在下载前先把目标展开成歌曲清单，比对输出目录，把已有的剔掉。
 * **下载「我喜欢的音乐」** —— 一键把整个红心歌单搬回本地。
-* **歌词** —— ncmctl 只下音频，标签一个都不写（``--tag`` 是空实现），歌词自然
-  也没有。下完之后按设置补一轮，见 :mod:`ncmgui.lyrics`。
+* **歌词与封面** —— ncmctl 只下音频，标签一个都不写（``--tag`` 是空实现），
+  歌词、封面自然也没有。下完之后按设置补一轮，见 :mod:`ncmgui.lyrics` 与
+  :mod:`ncmgui.covers`。
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Callable
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMessageBox
 
-from .. import lyrics, ncmctl
+from .. import covers, images, lyrics, ncmctl
 from ..config import default_music_dir
 from ..resolver import PLAYLIST_URL, FeeTagger, Plan, Resolver, Song
 from ..widgets.card import Card, accent_button, ghost_button
@@ -86,8 +87,9 @@ class DownloadPage(BasePage):
         self._plan_mode = ""
         #: 解析失败时退而求其次的动作（见 _start_task）
         self._fallback: Callable[[], None] | None = None
-        #: 正在跑的歌词任务，仅用于避免重复启动
+        #: 正在跑的歌词 / 封面任务，仅用于避免重复启动
         self._lyric_task = None
+        self._cover_task = None
         super().__init__(window)
 
     # -------------------------------------------------------------------- 构建
@@ -162,6 +164,16 @@ class DownloadPage(BasePage):
                 "会在音频旁边放一个同名的 .lrc；「写入音频标签」直接写进音频文件"
                 "（会改写文件本身）；外文歌会自动把中文翻译逐行插在原文下面。"
                 "已经带歌词的会跳过，重复跑不会做无用功。"
+            ),
+        )
+        self.cover = options.add_combo(
+            "封面",
+            covers.MODES,
+            self.cfg.get("download.cover", covers.MODE_FILE),
+            hint=(
+                "「保存为同名图片」会在音频旁边放一张同名 .jpg，不改动音频文件；"
+                "「写入音频标签」直接嵌进音频文件（会改写文件本身）。"
+                "本地音乐播放时会优先用这张图。已经有封面的会跳过。"
             ),
         )
         self.parallel = options.add_spin(
@@ -305,7 +317,7 @@ class DownloadPage(BasePage):
             # 文件名，没有它照样能下载。ncmctl 自己未必解析不了这个目标，所以
             # 退回去直接下，只是这一轮没有歌词。
             self.warn(
-                f"{message}\n\n将跳过查重与歌词，把目标直接交给 ncmctl 下载。",
+                f"{message}\n\n将跳过查重、歌词与封面，把目标直接交给 ncmctl 下载。",
                 "解析失败",
             )
             fallback()
@@ -391,10 +403,11 @@ class DownloadPage(BasePage):
 
         checking = self.skip_existing.isChecked()
         wants_lyric = combo_data(self.lyric, lyrics.MODE_LRC) != lyrics.MODE_NONE
+        wants_cover = combo_data(self.cover, covers.MODE_FILE) != covers.MODE_NONE
 
-        # 既不查重也不要歌词：直接把原始目标交给 ncmctl，一个接口请求都不用发，
-        # 行为与以前完全一致
-        if not checking and not wants_lyric:
+        # 既不查重、也不要歌词和封面：直接把原始目标交给 ncmctl，一个接口请求都
+        # 不用发，行为与以前完全一致
+        if not checking and not wants_lyric and not wants_cover:
             self._submit_download(targets, self._title_for(targets))
             return
 
@@ -409,8 +422,9 @@ class DownloadPage(BasePage):
             busy = "正在解析目标并对照输出目录查重…"
             fallback = None
         else:
-            # 这一趟解析纯粹是为了拿歌曲 ID 好去取歌词，不参与下载决策
-            busy = "正在解析目标（为了取歌词）…"
+            # 这一趟解析纯粹是为了拿歌曲 ID / 封面地址，好在下完后补歌词和封面，
+            # 不参与下载决策
+            busy = "正在解析目标（为了取歌词与封面）…"
             fallback = lambda: self._submit_download(targets, self._title_for(targets))
 
         self._start_task(
@@ -519,25 +533,92 @@ class DownloadPage(BasePage):
             argv,
             intro=intro,
             tagger=FeeTagger(songs) if songs else None,
-            on_finish=self._lyric_hook(songs),
+            on_finish=self._post_hook(songs),
         )
 
-    def _lyric_hook(self, songs: list[Song] | None):
-        """造一个「下载结束后抓歌词」的回调；不需要时返回 ``None``。"""
-        mode = combo_data(self.lyric, lyrics.MODE_LRC)
-        if not songs or mode == lyrics.MODE_NONE:
+    def _post_hook(self, songs: list[Song] | None):
+        """造一个「下载结束后补封面和歌词」的回调；都不需要时返回 ``None``。"""
+        lyric_mode = combo_data(self.lyric, lyrics.MODE_LRC)
+        cover_mode = combo_data(self.cover, covers.MODE_FILE)
+        if not songs or (lyric_mode == lyrics.MODE_NONE and cover_mode == covers.MODE_NONE):
             return None
 
-        pairs = [(song.base, song.id) for song in songs]
+        # 封面地址在解析结果里，顺手升到 600×600；歌词要的是歌曲 ID
+        cover_pairs = [
+            (song.base, images.upgrade_url(song.pic_url)) for song in songs
+        ]
+        lyric_pairs = [(song.base, song.id) for song in songs]
         output = self._output_dir()
 
         def hook(panel, code: int) -> None:
             if code != 0:
-                _say(panel, f"下载没有正常结束（退出码 {code}），跳过歌词抓取")
+                _say(panel, f"下载没有正常结束（退出码 {code}），跳过封面与歌词")
                 return
-            self._start_lyrics(panel, pairs, output, mode)
+
+            def then_lyrics() -> None:
+                if lyric_mode != lyrics.MODE_NONE:
+                    self._start_lyrics(panel, lyric_pairs, output, lyric_mode)
+
+            # 先封面后歌词：两件事都会往同一个面板里写进度，串行起来看得清
+            self._start_covers(panel, cover_pairs, output, cover_mode, then_lyrics)
 
         return hook
+
+    def _start_covers(
+        self,
+        panel,
+        pairs: list[tuple[str, str]],
+        output: str,
+        mode: str,
+        then: Callable[[], None],
+    ) -> None:
+        """下载结束后补一轮封面，做完再接着跑 ``then``（歌词）。"""
+        if mode == covers.MODE_NONE:
+            then()
+            return
+
+        from ..workers import BackgroundTask
+
+        signals = _LyricSignals(self)
+
+        _say(panel, "")
+        _say(panel, f"── 抓取封面：{len(pairs)} 首 · {covers.mode_label(mode)} ──")
+        signals.progress.connect(lambda text, p=panel: _say(p, text, progress=True))
+        signals.note.connect(lambda text, p=panel: _say(p, text))
+
+        def work() -> covers.Report:
+            return covers.collect(
+                pairs,
+                images.fetch,
+                output,
+                mode,
+                parallel=LYRIC_PARALLEL,
+                on_progress=lambda done, total, base: signals.progress.emit(
+                    f"封面 {done}/{total} · {base}"
+                ),
+                on_note=signals.note.emit,
+            )
+
+        task = BackgroundTask(work, parent=self)
+        self._cover_task = task
+        task.done.connect(lambda report, p=panel: self._on_covers_done(p, report, then))
+        task.failed.connect(lambda message, p=panel: self._on_covers_failed(p, message, then))
+        task.start()
+
+    def _on_covers_done(self, panel, report: object, then: Callable[[], None]) -> None:
+        self._cover_task = None
+        if isinstance(report, covers.Report):
+            _say(panel, "")
+            _say(panel, f"── 封面：{report.summary()} ──")
+            if report.failed or report.missing:
+                self.toast(f"封面：{report.summary()}")
+        then()
+
+    def _on_covers_failed(self, panel, message: str, then: Callable[[], None]) -> None:
+        self._cover_task = None
+        # 封面和歌词一样是锦上添花：音频已经下好了，失败不该让人以为下载出了问题
+        _say(panel, f"封面下载失败：{message}（音频文件不受影响）")
+        then()
 
     def _start_lyrics(self, panel, pairs: list[tuple[str, int]], output: str, mode: str) -> None:
         """下载结束后补一轮歌词。
@@ -603,5 +684,6 @@ class DownloadPage(BasePage):
         self.cfg.set("download.strict", self.strict.isChecked())
         self.cfg.set("download.skip_existing", self.skip_existing.isChecked())
         self.cfg.set("download.lyric", combo_data(self.lyric, lyrics.MODE_LRC))
+        self.cfg.set("download.cover", combo_data(self.cover, covers.MODE_FILE))
         self.cfg.set("download.parallel", self.parallel.value())
         self.cfg.set("download.output", self.output.path())

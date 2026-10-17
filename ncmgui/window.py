@@ -27,6 +27,7 @@ from .pages.account import AccountPage
 from .pages.cloud import CloudPage
 from .pages.download import DownloadPage
 from .pages.liked import LikedPage
+from .pages.local import LocalPage
 from .pages.ncm import NcmPage
 from .pages.player import PlayerPage
 from .pages.proxy import ProxyPage
@@ -42,6 +43,7 @@ from .widgets.playbackbar import PlaybackBar
 NAV_ITEMS = (
     ("account", "◈", "账号", AccountPage),
     ("liked", "♡", "我喜欢的音乐", LikedPage),
+    ("local", "♪", "本地音乐", LocalPage),
     ("download", "▼", "下载", DownloadPage),
     ("ncm", "◇", "NCM 解码", NcmPage),
     ("cloud", "☁", "云盘上传", CloudPage),

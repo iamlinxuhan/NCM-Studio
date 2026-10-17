@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QMouseEvent, QPixmap
+from PyQt6.QtGui import QFontMetrics, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -86,6 +86,11 @@ class PlaybackBar(QWidget):
     #: 用户点了「播放列表」：打开播放页并展开队列
     queueRequested = pyqtSignal()
 
+    #: 左侧歌曲信息的固定宽度。歌名长短不一样，若让标签自己撑开，
+    #: 右边的播放键、进度条会随每首歌左右移动。播放条是常驻控件，
+    #: 按钮位置必须钉死，长歌名截断 + tooltip 看全名。
+    INFO_WIDTH = 200
+
     def __init__(self, window, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.window = window
@@ -130,8 +135,10 @@ class PlaybackBar(QWidget):
         self.title_label.setObjectName("PlaybackTitle")
         self.title_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.title_label.setToolTip("打开播放页")
+        self.title_label.setFixedWidth(self.INFO_WIDTH)
         self.artist_label = QLabel("")
         self.artist_label.setObjectName("PlaybackArtist")
+        self.artist_label.setFixedWidth(self.INFO_WIDTH)
         info.addWidget(self.title_label)
         info.addWidget(self.artist_label)
         layout.addLayout(info)
@@ -150,7 +157,8 @@ class PlaybackBar(QWidget):
 
         self.time_label = QLabel("--:-- / --:--")
         self.time_label.setObjectName("PlaybackTime")
-        self.time_label.setMinimumWidth(92)
+        # 「正在缓冲…」比时间串短，固定宽度就不会带着进度条一起动
+        self.time_label.setFixedWidth(96)
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.time_label)
 
@@ -165,7 +173,8 @@ class PlaybackBar(QWidget):
         layout.addWidget(self.progress, 1)
 
         self.mode_btn = ghost_button(mode_label(self.playback.mode), compact=True)
-        self.mode_btn.setMinimumWidth(82)
+        # 四种模式的文案长短不一（顺序 / 列表循环），固定宽度才不会被撑来撑去
+        self.mode_btn.setFixedWidth(88)
         self.mode_btn.clicked.connect(self.playback.cycle_mode)
         layout.addWidget(self.mode_btn)
 
@@ -199,11 +208,20 @@ class PlaybackBar(QWidget):
 
     # ---------------------------------------------------------------- 状态
 
+    def _set_info_text(self, label: QLabel, text: str) -> None:
+        """按固定宽度截断，末尾补省略号；完整文字留给 tooltip。
+
+        宽度是钉死的，所以这里只需要保证画出来的字不越界 —— 截断与否
+        都不会影响右边按钮的位置。
+        """
+        metrics = QFontMetrics(label.font())
+        label.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight, self.INFO_WIDTH - 8))
+
     def _on_track_changed(self, song) -> None:
         self._song = song
         if song is None:
             self._cover_id = None
-            self.title_label.setText("未在播放")
+            self._set_info_text(self.title_label, "未在播放")
             self.artist_label.setText("")
             self.title_label.setToolTip("打开播放页")
             self.cover.setPixmap(self._placeholder)
@@ -212,13 +230,13 @@ class PlaybackBar(QWidget):
             return
 
         self._cover_id = int(song.id)
-        self.title_label.setText(song.name or "未知曲目")
+        self._set_info_text(self.title_label, song.name or "未知曲目")
         artist = ", ".join(getattr(song, "artists", ()) or ())
         subtitle = artist or ("本地文件" if getattr(song, "path", "") else "")
         album = getattr(song, "album", "") or ""
         if album and album not in subtitle:
             subtitle = f"{subtitle} · {album}" if subtitle else album
-        self.artist_label.setText(subtitle)
+        self._set_info_text(self.artist_label, subtitle)
         self.title_label.setToolTip(song.display)
 
         pixmap = self.covers.get(self._cover_id)
@@ -305,8 +323,10 @@ class PlaybackBar(QWidget):
         """截图用：不经过播放控制器，把播放条摆成正在播放的样子。"""
         self._song = song
         self._cover_id = int(song.id)
-        self.title_label.setText(song.name or "未知曲目")
-        self.artist_label.setText(", ".join(getattr(song, "artists", ()) or ()))
+        self._set_info_text(self.title_label, song.name or "未知曲目")
+        self._set_info_text(
+            self.artist_label, ", ".join(getattr(song, "artists", ()) or ())
+        )
         self.title_label.setToolTip(getattr(song, "display", song.name))
         if cover is not None:
             self.cover.setPixmap(images.rounded(cover, 46))

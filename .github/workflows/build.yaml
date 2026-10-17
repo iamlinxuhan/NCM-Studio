@@ -101,6 +101,8 @@ jobs:
           # 一个静默跳过等于没测，所以这里先明确它必须在
           python -c "import mutagen"
           python -m ncmgui.lyrics
+          # 封面的文件头识别、同名图片、标签读写
+          python -m ncmgui.covers
           # 封面地址改写与 LRU 缓存
           python -m ncmgui.images
           # Release 版本比较、资产名、SHA256SUMS 解析、安装形态分支

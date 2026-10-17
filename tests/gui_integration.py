@@ -253,6 +253,22 @@ if submitted:
               body[:80])
         print(f"      {lrcs[0].name} 前两行：{body.splitlines()[:2]}", flush=True)
 
+    # ---- 封面：默认的「保存为同名图片」 -------------------------------- #
+    # 封面这一轮排在歌词前面（先图后字），所以走到这里时已经落盘了。
+    print("      —— 封面（同名图片）——", flush=True)
+    art = sorted(
+        p for p in out.iterdir()
+        if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and p.stat().st_size
+    )
+    check("每首下好的歌都有同名封面图", {p.stem for p in art} == {p.stem for p in audio},
+          [p.name for p in art])
+    for path in art:
+        head = path.read_bytes()[:12]
+        real_image = (
+            head[:3] == b"\xff\xd8\xff" or head[:8] == b"\x89PNG\r\n\x1a\n"
+        )
+        check(f"封面确实是图片：{path.name}", real_image, head)
+
 # ====================================================================== #
 print("[3] 关掉查重后，应当把原始目标直接交给 ncmctl", flush=True)
 submitted.clear()
@@ -351,7 +367,8 @@ def embedded_lyric(path: Path) -> str:
 
 
 set_combo_data(page.lyric, "none")
-check("模式=不下载时压根不挂后处理", page._lyric_hook(keep) is None)
+set_combo_data(page.cover, "none")
+check("歌词和封面都选「不下载」时压根不挂后处理", page._post_hook(keep) is None)
 
 # 「写入音频标签」：先清掉上一轮生成的 .lrc，确保下面看的确实是标签
 for stale in out.glob("*.lrc"):

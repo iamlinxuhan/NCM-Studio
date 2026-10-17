@@ -37,7 +37,7 @@ from PyQt6.QtGui import (  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
-from ncmgui.config import Config  # noqa: E402
+from ncmgui.config import Config, default_music_dir  # noqa: E402
 from ncmgui.resources import ICON_PATH  # noqa: E402
 from ncmgui.window import MainWindow  # noqa: E402
 
@@ -51,6 +51,7 @@ def _self_test(window: MainWindow) -> int:
     expected = {
         "account",
         "liked",
+        "local",
         "download",
         "ncm",
         "cloud",
@@ -101,6 +102,18 @@ def _self_test(window: MainWindow) -> int:
                 problems.append(f"红心歌单表头不对：{headers}")
         if getattr(liked, "_player", None) is not None:
             problems.append("自检时不该启动播放器")
+
+    # 本地音乐页不联网，表格列数与默认目录都是纯逻辑
+    local_page = window.pages.get("local")
+    if local_page is not None:
+        model = getattr(local_page, "model", None)
+        if model is None:
+            problems.append("本地音乐页没有表格模型")
+        elif model.columnCount() != 4:
+            problems.append(f"本地音乐表格应为 4 列，实际 {model.columnCount()} 列")
+        picker = getattr(local_page, "path_picker", None)
+        if picker is None or not picker.path():
+            problems.append("本地音乐页没有默认目录")
 
     # 播放页不是导航页：它在栈里，但启动时不该是当前页，也不该拉起 mpv
     if getattr(window, "player_page", None) is None:
@@ -298,9 +311,12 @@ def _screenshot(window: MainWindow, target: str) -> int:
     out_dir = Path(target).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 截图只是画界面，不该顺手去拉歌单
+    # 截图只是画界面，不该顺手去拉歌单，也不该扫描真实目录
     window.defer_page_loads = True
     window.resize(1180, 820)
+    local = window.pages.get("local")
+    if local is not None:
+        local.set_demo(_demo_songs(), str(default_music_dir()))
     for index, (key, _glyph, _label, _cls) in enumerate(NAV_ITEMS):
         window.show_page(key)
         # 让布局与样式表完成一轮计算，否则抓到的可能是空白
@@ -323,7 +339,7 @@ def _screenshot(window: MainWindow, target: str) -> int:
     window.open_player_page(queue=False)
     QApplication.processEvents()
     image = window.grab()
-    path = out_dir / "10-player.png"
+    path = out_dir / "11-player.png"
     if not image.save(str(path)):
         print(f"保存失败：{path}")
         return 1
@@ -340,7 +356,7 @@ def _screenshot(window: MainWindow, target: str) -> int:
     for _ in range(3):
         QApplication.processEvents()
     image = window.grab()
-    path = out_dir / "11-player-queue.png"
+    path = out_dir / "12-player-queue.png"
     if not image.save(str(path)):
         print(f"保存失败：{path}")
         return 1

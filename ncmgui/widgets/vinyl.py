@@ -154,7 +154,7 @@ class VinylWidget(QWidget):
         painter.drawEllipse(center, radius, radius)
 
         # 同心细纹。alpha 做一点起伏，看起来才像压出来的沟槽而不是描边
-        inner = radius * 0.500
+        inner = radius * 0.655
         grooves = 46
         for index in range(grooves):
             ratio = index / max(1, grooves - 1)
@@ -180,9 +180,9 @@ class VinylWidget(QWidget):
         )
 
     def _paint_label(self, painter: QPainter, center: QPointF, radius: float) -> None:
-        # 真唱片的圆标约占直径的三分之一，但界面上封面本身就是主角，
-        # 放大到 0.46 才不至于让黑胶盘面显得又空又大
-        label_radius = radius * 0.46
+        # 按网易云那种比例：封面约占盘半径的六成，只留一圈黑胶沟槽。
+        # 真唱片没这么大，但界面上封面才是主角
+        label_radius = radius * 0.62
         cx, cy = center.x(), center.y()
 
         clip = QPainterPath()
@@ -221,25 +221,20 @@ class VinylWidget(QWidget):
             )
         painter.restore()
 
-        # 圆标描边 + 中心轴孔
+        # 封面与盘面之间的一道暗缝，做出「嵌进去」的层次；不画中心轴孔 ——
+        # 封面放大以后，中间再挖一个黑洞只会显得脏
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(255, 255, 255, 46), max(1.0, radius * 0.005)))
+        painter.setPen(QPen(QColor(0, 0, 0, 170), max(2.0, radius * 0.014)))
         painter.drawEllipse(center, label_radius, label_radius)
-
-        hole = label_radius * 0.085
-        painter.setBrush(QColor("#05070b"))
-        painter.setPen(QPen(QColor(255, 255, 255, 60), max(1.0, radius * 0.003)))
-        painter.drawEllipse(center, hole, hole)
-
-        painter.setBrush(QColor(theme.CYAN) if self._playing else QColor(theme.BORDER_HI))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(center, hole * 0.42, hole * 0.42)
+        painter.setPen(QPen(QColor(255, 255, 255, 34), max(1.0, radius * 0.004)))
+        painter.drawEllipse(center, label_radius * 1.014, label_radius * 1.014)
 
     def _paint_arm(self, painter: QPainter, center: QPointF, radius: float) -> None:
-        # 转轴在右上方。暂停 82°：整根臂停在盘外的支架上；播放 106°：
-        # 唱针落到唱片外侧的沟槽（离盘心约 0.74 个盘半径），不会压在封面上
+        # 转轴在右上方。暂停 82°：整根臂停在盘外的支架上；播放 100°：
+        # 唱针落到封面外那圈沟槽的中段（离盘心约 0.83 个盘半径），
+        # 不会压在封面上 —— 封面放大到 0.62 之后，落点必须跟着外移
         pivot = QPointF(center.x() + radius * 0.98, center.y() - radius * 0.96)
-        angle = math.radians(82.0 + 24.0 * self._arm)
+        angle = math.radians(82.0 + 18.0 * self._arm)
         length = radius * 0.90
         direction = QPointF(math.cos(angle), math.sin(angle))
         normal = QPointF(-direction.y(), direction.x())
@@ -262,19 +257,6 @@ class VinylWidget(QWidget):
             head,
         )
 
-        # 盘外的唱臂支架。暂停时唱针正好停在这里
-        rest_angle = math.radians(82.0)
-        rest = QPointF(
-            pivot.x() + math.cos(rest_angle) * length,
-            pivot.y() + math.sin(rest_angle) * length,
-        )
-        painter.setBrush(QColor("#141b28"))
-        painter.setPen(QPen(QColor("#4b576c"), max(1.0, radius * 0.006)))
-        painter.drawEllipse(rest, radius * 0.048, radius * 0.048)
-        painter.setBrush(QColor("#0a0e16"))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(rest, radius * 0.024, radius * 0.024)
-
         # 影子：唱臂抬得越高，影子越淡，画面才有高度差
         shadow = QPainterPath(arm)
         shadow.translate(radius * 0.018, radius * 0.030)
@@ -289,52 +271,13 @@ class VinylWidget(QWidget):
         )
         painter.drawPath(shadow)
 
-        # 配重：转轴后方的一小截，末端一个圆柱
-        back = QPointF(
-            pivot.x() - direction.x() * radius * 0.12,
-            pivot.y() - direction.y() * radius * 0.12,
-        )
-        back_end = QPointF(
-            pivot.x() - direction.x() * radius * 0.23,
-            pivot.y() - direction.y() * radius * 0.23,
-        )
-        painter.setPen(
-            QPen(
-                QColor("#8e9bb0"),
-                max(2.0, radius * 0.011),
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-            )
-        )
-        painter.drawLine(pivot, back)
-        painter.setPen(
-            QPen(
-                QColor("#39445a"),
-                max(5.0, radius * 0.072),
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-            )
-        )
-        painter.drawLine(back, back_end)
-        painter.setPen(
-            QPen(
-                QColor(214, 225, 242, 120),
-                max(1.0, radius * 0.010),
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-            )
-        )
-        painter.drawLine(
-            QPointF(back.x(), back.y() - radius * 0.016),
-            QPointF(back_end.x(), back_end.y() - radius * 0.016),
-        )
-
-        # 臂身：深色外沿 + 亮色内芯，做出金属圆管的层次
+        # 臂身：浅色外沿 + 更亮的内芯，做出白色金属圆管的层次。
+        # 颜色对齐参考图里的白唱臂 —— 盘面是黑的，浅色才能一眼看清
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(
             QPen(
-                QColor("#6d7a90"),
-                max(3.0, radius * 0.020),
+                QColor("#b7c4d8"),
+                max(3.0, radius * 0.024),
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
             )
@@ -342,8 +285,8 @@ class VinylWidget(QWidget):
         painter.drawPath(arm)
         painter.setPen(
             QPen(
-                QColor("#e8eef9"),
-                max(1.5, radius * 0.008),
+                QColor("#f7fbff"),
+                max(1.5, radius * 0.009),
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
             )
@@ -364,7 +307,7 @@ class VinylWidget(QWidget):
         painter.setPen(
             QPen(
                 QColor("#1a2233"),
-                max(5.0, radius * 0.038),
+                max(5.0, radius * 0.048),
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
             )
@@ -372,8 +315,8 @@ class VinylWidget(QWidget):
         painter.drawLine(shell_back, shell_front)
         painter.setPen(
             QPen(
-                QColor("#aebbd0"),
-                max(1.0, radius * 0.006),
+                QColor("#d3deee"),
+                max(3.0, radius * 0.036),
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
             )
@@ -394,13 +337,20 @@ class VinylWidget(QWidget):
         )
         painter.drawLine(shell_front, tip)
 
-        # 转轴底座
-        painter.setBrush(QColor("#161d2c"))
-        painter.setPen(QPen(QColor("#566379"), max(1.0, radius * 0.007)))
-        painter.drawEllipse(pivot, radius * 0.070, radius * 0.070)
-        painter.setBrush(QColor("#2b3549"))
-        painter.setPen(QPen(QColor("#8f9db3"), max(1.0, radius * 0.006)))
-        painter.drawEllipse(pivot, radius * 0.042, radius * 0.042)
-        painter.setBrush(QColor(theme.CYAN) if self._playing else QColor(theme.TEXT_MUTE))
+        # 转轴：一颗浅色圆钮，中间一个小螺丝点。参考图里唱臂顶端就是这个样子，
+        # 之前那套「暗色底座 + 配重圆柱」在小尺寸下更像一根天线
+        painter.setBrush(QColor(0, 0, 0, 70))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(pivot, radius * 0.013, radius * 0.013)
+        painter.drawEllipse(
+            QPointF(pivot.x() + radius * 0.008, pivot.y() + radius * 0.012),
+            radius * 0.062,
+            radius * 0.062,
+        )
+        painter.setBrush(QColor("#dde5f2"))
+        painter.setPen(QPen(QColor("#8b99ae"), max(1.0, radius * 0.005)))
+        painter.drawEllipse(pivot, radius * 0.058, radius * 0.058)
+        painter.setBrush(QColor("#1b2433"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(pivot, radius * 0.020, radius * 0.020)
+        painter.setBrush(QColor(theme.CYAN) if self._playing else QColor("#6a7891"))
+        painter.drawEllipse(pivot, radius * 0.009, radius * 0.009)

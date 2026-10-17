@@ -106,6 +106,9 @@ def _defaults() -> dict[str, Any]:
             # 取值见 ncmgui.lyrics 的 MODE_*；写在这里是为了让它出现在配置文件里，
             # 用户翻配置文件时能发现这一项。
             "lyric": "lrc",
+            # 封面：file（同名图片）/ embed（写进音频标签）/ none。
+            # 取值见 ncmgui.covers 的 MODE_*
+            "cover": "file",
         },
         "ncm": {
             "output": str(default_ncm_dir()),
