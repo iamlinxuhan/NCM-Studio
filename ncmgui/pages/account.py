@@ -93,14 +93,20 @@ class AccountPage(BasePage):
         refresh.clicked.connect(self._refresh_status)
         info = ghost_button("查询账号信息")
         info.clicked.connect(self._query_userinfo)
-        logout = danger_button("登出")
-        logout.clicked.connect(self._logout)
-        card.add_row_of(refresh, info, logout)
+        self.logout_btn = danger_button("登出")
+        self.logout_btn.clicked.connect(self._logout)
+        card.add_row_of(refresh, info, self.logout_btn)
         self.content.addWidget(card)
 
     def _refresh_status(self) -> None:
         home = self.cfg.get("home", "")
         logged_in = ncmctl.is_logged_in(home)
+
+        # 没登录就没什么可登出的。这个按钮原来是常亮的红色，未登录时点下去
+        # 只会去调一次注定失败的接口 —— 状态写着"未登录"、旁边却摆着「登出」，
+        # 本身就是在骗人。禁用比弹一句"请先登录"更直接
+        self.logout_btn.setEnabled(logged_in)
+        self.logout_btn.setToolTip("" if logged_in else "还没有登录，无需登出")
 
         if logged_in:
             self.status_chip.setText("已登录")
@@ -133,6 +139,10 @@ class AccountPage(BasePage):
         self.submit("账号信息", argv)
 
     def _logout(self) -> None:
+        # 按钮已经按登录状态禁用，这里再拦一道：状态可能是刚变的（比如凭据文件被
+        # 外部删掉），而窗口还没来得及刷新
+        if not self.require_login("登出"):
+            return
         if not self.window.submit(
             "登出",
             ncmctl.build_logout(False, self.opts()),

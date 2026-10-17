@@ -53,6 +53,20 @@ def _self_test(window: MainWindow) -> int:
     if len(window._nav_buttons) != len(window.pages):
         problems.append("侧边栏按钮与页面数量不一致")
 
+    # 登出按钮的可用状态必须和登录状态一致。用户实际撞见过反例：状态写着「未登录」，
+    # 旁边却亮着红色的「登出」。断言的是两者**永远相等**，所以这句在本机已登录、
+    # CI 上未登录时都成立，不依赖具体环境
+    account = window.pages.get("account")
+    button = getattr(account, "logout_btn", None)
+    if button is None:
+        problems.append("账号页没有登出按钮（改名了？自检要跟着改）")
+    elif button.isEnabled() != window.is_logged_in():
+        problems.append(
+            "登出按钮的可用状态与登录状态不一致"
+            f"（按钮 {'可用' if button.isEnabled() else '禁用'}，"
+            f"当前 {'已登录' if window.is_logged_in() else '未登录'}）"
+        )
+
     # 控制台的着色与进度覆盖逻辑是最容易写错的部分，单独跑一遍
     try:
         view = ConsoleView()
