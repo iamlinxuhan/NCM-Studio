@@ -267,17 +267,22 @@ def _control_pixmap(kind: str) -> QPixmap:
                 painter.setBrush(Qt.BrushStyle.NoBrush)
 
         elif kind == "queue":
+            # 三行等距（原来 7.5/13.2/16.4 间距不匀，第一行单独飘在上面，
+            # 缩到 20px 后糊成一团）。三角高度对齐一行间距，三条线右端
+            # 对齐，第一行让开三角，整体就是「正在播放的列表」。
+            rows = (5.0, 10.0, 15.0)
             triangle = QPainterPath()
-            triangle.moveTo(3.6, 4.6)
-            triangle.lineTo(3.6, 10.4)
-            triangle.lineTo(8.8, 7.5)
+            triangle.moveTo(3.2, 2.5)
+            triangle.lineTo(3.2, 7.5)
+            triangle.lineTo(7.6, 5.0)
             triangle.closeSubpath()
             painter.setBrush(color)
             painter.drawPath(triangle)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawLine(QPointF(10.2, 7.5), QPointF(17.0, 7.5))
-            painter.drawLine(QPointF(3.6, 13.2), QPointF(17.0, 13.2))
-            painter.drawLine(QPointF(3.6, 16.4), QPointF(13.6, 16.4))
+            # 三条线右端对齐；第一行让开三角，后两行顶到左边
+            painter.drawLine(QPointF(9.4, rows[0]), QPointF(16.8, rows[0]))
+            painter.drawLine(QPointF(3.2, rows[1]), QPointF(16.8, rows[1]))
+            painter.drawLine(QPointF(3.2, rows[2]), QPointF(16.8, rows[2]))
     finally:
         painter.end()
     return pixmap
