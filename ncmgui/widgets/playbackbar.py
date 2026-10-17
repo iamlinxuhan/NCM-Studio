@@ -98,11 +98,13 @@ class PlaybackBar(QWidget):
         layout.setContentsMargins(14, 9, 14, 9)
         layout.setSpacing(10)
 
-        self.prev_btn = self._glyph_button("⏮", "|<", "上一首")
+        # 不用 ⏮/⏭/⏸：这几个码位会被彩色 emoji 字体接管，图标固定在
+        # 很小的字号上，和旁边的 ▶ 不齐。普通几何符号能跟着字号一起放大
+        self.prev_btn = self._glyph_button("◀◀", "|<", "上一首")
         self.prev_btn.clicked.connect(self.playback.previous)
-        self.play_btn = self._glyph_button("▶", "播放", "播放 / 暂停", width=38)
+        self.play_btn = self._glyph_button("▶", "播放", "播放 / 暂停", width=46)
         self.play_btn.clicked.connect(self.playback.toggle)
-        self.next_btn = self._glyph_button("⏭", ">|", "下一首")
+        self.next_btn = self._glyph_button("▶▶", ">|", "下一首")
         self.next_btn.clicked.connect(lambda: self.playback.next(manual=True))
         layout.addWidget(self.prev_btn)
         layout.addWidget(self.play_btn)
@@ -143,9 +145,12 @@ class PlaybackBar(QWidget):
         self.queue_btn.clicked.connect(self.queueRequested.emit)
         layout.addWidget(self.queue_btn)
 
-    def _glyph_button(self, glyph: str, fallback: str, tip: str, width: int = 32) -> QPushButton:
+    def _glyph_button(self, glyph: str, fallback: str, tip: str, width: int = 40) -> QPushButton:
         button = ghost_button(theme.safe_glyph(glyph, fallback), compact=True)
-        button.setFixedWidth(width)
+        # 播放条上的按钮比普通 compact 按钮再大一圈，图标也放大：
+        # 32×26 的小方块在 70px 的条里太不显眼
+        button.setProperty("playback", "true")
+        button.setFixedSize(width, 34)
         button.setToolTip(tip)
         return button
 
@@ -171,7 +176,7 @@ class PlaybackBar(QWidget):
     def _on_state_changed(self, state: str) -> None:
         playing = state == STATE_PLAYING
         self.play_btn.setText(
-            theme.safe_glyph("⏸", "❚❚") if playing else theme.safe_glyph("▶", "播放")
+            theme.safe_glyph("❚❚", "||") if playing else theme.safe_glyph("▶", "播放")
         )
         self.play_btn.setToolTip("暂停" if playing else "播放")
         self.progress.setEnabled(

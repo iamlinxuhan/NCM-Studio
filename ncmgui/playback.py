@@ -124,6 +124,8 @@ class PlaybackController(QObject):
         self._wanted: tuple[int, Song, str] | None = None
         self._fetch_task: BackgroundTask | None = None
         self._awaiting_load = False
+        #: 装载完成前拖动的目标位置，file-loaded 之后再真正发给 mpv
+        self._pending_seek: float | None = None
         self._shutting_down = False
 
         #: 进度外推的锚点：mpv 的 time-pos 按整秒节流，界面 250ms 刷一次
@@ -288,10 +290,8 @@ class PlaybackController(QObject):
             self.play_at(self._index if self._index is not None else 0)
             return
 
-        if self._state == STATE_LOADING:
-            # 还没装载完，先别翻转；交给 file-loaded 后的状态
-            return
-
+        # 装载阶段也要响应：mpv 可能已经出声，只是 file-loaded 还没轮到主线程。
+        # 以前这里直接 return，主线程一忙就会「点了暂停没反应」
         self._paused = not self._paused
         self._anchor_pos = self._position
         self._anchor_at = time.monotonic()
@@ -300,6 +300,11 @@ class PlaybackController(QObject):
                 self._player.pause(self._paused)
         except player.PlayerError as exc:
             self._fail(str(exc))
+            return
+        if self._awaiting_load:
+            # 暂停要立刻有反馈；恢复播放则继续显示「正在缓冲…」，
+            # 等 file-loaded 把状态推进到 playing
+            self._set_state(STATE_PAUSED if self._paused else STATE_LOADING)
             return
         self._set_state(STATE_PAUSED if self._paused else STATE_PLAYING)
 
@@ -356,6 +361,11 @@ class PlaybackController(QObject):
         self._anchor_pos = value
         self._anchor_at = time.monotonic()
         self.positionChanged.emit(self._position, self._duration)
+        if self._awaiting_load:
+            # 文件还没装载完，此刻的 seek 会落在 idle 上被 mpv 丢掉 ——
+            # 先记下来，file-loaded 后补发
+            self._pending_seek = value
+            return
         if self._player is not None and self.player_running:
             try:
                 self._player.seek(value)
@@ -423,6 +433,7 @@ class PlaybackController(QObject):
         self._duration = song.duration / 1000 if song.duration else 0.0
         self._paused = False
         self._awaiting_load = True
+        self._pending_seek = None
         self.positionChanged.emit(0.0, self._duration)
         self._emit_track()
         self._set_state(STATE_LOADING)
@@ -563,16 +574,20 @@ class PlaybackController(QObject):
 
         if kind == "file-loaded":
             self._awaiting_load = False
-            self._paused = False
-            # mpv 用 --pause=yes 启动（防止进程一拉起就出声），装载完必须显式解除
+            # mpv 用 --pause=yes 启动（防止进程一拉起就出声），装载完要按
+            # 界面上的暂停状态同步一次 —— 装载期间用户可能已经点过暂停，
+            # 无条件解除会把那次点击吞掉
             if self._player is not None and self._player.running:
                 try:
-                    self._player.pause(False)
+                    self._player.pause(self._paused)
+                    if self._pending_seek is not None:
+                        self._player.seek(self._pending_seek)
                 except player.PlayerError:
                     pass
+                self._pending_seek = None
             self._anchor_pos = self._position
             self._anchor_at = time.monotonic()
-            self._set_state(STATE_PLAYING)
+            self._set_state(STATE_PAUSED if self._paused else STATE_PLAYING)
             return
 
         if kind == "property":
@@ -593,6 +608,10 @@ class PlaybackController(QObject):
                 self._anchor_at = time.monotonic()
                 self.positionChanged.emit(self._position, self._duration)
             elif name == "pause":
+                if value is None:
+                    # 属性暂时不可用（比如 idle）时别当成 False，否则界面
+                    # 会在用户刚点完暂停后被这次空事件改回播放
+                    return
                 self._paused = bool(value)
                 self._anchor_pos = self._position
                 self._anchor_at = time.monotonic()

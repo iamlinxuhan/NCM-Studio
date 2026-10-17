@@ -293,6 +293,12 @@ QPushButton#Ghost[compact="true"] {
     font-size: 12px;
 }
 
+/* 播放条上的上一首/播放/下一首：按钮更大，图标也要跟着大 */
+QPushButton#Ghost[playback="true"] {
+    padding: 0px;
+    font-size: 18px;
+}
+
 QPushButton#Danger {
     background: transparent;
     color: $RED;
