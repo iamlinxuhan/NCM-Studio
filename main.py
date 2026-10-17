@@ -334,7 +334,7 @@ def _screenshot(window: MainWindow, target: str) -> int:
     page = window.player_page
     page.set_demo(songs[0], cover, _demo_lyrics(), position=67.0)
     window.playback_bar.set_demo(
-        songs[0], cover, position=67.0, duration=222.0, volume=70, mode="loop"
+        songs[0], position=67.0, duration=222.0, volume=70, mode="loop"
     )
     window.open_player_page(queue=False)
     QApplication.processEvents()

@@ -255,7 +255,6 @@ class MainWindow(QMainWindow):
         body_layout.setSpacing(0)
         body_layout.addWidget(self.splitter, 1)
         self.playback_bar = PlaybackBar(self)
-        self.playback_bar.openRequested.connect(self.open_player_page)
         self.playback_bar.queueRequested.connect(
             lambda: self.open_player_page(queue=True)
         )

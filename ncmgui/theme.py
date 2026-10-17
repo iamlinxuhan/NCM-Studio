@@ -593,20 +593,11 @@ QWidget#PlaybackBar {
     border-top: 1px solid $BORDER;
 }
 
-QLabel#PlaybackCover { background: transparent; }
-
-QLabel#PlaybackTitle {
-    color: $TEXT;
-    font-size: 13px;
-    font-weight: 600;
-}
-
-QLabel#PlaybackArtist, QLabel#PlaybackTime {
+QLabel#PlaybackTime {
     color: $TEXT_DIM;
     font-size: 11px;
+    font-family: $MONO;
 }
-
-QLabel#PlaybackTime { font-family: $MONO; }
 
 /* ------------------------------------------------------------ 播放页 */
 
@@ -619,11 +610,6 @@ QLabel#PlayerTitle {
 QLabel#PlayerArtist {
     color: $CYAN;
     font-size: 14px;
-}
-
-QLabel#PlayerMeta {
-    color: $TEXT_MUTE;
-    font-size: 12px;
 }
 
 QScrollArea#LyricsArea, QWidget#LyricsBody {

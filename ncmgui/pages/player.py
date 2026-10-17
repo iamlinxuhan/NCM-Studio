@@ -198,11 +198,8 @@ class PlayerPage(BasePage):
         self.title_label.setWordWrap(True)
         self.artist_label = QLabel("")
         self.artist_label.setObjectName("PlayerArtist")
-        self.album_label = QLabel("")
-        self.album_label.setObjectName("PlayerMeta")
         center_layout.addWidget(self.title_label)
         center_layout.addWidget(self.artist_label)
-        center_layout.addWidget(self.album_label)
         center_layout.addSpacing(6)
 
         self.lyric_scroll = QScrollArea()
@@ -277,7 +274,6 @@ class PlayerPage(BasePage):
             self._cover_id = None
             self.title_label.setText("未在播放")
             self.artist_label.setText("")
-            self.album_label.setText("")
             self.vinyl.set_art(self._placeholder)
             self._clear_lyrics("点一首歌，这里会显示歌词。")
             return
@@ -285,8 +281,6 @@ class PlayerPage(BasePage):
         self._cover_id = int(song.id)
         self.title_label.setText(song.name or "未知曲目")
         self.artist_label.setText(", ".join(song.artists) or "未知歌手")
-        album = song.album or ("本地文件" if getattr(song, "path", "") else "")
-        self.album_label.setText(album)
         self._refresh_meta()
 
         cached = self.covers.get(self._cover_id)
