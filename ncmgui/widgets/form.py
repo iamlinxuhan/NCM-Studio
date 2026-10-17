@@ -86,7 +86,6 @@ class FormCard(Card):
             tag.setFixedWidth(self.label_width)
             tag.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
             tag.setContentsMargins(0, 9, 0, 0)
-            tag.setToolTip(label)
             self._labels.append(tag)
             outer.addWidget(tag)
 

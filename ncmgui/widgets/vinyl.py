@@ -55,7 +55,6 @@ class VinylWidget(QWidget):
 
         self.setMinimumSize(260, 260)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setToolTip("播放时唱片转动、唱臂落下；暂停时停住并抬起")
 
         self._timer = QTimer(self)
         self._timer.setInterval(FRAME_MS)

@@ -308,7 +308,6 @@ class VolumePopup(QWidget):
         self.slider.setObjectName("VolumeSlider")
         self.slider.setRange(0, 100)
         self.slider.setFixedSize(24, 118)
-        self.slider.setToolTip("拖动调节音量")
         layout.addWidget(self.slider, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.value_label = QLabel("0%")
@@ -477,13 +476,11 @@ class PlaybackBar(QWidget):
         layout.addSpacing(2)
 
         # 三个都是扁平的小图标，播放键只比上一首/下一首略大一点
-        self.prev_btn = self._transport_button("prev", "上一首", size=30)
+        self.prev_btn = self._transport_button("prev", size=30)
         self.prev_btn.clicked.connect(self.playback.previous)
-        self.play_btn = self._transport_button(
-            "play", "播放 / 暂停", size=32, icon_size=25
-        )
+        self.play_btn = self._transport_button("play", size=32, icon_size=25)
         self.play_btn.clicked.connect(self.playback.toggle)
-        self.next_btn = self._transport_button("next", "下一首", size=30)
+        self.next_btn = self._transport_button("next", size=30)
         self.next_btn.clicked.connect(lambda: self.playback.next(manual=True))
         layout.addWidget(self.prev_btn)
         layout.addWidget(self.play_btn)
@@ -530,14 +527,13 @@ class PlaybackBar(QWidget):
         layout.addWidget(self.queue_btn)
 
     def _transport_button(
-        self, kind: str, tip: str, size: int, icon_size: int = 23
+        self, kind: str, size: int, icon_size: int = 23
     ) -> QPushButton:
         button = ghost_button("", compact=True)
         button.setProperty("transport", "flat")
         button.setFixedSize(size, size)
         button.setIconSize(QSize(icon_size, icon_size))
         button.setIcon(QIcon(_transport_pixmap(kind)))
-        button.setToolTip(tip)
         return button
 
     def _icon_button(self, kind: str, tip: str) -> QPushButton:
@@ -590,7 +586,6 @@ class PlaybackBar(QWidget):
         self.play_btn.setIcon(
             QIcon(_transport_pixmap("pause" if playing else "play"))
         )
-        self.play_btn.setToolTip("暂停" if playing else "播放")
         self.progress.setEnabled(
             self._song is not None and self.playback.duration > 0
             and state not in (STATE_IDLE, STATE_ERROR)
