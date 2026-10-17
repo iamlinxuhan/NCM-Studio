@@ -274,10 +274,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # gh release create --generate-notes 要读提交历史来生成说明，但
-      # download-artifact 只搬产物、不会把仓库带下来，缺了这步 gh 会在空目录里
-      # 报 "not a git repository"。fetch-depth: 0 是为了拿到完整历史 —— 默认的
-      # 浅克隆只有最近一次提交，生成出来的说明会缺东西。
+      # 发布说明直接从 git log 生成。不能用 gh 的 --generate-notes：
+      # 它只列**合并过的 PR**，而这个仓库是直接往 main 推提交的，生成出来
+      # 只剩一行 Full Changelog。fetch-depth: 0 是为了拿到完整历史 ——
+      # 默认的浅克隆只有最近一次提交，上一个 tag 都找不到。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -307,11 +307,31 @@ jobs:
             ncmctl-gui-macos-arm64 > SHA256SUMS
           cat SHA256SUMS
 
+      - name: 生成发布说明
+        run: |
+          base="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          prev="$(git describe --tags --abbrev=0 "${base}^" 2>/dev/null || true)"
+          {
+            echo "## What's Changed"
+            echo
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "$prev..$base"
+            else
+              git log --no-merges --pretty=format:'- %s (%h)' "$base"
+            fi
+            echo
+            if [ -n "$prev" ]; then
+              echo
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+            fi
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
       - name: 创建 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file RELEASE_NOTES.md \
             dist/*
