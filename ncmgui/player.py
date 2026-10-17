@@ -414,8 +414,10 @@ def probe_mpv(binary: str, timeout: float = 15.0) -> tuple[bool, str]:
     都会在 exec 时才失败。打包产物的自检只信这一条。
     """
     try:
+        # 这里**不能**加 --terminal=no：它把终端输出整个关掉，--version 也
+        # 跟着一句话都不打，探测就成了「退出码 0、没有任何输出」，永远判失败
         proc = subprocess.run(
-            [binary, "--no-config", "--terminal=no", "--version"],
+            [binary, "--no-config", "--version"],
             capture_output=True,
             text=True,
             timeout=timeout,

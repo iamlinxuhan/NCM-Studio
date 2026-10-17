@@ -202,7 +202,8 @@ def _fetch_linux() -> int:
 def _version_of(binary: Path) -> str:
     try:
         proc = subprocess.run(
-            [str(binary), "--no-config", "--terminal=no", "--version"],
+            # --terminal=no 会连 --version 的输出一起关掉，只能不加
+            [str(binary), "--no-config", "--version"],
             capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
@@ -232,7 +233,12 @@ def _fetch_windows() -> int:
 
     VENDOR.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="mpv-fetch-") as tmpdir:
+    # Windows 上 Defender 会在解压后继续扫这个 .7z，删临时目录时撞上
+    # WinError 32 是常事。东西已经复制进 vendor/ 了，清理失败不该让整个
+    # 构建失败 —— 系统迟早会回收 %TEMP%。
+    with tempfile.TemporaryDirectory(
+        prefix="mpv-fetch-", ignore_cleanup_errors=True
+    ) as tmpdir:
         archive = Path(tmpdir) / _WINDOWS_ASSET
         _download(_WINDOWS_URL, archive)
 
