@@ -484,6 +484,26 @@ def mpv_argv(
     return argv
 
 
+def connect_ipc_socket(path: str, timeout: float = 2.0) -> socket.socket:
+    """连上 mpv 的 IPC socket，返回一个**阻塞**连接。
+
+    ``timeout`` 只约束 connect 本身。连上之后必须清掉超时：IPC 是长连接，
+    mpv 暂停、空闲（比如正在取播放地址）时可能几秒到几分钟一个字节都不发。
+    如果 socket 还带着超时，读线程会在 ``readline()`` 上抛 ``TimeoutError``
+    并退出，之后 ``file-loaded`` 等事件全部丢失 —— 界面卡在「正在缓冲」，
+    而 mpv 已经正常出声。连接失败时关掉 socket 再把异常抛出去。
+    """
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(path)
+        sock.settimeout(None)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
 class MpvPlayer:
     """一个常驻 mpv 进程。
 
@@ -629,13 +649,7 @@ class MpvPlayer:
                     self._reader = io.BufferedReader(raw)
                     self._writer = raw
                 else:
-                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    sock.settimeout(2.0)
-                    try:
-                        sock.connect(self._endpoint.value)
-                    except OSError:
-                        sock.close()
-                        raise
+                    sock = connect_ipc_socket(self._endpoint.value)
                     self._writer = sock  # type: ignore[assignment]
                     self._reader = sock.makefile("rb")
                 return
@@ -674,16 +688,22 @@ class MpvPlayer:
         assert self._reader is not None
 
         def read_loop() -> None:
-            try:
-                while not self._closing:
+            while not self._closing:
+                try:
                     line = self._reader.readline()
-                    if not line:
-                        break
-                    message = parse_message(line)
-                    if message is not None:
-                        self._dispatch(message)
-            except (OSError, ValueError):
-                pass
+                except (TimeoutError, socket.timeout):
+                    # 连接后已经恢复阻塞，这里只是兜底：读线程一旦退出，
+                    # 界面就再也收不到 file-loaded 了
+                    continue
+                except (OSError, ValueError) as exc:
+                    if not self._closing:
+                        self._log.append(f"mpv IPC 读线程退出：{exc}")
+                    break
+                if not line:
+                    break
+                message = parse_message(line)
+                if message is not None:
+                    self._dispatch(message)
 
         thread = threading.Thread(target=read_loop, name="ncmgui-mpv-read", daemon=True)
         thread.start()
@@ -1036,6 +1056,27 @@ def _selftest() -> int:
     check("指定了 IPC 端点", "--input-ipc-server=/tmp/x.sock" in argv, True)
     check("音量传进去", "--volume=80" in argv, True)
     check("默认不指定 --ao", any(a.startswith("--ao=") for a in argv), False)
+
+    # ---- IPC 连接：连上后必须恢复阻塞
+    # 回归测试：连接后如果还留着 2 秒超时，mpv 空闲或暂停超过 2 秒时读线程
+    # 会抛 TimeoutError 退出，之后 file-loaded 收不到，界面永远停在「正在缓冲」
+    if sys.platform != "win32":
+        with tempfile.TemporaryDirectory(prefix="ncmgui-ipc-") as tmp:
+            ipc_path = os.path.join(tmp, "ipc.sock")
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(ipc_path)
+            server.listen(1)
+            client = connect_ipc_socket(ipc_path, timeout=0.5)
+            check("IPC 连接后没有读超时", client.gettimeout(), None)
+            client.close()
+            server.close()
+            try:
+                connect_ipc_socket(os.path.join(tmp, "missing.sock"), timeout=0.2)
+            except OSError:
+                failed = True
+            else:
+                failed = False
+            check("IPC 连接失败抛 OSError", failed, True)
 
     # ---- 查找优先级：显式路径最优先
     with tempfile.TemporaryDirectory(prefix="ncmgui-player-test-") as tmp:
