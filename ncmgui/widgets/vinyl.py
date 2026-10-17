@@ -4,8 +4,8 @@
 
 * 盘面是径向渐变 + 几十圈同心细纹（groove），外沿一道高光；
 * 中心圆标是专辑封面，播放时以 50ms 一帧缓慢旋转，暂停立刻停下；
-* 唱臂从右上角的转轴伸向盘面：暂停时停在盘外的支架上，播放时落到外侧
-  沟槽，臂身带一点 S 形弯曲，用属性动画过渡。
+* 唱臂从右上角的转轴伸向盘面：暂停时抬到盘外，播放时落到外侧沟槽，
+  臂身带一点 S 形弯曲，用属性动画过渡。
 
 只旋转中心封面而不是整张位图，视觉上与整盘在转一样 —— 盘面纹理本来就是圆的。
 """
@@ -230,9 +230,9 @@ class VinylWidget(QWidget):
         painter.drawEllipse(center, label_radius * 1.014, label_radius * 1.014)
 
     def _paint_arm(self, painter: QPainter, center: QPointF, radius: float) -> None:
-        # 转轴在右上方。暂停 82°：整根臂停在盘外的支架上；播放 100°：
-        # 唱针落到封面外那圈沟槽的中段（离盘心约 0.83 个盘半径），
-        # 不会压在封面上 —— 封面放大到 0.62 之后，落点必须跟着外移
+        # 转轴在右上方。暂停 82°：整根臂抬在盘外；播放 100°：唱针落到
+        # 封面外那圈沟槽的中段（离盘心约 0.83 个盘半径），不会压在封面上
+        # —— 封面放大到 0.62 之后，落点必须跟着外移
         pivot = QPointF(center.x() + radius * 0.98, center.y() - radius * 0.96)
         angle = math.radians(82.0 + 18.0 * self._arm)
         length = radius * 0.90
@@ -256,19 +256,6 @@ class VinylWidget(QWidget):
             point_at(0.72, radius * 0.024),
             head,
         )
-
-        # 盘外的唱臂支架。暂停时唱针正好停在这里
-        rest_angle = math.radians(82.0)
-        rest = QPointF(
-            pivot.x() + math.cos(rest_angle) * length,
-            pivot.y() + math.sin(rest_angle) * length,
-        )
-        painter.setBrush(QColor("#141b28"))
-        painter.setPen(QPen(QColor("#4b576c"), max(1.0, radius * 0.006)))
-        painter.drawEllipse(rest, radius * 0.048, radius * 0.048)
-        painter.setBrush(QColor("#0a0e16"))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(rest, radius * 0.024, radius * 0.024)
 
         # 影子：唱臂抬得越高，影子越淡，画面才有高度差
         shadow = QPainterPath(arm)
