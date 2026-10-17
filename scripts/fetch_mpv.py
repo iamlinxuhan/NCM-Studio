@@ -110,7 +110,7 @@ def _skip(name: str) -> bool:
 
 def _download(url: str, dest: Path) -> None:
     print(f"  下载 {url}")
-    request = urllib.request.Request(url, headers={"User-Agent": "ncmctl-gui-build"})
+    request = urllib.request.Request(url, headers={"User-Agent": "ncm-studio-build"})
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             dest.write_bytes(response.read())
@@ -349,7 +349,7 @@ def _write_notice(source: str, version: str) -> None:
 许可：mpv 本体以 GPLv2 或更高版本发布（详见 COPYRIGHT*）。mpv 静态/动态链接了
 FFmpeg 及其它库，各自的许可见所附的版权文件；分发时请一并保留。
 
-本程序（ncmctl-gui）仅以子进程方式调用 mpv，不修改其源码。
+本程序（NCM Studio）仅以子进程方式调用 mpv，不修改其源码。
 """
     (VENDOR / "NOTICE.txt").write_text(text, encoding="utf-8")
 

@@ -49,7 +49,7 @@ jobs:
           - target: macos-arm64
             os: macos-latest
             mode: onefile
-            artifact: dist/ncmctl-gui-macos-arm64
+            artifact: dist/ncm-studio-macos-arm64
             bundle_mpv: ""
 
     steps:
@@ -111,12 +111,12 @@ jobs:
       - name: 打包
         env:
           NCMGUI_MODE: ${{ matrix.mode }}
-          NCMGUI_BUILD_NAME: ncmctl-gui-${{ matrix.target }}
+          NCMGUI_BUILD_NAME: ncm-studio-${{ matrix.target }}
           # 缺了 ncmctl 就报错，而不是警告后照常产出 —— 见 spec 里的说明
           NCMGUI_BUNDLE_NCMCTL: "1"
           # Linux / Windows 必须带 mpv；macOS 留空（见上面 matrix 的注释）
           NCMGUI_BUNDLE_MPV: ${{ matrix.bundle_mpv }}
-        run: pyinstaller ncmctl-gui.spec --noconfirm
+        run: pyinstaller ncm-studio.spec --noconfirm
 
       # ── 下面两步都是在做同一件事：把「打包成功」和「东西真的进去了」分开 ──
       #
@@ -174,13 +174,13 @@ jobs:
         env:
           NCMGUI_MAX_GLIBC: "2.35"
         run: |
-          test -x dist/ncmctl-gui-linux-x86_64/_internal/ncmctl \
+          test -x dist/ncm-studio-linux-x86_64/_internal/ncmctl \
             || { echo "产物里的 ncmctl 缺失或不可执行"; exit 1; }
-          test -x dist/ncmctl-gui-linux-x86_64/_internal/mpv/mpv \
+          test -x dist/ncm-studio-linux-x86_64/_internal/mpv/mpv \
             || { echo "产物里的 mpv 缺失或不可执行"; exit 1; }
           bash packaging/make_appimage.sh \
-            dist/ncmctl-gui-linux-x86_64 \
-            dist/ncmctl-gui-linux-x86_64.AppImage
+            dist/ncm-studio-linux-x86_64 \
+            dist/ncm-studio-linux-x86_64.AppImage
 
       # 真跑一次。前面那些清点只能证明文件在，证明不了它能启动 ——
       # AppRun 的可执行文件名、内置路径解析、Qt 平台插件，全都要跑起来才知道。
@@ -199,13 +199,13 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             libgl1 libegl1 libdrm2
 
-          ./dist/ncmctl-gui-linux-x86_64.AppImage --self-test
+          ./dist/ncm-studio-linux-x86_64.AppImage --self-test
           # FUSE 不可用时 runtime 会自己降级为解包运行 —— 这条路径专门验一下，
           # 因为很多容器和精简发行版就是没有 /dev/fuse
-          ./dist/ncmctl-gui-linux-x86_64.AppImage --appimage-extract-and-run --self-test
+          ./dist/ncm-studio-linux-x86_64.AppImage --appimage-extract-and-run --self-test
           # 文件在、有执行位，都证明不了它能跑：``ldd`` 闭包少一个 .so 时，
           # 失败要到用户点播放才发生。真启动一次 mpv —— 这是唯一可靠的证据
-          ./dist/ncmctl-gui-linux-x86_64.AppImage --mpv-version
+          ./dist/ncm-studio-linux-x86_64.AppImage --mpv-version
 
       - name: 冒烟测试（Windows / macOS）
         if: runner.os != 'Linux'
@@ -263,7 +263,7 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: ncmctl-gui-${{ matrix.target }}
+          name: ncm-studio-${{ matrix.target }}
           path: ${{ matrix.artifact }}
           if-no-files-found: error
 
@@ -295,16 +295,16 @@ jobs:
         run: |
           cd dist
           for f in \
-            ncmctl-gui-linux-x86_64.AppImage \
-            ncmctl-gui-windows-x86_64.exe \
-            ncmctl-gui-macos-arm64
+            ncm-studio-linux-x86_64.AppImage \
+            ncm-studio-windows-x86_64.exe \
+            ncm-studio-macos-arm64
           do
             test -f "$f" || { echo "缺少资产：$f"; exit 1; }
           done
           sha256sum \
-            ncmctl-gui-linux-x86_64.AppImage \
-            ncmctl-gui-windows-x86_64.exe \
-            ncmctl-gui-macos-arm64 > SHA256SUMS
+            ncm-studio-linux-x86_64.AppImage \
+            ncm-studio-windows-x86_64.exe \
+            ncm-studio-macos-arm64 > SHA256SUMS
           cat SHA256SUMS
 
       - name: 生成发布说明

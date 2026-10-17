@@ -110,7 +110,7 @@ class LikedTableModel(QAbstractTableModel):
             )
 
     def set_paused(self, paused: bool) -> None:
-        """播放/暂停切换只影响当前那一行的第 0 列（▶ / ⏸）。"""
+        """播放/暂停切换只影响当前那一行的第 0 列（▶ / ❚❚）。"""
         paused = bool(paused)
         if paused == self._paused:
             return
@@ -120,10 +120,12 @@ class LikedTableModel(QAbstractTableModel):
             self.dataChanged.emit(self.index(row, 0), self.index(row, 0))
 
     def marker(self, song_id: int | None) -> str:
-        """第 0 列播放标记：正在出声是 ⏸，暂停/停止是 ▶。"""
+        """第 0 列播放标记：正在出声是 ❚❚，暂停/停止是 ▶。"""
         if song_id is None or song_id != self._playing_id:
             return ""
-        return "▶" if self._paused else theme.safe_glyph("⏸", "❚❚")
+        # ⏸（U+23F8）在不少字体里只有两三个像素高，表格里几乎看不见；
+        # ❚ 的竖条高度跟着字号走，和 ▶ 大小一致
+        return "▶" if self._paused else "❚❚"
 
     def set_downloaded(self, ids: Iterable[int], directory: str = "") -> None:
         self._downloaded = set(ids)

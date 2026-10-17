@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ncmctl GUI 启动入口。
+"""NCM Studio 启动入口。
 
 用法::
 
@@ -140,7 +140,7 @@ def _self_test(window: MainWindow) -> int:
                 problems.append(f"播放顺序切换到 {mode} 没有生效")
         playback.set_mode("loop")
 
-    # 红心表格第 0 列的 ▶/⏸ 只由模型状态决定，和当前有没有 mpv 无关
+    # 红心表格第 0 列的 ▶/❚❚ 只由模型状态决定，和当前有没有 mpv 无关
     source = getattr(liked, "model", None)
     if source is not None:
         from ncmgui.resolver import Song
@@ -151,8 +151,8 @@ def _self_test(window: MainWindow) -> int:
         playing_marker = source.data(source.index(0, 0), Qt.ItemDataRole.DisplayRole)
         source.set_paused(True)
         paused_marker = source.data(source.index(0, 0), Qt.ItemDataRole.DisplayRole)
-        if playing_marker != theme.safe_glyph("⏸", "❚❚"):
-            problems.append(f"播放中的行标记应为 ⏸，实际 {playing_marker!r}")
+        if playing_marker != "❚❚":
+            problems.append(f"播放中的行标记应为 ❚❚，实际 {playing_marker!r}")
         if paused_marker != "▶":
             problems.append(f"暂停时的行标记应为 ▶，实际 {paused_marker!r}")
         source.set_playing(None)

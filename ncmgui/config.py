@@ -2,9 +2,11 @@
 
 配置落在各平台约定的位置：
 
-* **Windows**：``%APPDATA%\\ncmctl-gui\\config.json``
-* **macOS**：``~/Library/Application Support/ncmctl-gui/config.json``
-* **其他**：``$XDG_CONFIG_HOME/ncmctl-gui/config.json``，没设就是 ``~/.config/...``
+* **Windows**：``%APPDATA%\\ncm-studio\\config.json``
+* **macOS**：``~/Library/Application Support/ncm-studio/config.json``
+* **其他**：``$XDG_CONFIG_HOME/ncm-studio/config.json``，没设就是 ``~/.config/...``
+
+1.3.x 及更早版本的配置在 ``ncmctl-gui`` 目录下，首次读取时自动迁移。
 
 本模块刻意不依赖 Qt，这样在无显示环境下也能单独导入和测试。
 注意 ``~/.ncmctl/`` 存放的是登录凭据，属于敏感目录：本程序只读取其中的
@@ -19,25 +21,33 @@ import sys
 from pathlib import Path
 from typing import Any
 
-APP_DIR_NAME = "ncmctl-gui"
+APP_DIR_NAME = "ncm-studio"
+
+#: 1.3.x 及更早版本的配置目录名。改名后首次启动会自动把配置搬过来
+LEGACY_APP_DIR_NAME = "ncmctl-gui"
+
+
+def _config_root() -> Path:
+    """各平台存放应用配置的根目录。"""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", "").strip()
+        return Path(base) if base else Path.home() / "AppData" / "Roaming"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support"
+    base = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return Path(base) if base else Path.home() / ".config"
 
 
 def config_dir() -> Path:
     """返回本程序的配置目录，按平台惯例走。"""
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA", "").strip()
-        root = Path(base) if base else Path.home() / "AppData" / "Roaming"
-    elif sys.platform == "darwin":
-        root = Path.home() / "Library" / "Application Support"
-    else:
-        base = os.environ.get("XDG_CONFIG_HOME", "").strip()
-        root = Path(base) if base else Path.home() / ".config"
-    return root / APP_DIR_NAME
+    return _config_root() / APP_DIR_NAME
 
 
 def config_file() -> Path:
-    """返回配置文件路径。"""
-    return config_dir() / "config.json"
+    """返回配置文件路径；旧版本的配置在这里自动迁移一次。"""
+    target = config_dir() / "config.json"
+    _migrate_legacy_config(target)
+    return target
 
 
 def _user_dirs() -> dict[str, str]:
@@ -75,12 +85,49 @@ def _music_candidates() -> list[Path]:
 def default_music_dir() -> Path:
     """推断一个合适的音乐输出目录。
 
-    在系统音乐目录下建一个 ``ncmctl`` 子目录，避免和用户自己的曲库混在一起。
+    在系统音乐目录下建一个 ``NCM-Studio`` 子目录，避免和用户自己的曲库混在一起。
     """
+    for candidate in _music_candidates():
+        if candidate.is_dir():
+            return candidate / "NCM-Studio"
+    return Path.home() / "NCM-Studio-download"
+
+
+def _legacy_music_dir() -> Path:
+    """改名前的默认下载目录。迁移配置时用来识别「用户没改过」的情况。"""
     for candidate in _music_candidates():
         if candidate.is_dir():
             return candidate / "ncmctl"
     return Path.home() / "ncmctl-download"
+
+
+def _migrate_legacy_config(target: Path) -> None:
+    """把旧版配置搬到新目录，只在目标配置不存在时做一次。
+
+    下载目录如果还是旧的默认值，顺手换成新默认值；用户自己改过的路径原样保留。
+    迁移失败不抛异常 —— 大不了用默认配置启动，不能因为搬配置把程序挡在门外。
+    """
+    if target.exists():
+        return
+    legacy = _config_root() / LEGACY_APP_DIR_NAME / "config.json"
+    if not legacy.exists():
+        return
+    try:
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    download = data.get("download")
+    if isinstance(download, dict) and download.get("output") == str(_legacy_music_dir()):
+        download["output"] = str(default_music_dir())
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def default_ncm_dir() -> Path:

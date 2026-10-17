@@ -4,7 +4,7 @@
 #   packaging/make_appimage.sh <onedir 目录> <输出 .AppImage 路径>
 #
 # 例：
-#   packaging/make_appimage.sh dist/ncmctl-gui-linux-x86_64 dist/ncmctl-gui-linux-x86_64.AppImage
+#   packaging/make_appimage.sh dist/ncm-studio-linux-x86_64 dist/ncm-studio-linux-x86_64.AppImage
 #
 # 前置条件：先跑过 pyinstaller（NCMGUI_MODE=onedir），以及 scripts/fetch_ncmctl.py。
 #
@@ -26,7 +26,7 @@ OUTPUT=${2:?用法: make_appimage.sh <onedir 目录> <输出 .AppImage>}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(dirname "$HERE")
 
-APP_NAME=ncmctl-gui
+APP_NAME=ncm-studio
 
 # 钉死版本，不用滚动的 continuous —— 构建要可复现
 # 注意 appimagetool 的 tag 没有 v 前缀（uruntime 的有），别照抄
@@ -99,9 +99,9 @@ mkdir -p "$APPDIR/usr/bin" \
 cp -r "$ONEDIR_ABS/." "$APPDIR/usr/bin/"
 
 # 启动器叫什么取决于 NCMGUI_BUILD_NAME（CI 里带平台后缀，本地测试也常改），
-# 但 AppDir 里应当统一叫 ncmctl-gui —— AppRun、.desktop、bundle_libs.py 三处
+# 但 AppDir 里应当统一叫 ncm-studio —— AppRun、.desktop、bundle_libs.py 三处
 # 都按这个名字找它。不归一化的话，产物能打出来，运行时却是一句
-# "exec: .../usr/bin/ncmctl-gui: not found"，而且只有真跑一次才发现。
+# "exec: .../usr/bin/ncm-studio: not found"，而且只有真跑一次才发现。
 #
 # 重命名启动器本身是安全的：它靠自身所在目录定位同级 _internal/，跟文件名叫什么
 # 无关（onedir 的启动器不是按 argv[0] 找资源的）。
@@ -121,12 +121,12 @@ if [ "$(basename "$launcher")" != "$APP_NAME" ]; then
     mv "$launcher" "$APPDIR/usr/bin/$APP_NAME"
 fi
 
-install -m 0644 "$HERE/ncmctl-gui.png" "$APPDIR/$APP_NAME.png"
-install -m 0644 "$HERE/ncmctl-gui.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_NAME.png"
+install -m 0644 "$HERE/ncm-studio.png" "$APPDIR/$APP_NAME.png"
+install -m 0644 "$HERE/ncm-studio.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_NAME.png"
 ln -sf "$APP_NAME.png" "$APPDIR/.DirIcon"
 
-install -m 0644 "$HERE/ncmctl-gui.desktop" "$APPDIR/$APP_NAME.desktop"
-install -m 0644 "$HERE/ncmctl-gui.desktop" "$APPDIR/usr/share/applications/$APP_NAME.desktop"
+install -m 0644 "$HERE/ncm-studio.desktop" "$APPDIR/$APP_NAME.desktop"
+install -m 0644 "$HERE/ncm-studio.desktop" "$APPDIR/usr/share/applications/$APP_NAME.desktop"
 
 install -m 0755 "$HERE/AppRun" "$APPDIR/AppRun"
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# ncmctl GUI 的 AppImage 入口。
+# NCM Studio 的 AppImage 入口。
 #
 # AppImage 挂载后 $0 形如 /tmp/.mount_xxxx/AppRun，用 readlink -f 解析出 AppDir
 # 根目录，这样不管挂到哪、叫什么都找得到里面的程序。
@@ -17,4 +17,4 @@ if [ -d "$HERE/usr/lib" ]; then
     export LD_LIBRARY_PATH
 fi
 
-exec "$HERE/usr/bin/ncmctl-gui" "$@"
+exec "$HERE/usr/bin/ncm-studio" "$@"

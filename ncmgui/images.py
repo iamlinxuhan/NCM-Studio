@@ -90,7 +90,7 @@ def fetch(url: str, proxy: str = "", timeout: float = 10.0) -> bytes:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": f"ncmctl-gui/{VERSION}",
+            "User-Agent": f"ncm-studio/{VERSION}",
             "Referer": "https://music.163.com/",
         },
     )

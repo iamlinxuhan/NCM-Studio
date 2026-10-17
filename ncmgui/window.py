@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
         #: 从播放页「返回」时回到的导航页
         self._last_page_key = "account"
 
-        self.setWindowTitle(f"{APP_NAME} · ncmctl 图形界面")
+        self.setWindowTitle(f"{APP_NAME} · 第三方音乐播放器")
         self.resize(1180, 780)
         self.setMinimumSize(920, 620)
 
@@ -118,9 +118,9 @@ class MainWindow(QMainWindow):
         brand_layout.setContentsMargins(18, 20, 18, 16)
         brand_layout.setSpacing(2)
 
-        name = QLabel("NCMCTL")
+        name = QLabel("NCM STUDIO")
         name.setObjectName("Brand")
-        sub = QLabel("NETEASE MUSIC CONSOLE")
+        sub = QLabel("MUSIC DESKTOP CLIENT")
         sub.setObjectName("BrandSub")
         brand_layout.addWidget(name)
         brand_layout.addWidget(sub)

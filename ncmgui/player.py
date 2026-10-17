@@ -472,7 +472,7 @@ def mpv_argv(
         "--audio-file-auto=no",
         "--sub-auto=no",
         "--network-timeout=20",
-        "--audio-client-name=ncmctl-gui",
+        "--audio-client-name=ncm-studio",
         # 网易云 CDN 对 Referer 敏感。Cookie 不放这里 —— 命令行在进程列表里可见
         "--http-header-fields=Referer: https://music.163.com/",
         f"--volume={clamp_volume(volume)}",

@@ -9,7 +9,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# PyInstaller 打包产物（ncmctl-gui.spec 生成）
+# PyInstaller 打包产物（ncm-studio.spec 生成）
 build/
 dist/
 
@@ -26,7 +26,7 @@ AppDir/
 .idea/
 *.swp
 
-# 本程序运行时不会在本目录写东西（配置在 ~/.config/ncmctl-gui/），
+# 本程序运行时不会在本目录写东西（配置在 ~/.config/ncm-studio/），
 # 但下面这些是调试时可能出现的手工产物
 *.log
 /tmp-shots/

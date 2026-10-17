@@ -137,7 +137,7 @@ def main(argv: list[str]) -> int:
     # 只扫程序本体和共享库。对整个 _internal/ 逐个文件跑 ldd 要几分钟，而且
     # 目录里的 .py/.png 之类根本不是 ELF，白跑
     elf_files = [p for p in appdir.rglob("*.so*") if p.is_file()]
-    main_exe = appdir / "usr" / "bin" / "ncmctl-gui"
+    main_exe = appdir / "usr" / "bin" / "ncm-studio"
     if main_exe.is_file():
         elf_files.append(main_exe)
 

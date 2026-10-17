@@ -1,10 +1,11 @@
-# ncmctl GUI
+# NCM Studio
 
-给 [`ncmctl`](https://github.com/chaunsin/netease-cloud-music) 套的 PyQt6 图形界面，支持 **Windows / Linux / macOS**。
+基于 [`ncmctl`](https://github.com/chaunsin/netease-cloud-music) 的第三方音乐播放器，PyQt6 编写，支持 **Windows / Linux / macOS**。
 
 `ncmctl` 本身功能很全，但纯命令行用起来门槛不低：参数散落在各个子命令里，输出目录要手敲，
 二维码登录得盯着终端。这个程序把这些都收敛成侧边栏导航 + 表单 + 实时终端输出，
-重点解决**输出文件夹的可视化选择**和**长任务 / 扫码登录的可视化反馈**。
+重点解决**输出文件夹的可视化选择**和**长任务 / 扫码登录的可视化反馈**；
+在此之上还补了播放页、歌词、本地曲库和队列，日常听歌可以完全留在界面里。
 
 ![我喜欢的音乐](docs/screenshots/02-liked.png)
 
@@ -22,7 +23,7 @@ ncmctl 的全部子命令都在界面里有对应入口：
 | --- | --- | --- |
 | 账号 | `login qrcode` / `phone` / `cookie` / `cookiecloud`、`logout` | 四种登录方式；扫码登录会在界面里显示二维码 |
 | 我喜欢的音乐 | `SongDownloadUrlV1` + 随包 mpv | 红心歌单列表，点一首即流播；播放页、歌词、队列、四种播放顺序 |
-| 本地音乐 | 随包 mpv | 扫描下载目录或任意文件夹，点一首就播；默认 `~/音乐/ncmctl`，可自行选择 |
+| 本地音乐 | 随包 mpv | 扫描下载目录或任意文件夹，点一首就播；默认 `~/音乐/NCM-Studio`，可自行选择 |
 | 下载 | `download` | 歌曲 ID、专辑 / 歌手 / 歌单链接；选音质、并发数、输出目录；**内置查重**与**歌词 / 封面下载**，可一键搬空「我喜欢的音乐」 |
 | NCM 解码 | `ncm` | 把 `.ncm` 还原成 `.mp3` / `.flac`，纯本地操作 |
 | 云盘上传 | `cloud` | 上传单曲或整个文件夹，可按体积和正则过滤 |
@@ -35,24 +36,24 @@ ncmctl 的全部子命令都在界面里有对应入口：
 
 ### 直接用打包好的程序
 
-到 [Releases](https://github.com/iamlinxuhan/ncmctl-GUI/releases) 下载对应平台的文件：
+到 [Releases](https://github.com/iamlinxuhan/NCM-Studio/releases) 下载对应平台的文件：
 
 | 平台 | 文件 |
 | --- | --- |
-| Windows | `ncmctl-gui-windows-x86_64.exe` |
-| Linux | `ncmctl-gui-linux-x86_64.AppImage` |
-| macOS | `ncmctl-gui-macos-arm64` |
+| Windows | `ncm-studio-windows-x86_64.exe` |
+| Linux | `ncm-studio-linux-x86_64.AppImage` |
+| macOS | `ncm-studio-macos-arm64` |
 
 都是单文件，双击即可，**不需要装 Python，也不需要单独装 ncmctl**。
 
 - **Windows**：SmartScreen 可能提示「已保护你的电脑」，点「更多信息 → 仍要运行」。
 - **macOS**：首次打开会被 Gatekeeper 拦下，右键点图标选「打开」，或在终端执行
-  `xattr -d com.apple.quarantine ./ncmctl-gui-macos-arm64`。
+  `xattr -d com.apple.quarantine ./ncm-studio-macos-arm64`。
 - **Linux**：给执行位就行，不需要 FUSE，也不需要 libfuse2。
 
   ```bash
-  chmod +x ncmctl-gui-linux-x86_64.AppImage
-  ./ncmctl-gui-linux-x86_64.AppImage
+  chmod +x ncm-studio-linux-x86_64.AppImage
+  ./ncm-studio-linux-x86_64.AppImage
   ```
 
   AppImage 自带全部依赖（含 Qt 用到的 xcb / xkbcommon / wayland 等系统库），
@@ -69,8 +70,8 @@ ncmctl 的全部子命令都在界面里有对应入口：
 需要 Python 3.10+。ncmctl 不用你操心，下面这行会按平台下载并校验：
 
 ```bash
-git clone https://github.com/iamlinxuhan/ncmctl-GUI.git
-cd ncmctl-GUI
+git clone https://github.com/iamlinxuhan/NCM-Studio.git
+cd NCM-Studio
 
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
@@ -303,7 +304,7 @@ ncmctl 的下载日志只有进度条和一句 `report total: ...`，**从不提
 
 侧边栏的**「本地音乐」**页不用登录、也不联网：
 
-- 目录默认是程序的下载目录（`~/音乐/ncmctl`），也可以在页面顶部的路径控件里
+- 目录默认是程序的下载目录（`~/音乐/NCM-Studio`），也可以在页面顶部的路径控件里
   换成任意文件夹；选择会记在 `player.local_dir`，下次打开直接落在这里；
 - 点表格任意一行即播，或用「播放全部」；
 - 递归扫描（最多 5000 个文件，跳过隐藏路径），表格第 0 列显示 `▶` / `⏸`；
@@ -430,16 +431,16 @@ pip install pyinstaller
 
 # Windows：单文件（解压 mpv 的 .7z 需要 7-Zip；没有时退回 pip install py7zr）
 NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
-  pyinstaller ncmctl-gui.spec --noconfirm
+  pyinstaller ncm-studio.spec --noconfirm
 
 # macOS：单文件，不随包 mpv
-NCMGUI_BUNDLE_NCMCTL=1 pyinstaller ncmctl-gui.spec --noconfirm
+NCMGUI_BUNDLE_NCMCTL=1 pyinstaller ncm-studio.spec --noconfirm
 
 # Linux：onedir + AppImage
 NCMGUI_MODE=onedir NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
-  pyinstaller ncmctl-gui.spec --noconfirm
+  pyinstaller ncm-studio.spec --noconfirm
 bash packaging/make_appimage.sh \
-  dist/ncmctl-gui dist/ncmctl-gui-linux-x86_64.AppImage
+  dist/ncm-studio dist/ncm-studio-linux-x86_64.AppImage
 ```
 
 `NCMGUI_BUNDLE_NCMCTL=1` / `NCMGUI_BUNDLE_MPV=1` 分别表示「这个产物必须有 ncmctl /
@@ -477,14 +478,14 @@ Debian 12 / Ubuntu 22.04 用户（≤2.35）的档位。
 
 ```
 main.py                入口，含 --self-test / --screenshot
-ncmctl-gui.spec        PyInstaller 打包配置（三平台共用）
+ncm-studio.spec        PyInstaller 打包配置（三平台共用）
 scripts/
   fetch_ncmctl.py      下载并校验 ncmctl 到 vendor/（版本与 SHA-256 钉在里面）
   fetch_mpv.py         收集 mpv 到 vendor/mpv/（Linux 走 apt + ldd，Windows 走钉死的 .7z）
   make_icon.py         生成图标（纯几何绘制，不依赖字体）
 packaging/
-  ncmctl-gui.png/.ico  图标，已入库（免得构建期还要装 Pillow）
-  ncmctl-gui.desktop   Linux 桌面项
+  ncm-studio.png/.ico  图标，已入库（免得构建期还要装 Pillow）
+  ncm-studio.desktop   Linux 桌面项
   AppRun               AppImage 入口
   bundle_libs.py       把 Qt 需要的系统库收进 AppDir
   check_glibc_floor.py 检查产物真正能跑的最低 glibc，超线即失败

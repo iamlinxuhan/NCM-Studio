@@ -1,10 +1,10 @@
-"""ncmctl GUI —— 网易云音乐命令行工具 ncmctl 的 PyQt6 图形界面。"""
+"""NCM Studio —— 基于 ncmctl 的第三方音乐播放器。"""
 
 import sys
 
-APP_NAME = "ncmctl GUI"
-APP_ID = "ncmctl-gui"
-VERSION = "1.3.11"
+APP_NAME = "NCM Studio"
+APP_ID = "ncm-studio"
+VERSION = "2.0.0"
 
 #: 随程序分发的 ncmctl 版本。
 #:

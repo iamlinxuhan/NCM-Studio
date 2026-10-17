@@ -32,16 +32,16 @@ from typing import Callable, Mapping
 from . import VERSION
 
 #: 发布仓库。资产名与 CI 里生成的名字必须一致，改名要两边一起改。
-REPO = "iamlinxuhan/ncmctl-GUI"
+REPO = "iamlinxuhan/NCM-Studio"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 SUMS_ASSET = "SHA256SUMS"
 
 #: 三个平台在 Release 里的资产名（与 .github/workflows/build.yaml 对应）
 ASSETS = {
-    "linux": "ncmctl-gui-linux-x86_64.AppImage",
-    "windows": "ncmctl-gui-windows-x86_64.exe",
-    "macos": "ncmctl-gui-macos-arm64",
+    "linux": "ncm-studio-linux-x86_64.AppImage",
+    "windows": "ncm-studio-windows-x86_64.exe",
+    "macos": "ncm-studio-macos-arm64",
 }
 
 #: 支持的下载块大小。1 MB 在进度条刷新和内存占用之间比较平衡。
@@ -193,7 +193,7 @@ def _opener(proxy: str = ""):
 def _headers() -> dict[str, str]:
     return {
         "Accept": "application/vnd.github+json",
-        "User-Agent": f"ncmctl-gui/{VERSION}",
+        "User-Agent": f"ncm-studio/{VERSION}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
@@ -531,7 +531,7 @@ def _selftest() -> int:
           install_kind(system="linux", frozen=True, appimage="/nonexistent/a.AppImage"),
           "unsupported")
     with tempfile.TemporaryDirectory(prefix="ncmgui-updater-") as tmp:
-        appimage = Path(tmp) / "ncmctl-gui.AppImage"
+        appimage = Path(tmp) / "ncm-studio.AppImage"
         appimage.write_bytes(b"x")
         check("AppImage", install_kind(system="linux", frozen=True, appimage=str(appimage)),
               "appimage")
@@ -573,9 +573,9 @@ def _selftest() -> int:
         else:
             check("校验不符会拒绝", False, True)
 
-        target = root / "ncmctl-gui"
+        target = root / "ncm-studio"
         target.write_bytes(b"old")
-        new = root / "ncmctl-gui.new"
+        new = root / "ncm-studio.new"
         new.write_bytes(b"new")
         install(new, target, "macos")
         check("替换后内容", target.read_bytes(), b"new")

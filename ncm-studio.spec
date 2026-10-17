@@ -2,7 +2,7 @@
 """PyInstaller 打包配置，三平台共用。
 
     python3 scripts/fetch_ncmctl.py          # 先取 ncmctl 到 vendor/
-    pyinstaller ncmctl-gui.spec --noconfirm
+    pyinstaller ncm-studio.spec --noconfirm
 
 两种产物形态，用环境变量 ``NCMGUI_MODE`` 切换：
 
@@ -31,7 +31,7 @@ HERE = Path(SPECPATH)
 
 MODE = os.environ.get("NCMGUI_MODE", "onefile").strip().lower()
 ONEDIR = MODE in {"onedir", "dir", "appimage"}
-NAME = os.environ.get("NCMGUI_BUILD_NAME", "ncmctl-gui")
+NAME = os.environ.get("NCMGUI_BUILD_NAME", "ncm-studio")
 
 #: CI 里设成 1，表示「这个产物必须有 ncmctl」。缺了就报错而不是警告 ——
 #: 一个不含 ncmctl 的包发出去，用户那边是直接不能用
@@ -55,7 +55,7 @@ if sys.platform == "win32":
 # ── 图标 ────────────────────────────────────────────────────────────────────
 # 放进包里的这份供 Qt 窗口图标使用（ncmgui/resources.py 按相对位置找它）。
 # AppImage 与 Windows 可执行文件用的是 packaging/ 下的同一份源文件。
-icon_png = HERE / "packaging" / "ncmctl-gui.png"
+icon_png = HERE / "packaging" / "ncm-studio.png"
 if icon_png.is_file():
     datas.append((str(icon_png), "ncmgui/assets"))
 else:
@@ -149,7 +149,7 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 # icon= 只在 Windows / macOS 生效，Linux 的图标完全由 AppImage 那边的 AppDir 决定
-exe_icon = HERE / "packaging" / ("ncmctl-gui.ico" if sys.platform == "win32" else "ncmctl-gui.png")
+exe_icon = HERE / "packaging" / ("ncm-studio.ico" if sys.platform == "win32" else "ncm-studio.png")
 exe_kwargs = dict(
     name=NAME,
     debug=False,

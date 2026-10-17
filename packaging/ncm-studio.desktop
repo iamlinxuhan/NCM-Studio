@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=NCM Studio
+Name[zh_CN]=NCM Studio 音乐播放器
+Comment=Third-party music player built on ncmctl
+Comment[zh_CN]=基于 ncmctl 的第三方音乐播放器
+Exec=ncm-studio
+Icon=ncm-studio
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+StartupWMClass=ncm-studio

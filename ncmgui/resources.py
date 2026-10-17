@@ -27,6 +27,6 @@ def asset(name: str) -> Path:
 
 
 #: 应用图标。spec 里的 ``datas`` 把它放在这个位置，两边必须一致。
-ICON_PATH = asset("ncmctl-gui.png")
+ICON_PATH = asset("ncm-studio.png")
 
 __all__ = ["asset", "ICON_PATH"]

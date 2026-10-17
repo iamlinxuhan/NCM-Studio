@@ -656,7 +656,7 @@ class SettingsPage(BasePage):
         card.add_widget(path)
 
         note = QLabel(
-            "本程序只是 ncmctl 的图形前端，不保存你的账号密码。<br>"
+            "本程序基于 ncmctl，不保存你的账号密码。<br>"
             "登录凭据由 ncmctl 自己写在 <code>~/.ncmctl/</code> 下，本程序只读取状态用于显示。"
         )
         note.setObjectName("Hint")

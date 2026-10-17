@@ -125,12 +125,12 @@ def main() -> int:
 
     icon = build()
 
-    png = OUT_DIR / "ncmctl-gui.png"
+    png = OUT_DIR / "ncm-studio.png"
     icon.save(png, "PNG")
     print(f"  {png.relative_to(ROOT)}  {png.stat().st_size} 字节")
 
     # Windows 用 .ico。多尺寸一起塞进去，任务栏、资源管理器、Alt-Tab 各取所需
-    ico = OUT_DIR / "ncmctl-gui.ico"
+    ico = OUT_DIR / "ncm-studio.ico"
     icon.save(
         ico,
         "ICO",

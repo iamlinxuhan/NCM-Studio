@@ -1,7 +1,7 @@
 """本地音乐页：扫描一个目录，点一首就能播。
 
-默认目录就是程序的下载目录（``download.output``，本机是
-``~/音乐/ncmctl``）。用户也可以在这里换成任意文件夹；选择会记在
+默认目录就是程序的下载目录（``download.output``，通常是
+``~/音乐/NCM-Studio``）。用户也可以在这里换成任意文件夹；选择会记在
 ``player.local_dir`` 里，下次打开直接落在上次的位置。
 
 本地歌曲的 ``id`` 是负数（见 :mod:`ncmgui.localmusic`），和网易云的 ID 不会撞上。
@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QTableView,
 )
 
-from .. import localmusic, theme
+from .. import localmusic
 from ..playback import STATE_PAUSED
 from ..resolver import Song
 from ..widgets.card import accent_button, ghost_button
@@ -81,7 +81,9 @@ class LocalTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             if column == self.COL_INDEX:
                 if song.id == self._playing_id:
-                    return "▶" if self._paused else theme.safe_glyph("⏸", "❚❚")
+                    # 不用 ⏸（U+23F8）：不少字体里这个字形只有两三个像素高，
+                    # 缩在 46px 的序号列里几乎看不见。❚❚ 的竖条高度跟着字号走
+                    return "▶" if self._paused else "❚❚"
                 return str(index.row() + 1)
             if column == self.COL_NAME:
                 return song.name

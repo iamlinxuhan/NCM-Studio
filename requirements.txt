@@ -1,4 +1,4 @@
-# ncmctl GUI 的依赖
+# NCM Studio 的依赖
 #
 # 安装：
 #   python3 -m venv .venv

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 ncmctl GUI。优先使用同目录下的 .venv，没有就退回系统 python3。
+# 启动 NCM Studio。优先使用同目录下的 .venv，没有就退回系统 python3。
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
