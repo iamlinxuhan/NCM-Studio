@@ -255,9 +255,7 @@ class MainWindow(QMainWindow):
         body_layout.setSpacing(0)
         body_layout.addWidget(self.splitter, 1)
         self.playback_bar = PlaybackBar(self)
-        self.playback_bar.queueRequested.connect(
-            lambda: self.open_player_page(queue=True)
-        )
+        self.playback_bar.queueRequested.connect(self.toggle_queue_panel)
         # 点播放条左侧的封面/歌名回到黑胶唱片页；从播放页「返回」之后
         # 侧栏里没有它的入口，这里是唯一的直达路径
         self.playback_bar.playerRequested.connect(self.open_player_page)
@@ -291,6 +289,17 @@ class MainWindow(QMainWindow):
                 hook()
             except RuntimeError:
                 pass
+
+    def toggle_queue_panel(self) -> None:
+        """播放条的播放列表按钮：展开队列，再点一次收起。
+
+        不在播放页时先切过去并展开；已经在播放页且队列开着，就只收面板，
+        不再走一遍 ``open_player_page``（那会把页面重置成显示状态）。
+        """
+        if self.stack.currentWidget() is self.player_page and self.player_page.queue_visible:
+            self.player_page.set_queue_visible(False)
+            return
+        self.open_player_page(queue=True)
 
     def open_player_page(self, queue: bool | None = None) -> None:
         """切到播放页；``queue`` 为真时顺带展开播放队列。"""

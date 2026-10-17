@@ -515,6 +515,10 @@ class PlayerPage(BasePage):
         if index.isValid():
             self.playback.play_at(index.row())
 
+    @property
+    def queue_visible(self) -> bool:
+        return self._queue_visible
+
     def toggle_queue(self) -> None:
         self.set_queue_visible(not self._queue_visible)
 
