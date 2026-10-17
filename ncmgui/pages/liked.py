@@ -42,6 +42,7 @@ from ..playback import STATE_PLAYING
 from ..resolver import Resolver, Song
 from ..widgets.card import ghost_button
 from ..widgets.form import combo_data, set_combo_data
+from ..widgets.playmarker import PlayMarkerDelegate
 from ..workers import BackgroundTask
 from .base import BasePage
 
@@ -348,6 +349,9 @@ class LikedPage(BasePage):
         header.setSectionResizeMode(LikedTableModel.COL_ALBUM, header.ResizeMode.Interactive)
         header.setSectionResizeMode(LikedTableModel.COL_DURATION, header.ResizeMode.Fixed)
         header.setSectionResizeMode(LikedTableModel.COL_LOCAL, header.ResizeMode.Fixed)
+        self.table.setItemDelegateForColumn(
+            LikedTableModel.COL_INDEX, PlayMarkerDelegate(self.table)
+        )
         self.table.setColumnWidth(LikedTableModel.COL_INDEX, 46)
         self.table.setColumnWidth(LikedTableModel.COL_ARTIST, 170)
         self.table.setColumnWidth(LikedTableModel.COL_ALBUM, 190)

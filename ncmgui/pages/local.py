@@ -35,6 +35,7 @@ from ..playback import STATE_PAUSED
 from ..resolver import Song
 from ..widgets.card import accent_button, ghost_button
 from ..widgets.pathpicker import PathPicker
+from ..widgets.playmarker import PlayMarkerDelegate
 from ..workers import BackgroundTask
 from .base import BasePage
 
@@ -216,6 +217,9 @@ class LocalPage(BasePage):
         header.setSectionResizeMode(LocalTableModel.COL_ALBUM, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(
             LocalTableModel.COL_QUALITY, QHeaderView.ResizeMode.Interactive
+        )
+        self.table.setItemDelegateForColumn(
+            LocalTableModel.COL_INDEX, PlayMarkerDelegate(self.table)
         )
         self.table.setColumnWidth(LocalTableModel.COL_INDEX, 46)
         self.table.setColumnWidth(LocalTableModel.COL_ARTIST, 180)
