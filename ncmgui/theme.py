@@ -29,6 +29,7 @@ BORDER = "#1e2a44"      # 常规描边
 BORDER_HI = "#2b3c60"   # 强调描边
 
 CYAN = "#00e5ff"        # 主强调
+CYAN_SOFT = "#8ec9ff"   # 淡化强调（当前句的译文，不用主强调那么刺眼）
 PURPLE = "#7c5cff"      # 副强调
 GREEN = "#00ffa3"       # 成功
 AMBER = "#ffb020"       # 警告
@@ -705,7 +706,7 @@ QLabel#LyricLine[translation="true"] {
 }
 
 QLabel#LyricLine[current="true"][translation="true"] {
-    color: $TEXT_DIM;
+    color: $CYAN_SOFT;
     font-size: 12px;
     font-weight: 400;
 }
@@ -832,6 +833,7 @@ def stylesheet() -> str:
         BORDER=BORDER,
         BORDER_HI=BORDER_HI,
         CYAN=CYAN,
+        CYAN_SOFT=CYAN_SOFT,
         PURPLE=PURPLE,
         GREEN=GREEN,
         AMBER=AMBER,
