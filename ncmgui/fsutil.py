@@ -29,8 +29,13 @@ _DEFAULT_FILE_MODE = 0o644
 
 
 def _fsync_file(path: Path) -> None:
-    """把文件内容刷到磁盘。读打开即可 fsync，不需要再写一次。"""
-    fd = os.open(path, os.O_RDONLY)
+    """把文件内容刷到磁盘。
+
+    Windows 的 ``_commit``（``os.fsync`` 的实现）要求句柄可写，用 ``O_RDONLY``
+    打开会直接抛 ``OSError(9, 'Bad file descriptor')``，所以统一用 ``O_RDWR``。
+    这里刷的始终是我们自己的临时文件，本来就是可写的。
+    """
+    fd = os.open(path, os.O_RDWR)
     try:
         os.fsync(fd)
     finally:
@@ -97,6 +102,10 @@ def atomic_edit(path: str | os.PathLike[str], edit: Callable[[Path], T]) -> T:
     tmp = Path(tmp_name)
     try:
         shutil.copy2(source, tmp)
+        # copy2 会把源文件的权限位一并带过来：源若是只读（0444），临时副本
+        # 也会只读，mutagen 和后面的 fsync 都写不了。编辑期间先放开写权限，
+        # 最终权限在替换前从源文件恢复。
+        os.chmod(tmp, 0o600)
         result = edit(tmp)
         _fsync_file(tmp)
         try:
@@ -173,6 +182,15 @@ def _selftest() -> int:
 
         atomic_edit(audio, remember)
         check("临时文件保留原后缀", seen, [".flac"])
+
+        # 只读源文件：临时副本必须先放开写权限才能改，改完再恢复原权限。
+        # Windows 的 os.fsync 还要求句柄可写，这里一并覆盖到。
+        audio.chmod(0o444)
+        atomic_edit(audio, lambda p: p.write_bytes(b"READONLY-EDITED"))
+        check("只读文件也能原子编辑", audio.read_bytes(), b"READONLY-EDITED")
+        check("只读权限保持不变", audio.stat().st_mode & 0o777, 0o444)
+        # 临时目录清理时要能删掉它（Windows 上只读文件删不掉）
+        audio.chmod(0o600)
 
     if failures:
         print(f"原子写自检失败 {len(failures)} 项：")
