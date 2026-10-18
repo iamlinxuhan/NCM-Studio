@@ -707,7 +707,9 @@ QLabel#LyricLine[translation="true"] {
 
 QLabel#LyricLine[current="true"][translation="true"] {
     color: $CYAN_SOFT;
-    font-size: 12px;
+    /* 原文 15px → 18px 是 1.2 倍；译文从 12px 等比放到 14.4px，
+       保持「译文比原文小一号」的比例，不跟着原文一起变成同样大 */
+    font-size: 14.4px;
     font-weight: 400;
 }
 
