@@ -286,6 +286,13 @@ class PlayerPage(BasePage):
         self.playback.modeChanged.connect(lambda _mode: self._refresh_meta())
         self.covers.coverReady.connect(self._on_cover)
 
+    def theme_changed(self) -> None:
+        """占位封面是构造时画好的 pixmap，换主题后得重画。"""
+        self._placeholder = images.placeholder(330)
+        cached = self.covers.get(self._cover_id) if self._cover_id is not None else None
+        if cached is None:
+            self.vinyl.set_art(self._placeholder)
+
     # ---------------------------------------------------------------- 播放态
 
     def _on_track_changed(self, song) -> None:
@@ -373,9 +380,10 @@ class PlayerPage(BasePage):
             self._word_timer.stop()
             return
         index = self._current_line
+        # 普通 LRC 没有真实逐字时间，但界面会按整行时长均摊，同样需要这个定时器
         has_words = (
             0 <= index < len(self._lyric_lines)
-            and bool(self._lyric_lines[index].words)
+            and bool(lyrics.words_for(self._lyric_lines[index]))
         )
         if not has_words:
             self._word_timer.stop()

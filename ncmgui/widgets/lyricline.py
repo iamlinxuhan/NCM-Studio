@@ -13,11 +13,16 @@
 
 幕布位置由 :func:`ncmgui.lyrics.curtain_char` 根据字时间算出行内字符位置，这里
 只负责把字符位置换算成横坐标。每 30ms 只更新当前行的遮罩并重绘，不重建排版。
+
+普通 LRC 只有行级时间，没有逐字数据时由 :func:`ncmgui.lyrics.synthetic_words`
+把整行时长按词/字均摊，因此两种歌词的表现一致，不再是「逐字有动画、整句只有
+一种颜色」。
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
 from PyQt6.QtGui import (
@@ -43,11 +48,14 @@ CURRENT_SIZE = 18
 
 
 class LyricLineWidget(QWidget):
-    """一行原文歌词。当前行且带逐字数据时画幕布。"""
+    """一行原文歌词。当前行画幕布 —— 逐字数据缺失时由整行时长均摊得到。"""
 
     def __init__(self, line: lyrics.TimedLine, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._line = line
+        #: 普通 LRC 没有字时间，按词/字均摊一份，渲染路径与逐字歌词保持一致
+        self._words = lyrics.words_for(line)
+        self._timed = replace(line, words=self._words) if self._words else line
         self._current = False
         self._position = 0.0
 
@@ -91,7 +99,7 @@ class LyricLineWidget(QWidget):
         if value == self._position:
             return
         self._position = value
-        if self._current and self._line.words:
+        if self._current and self._words:
             self.update()
 
     # ------------------------------------------------------------ 尺寸/排版
@@ -162,7 +170,7 @@ class LyricLineWidget(QWidget):
             return 0, 0.0
 
         text_length = len(self._line.text)
-        char_pos = lyrics.curtain_char(self._line, self._position)
+        char_pos = lyrics.curtain_char(self._timed, self._position)
         char_pos = max(0.0, min(float(text_length), float(char_pos)))
 
         if text_length == 0 or char_pos >= text_length:
@@ -214,7 +222,7 @@ class LyricLineWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         origin = QPointF(PAD_X, PAD_Y)
 
-        if self._current and not self._line.words:
+        if self._current and not self._words:
             base_color = QColor(theme.CYAN)
         elif self._current:
             base_color = QColor(theme.LYRIC_UNSUNG)
@@ -225,7 +233,7 @@ class LyricLineWidget(QWidget):
         painter.setFont(self._font)
         self._layout.draw(painter, origin)
 
-        if self._current and self._line.words:
+        if self._current and self._words:
             self._paint_curtain(painter, origin)
         painter.end()
 

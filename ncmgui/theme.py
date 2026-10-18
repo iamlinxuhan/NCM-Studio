@@ -1,7 +1,12 @@
-"""暗夜霓虹主题：调色板、全局 QSS、字体与霓虹辉光。
+"""双主题：暗夜霓虹与冷调亮色，外加全局 QSS、字体与霓虹辉光。
 
-QSS 里没有变量语法，这里用 ``string.Template`` 的 ``$NAME`` 占位符来注入调色板，
+主题在运行时可切换。所有 token 同时以模块级名字暴露（``theme.CYAN`` 等），
+自绘控件在 ``paintEvent`` 里现取，因此切换后只需要 ``update()`` 重画一次。
+QSS 里没有变量语法，这里用 ``string.Template`` 的 ``$NAME`` 占位符注入调色板，
 这样样式表本身仍然是可以直接阅读的纯 CSS。
+
+亮色不是「把暗色反过来」：底色用偏蓝的冷白、描边保持低饱和蓝灰、强调色仍取
+青与紫，终端区则始终是深色 —— 这套组合在日光下清晰，又保留原来的科技感。
 
 注意 Qt 样式表的两个限制：
   * 不支持 ``box-shadow``，霓虹辉光只能靠 ``QGraphicsDropShadowEffect`` 模拟
@@ -20,41 +25,180 @@ from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 # 调色板
 # --------------------------------------------------------------------------- #
 
-BG = "#0a0e17"          # 窗口背景
-BG_DEEP = "#070a11"     # 侧边栏 / 终端背景
-PANEL = "#101624"       # 卡片
-PANEL_ALT = "#161d2f"   # 卡片内的次级块、输入框
-PANEL_HI = "#1b2437"    # 悬停态
-BORDER = "#1e2a44"      # 常规描边
-BORDER_HI = "#2b3c60"   # 强调描边
+#: 暗色。原来的唯一一套配色，数值保持不变。
+DARK = {
+    "BG": "#0a0e17",          # 窗口背景
+    "BG_DEEP": "#070a11",     # 侧边栏
+    "PANEL": "#101624",       # 卡片
+    "PANEL_ALT": "#161d2f",   # 卡片内的次级块、输入框
+    "PANEL_HI": "#1b2437",    # 悬停态
+    "BORDER": "#1e2a44",      # 常规描边
+    "BORDER_HI": "#2b3c60",   # 强调描边
 
-CYAN = "#00e5ff"        # 主强调
-CYAN_SOFT = "#8ec9ff"   # 淡化强调（当前句的译文，不用主强调那么刺眼）
-PURPLE = "#7c5cff"      # 副强调
-GREEN = "#00ffa3"       # 成功
-AMBER = "#ffb020"       # 警告
-RED = "#ff4d6d"         # 危险
+    "CYAN": "#00e5ff",        # 主强调
+    "CYAN_SOFT": "#8ec9ff",   # 淡化强调（当前句的译文）
+    "PURPLE": "#7c5cff",      # 副强调
+    "GREEN": "#00ffa3",       # 成功
+    "AMBER": "#ffb020",       # 警告
+    "RED": "#ff4d6d",         # 危险
 
-TEXT = "#e6edf7"        # 正文
-TEXT_DIM = "#7b8aa5"    # 次要文字
-TEXT_MUTE = "#4d5b75"   # 禁用 / 占位
+    "TEXT": "#e6edf7",        # 正文
+    "TEXT_DIM": "#7b8aa5",    # 次要文字
+    "TEXT_MUTE": "#4d5b75",   # 禁用 / 占位
 
-# 逐字歌词：未唱的字浅蓝，幕布扫过之后变深；LYRIC_CURTAIN_BAND 是软边宽度相对
-# 字号的倍数（实际取 max(10px, 字号 * 倍数)），保证边缘落在单个字内部时也看得
-# 出从左到右的连续渐变。
-LYRIC_UNSUNG = "#a9d6ff"
-LYRIC_SUNG = "#4a7fd0"
-LYRIC_CURTAIN_BAND = 0.8
+    # 逐字歌词：未唱的字浅蓝，幕布扫过之后变深；LYRIC_CURTAIN_BAND 是软边宽度
+    # 相对字号的倍数（实际取 max(10px, 字号 * 倍数)），保证边缘落在单个字内部时
+    # 也看得出从左到右的连续渐变。
+    "LYRIC_UNSUNG": "#a9d6ff",
+    "LYRIC_SUNG": "#4a7fd0",
+    "LYRIC_CURTAIN_BAND": 0.8,
+
+    # 终端区在两种主题里都保持深色（见下面 LIGHT 里的说明），所以这套颜色
+    # 两套主题共用一份。
+    "CONSOLE_BG": "#070a11",
+    "CONSOLE_TEXT": "#c3d2e6",
+    "CONSOLE_DIM": "#7b8aa5",
+    "CONSOLE_CYAN": "#4fd8ff",
+    "CONSOLE_GREEN": "#3ddc97",
+    "CONSOLE_AMBER": "#ffc857",
+    "CONSOLE_RED": "#ff6b81",
+    "CONSOLE_PURPLE": "#a78bfa",
+
+    # 主题图标的太阳 / 月亮。图标画的是「当前主题」，所以暗色下实际只用到月亮。
+    "SUN_COLOR": "#ffb020",
+    "MOON_COLOR": "#e6edf7",
+
+    # 半透明强调色。QSS 里不能做颜色运算，这些组合只能预先算好。
+    "CYAN_WASH": "rgba(0, 229, 255, 38)",
+    "CYAN_WASH_STRONG": "rgba(0, 229, 255, 45)",
+    "GREEN_WASH": "rgba(0, 255, 163, 30)",
+    "GREEN_EDGE": "rgba(0, 255, 163, 110)",
+    "AMBER_WASH": "rgba(255, 176, 32, 28)",
+    "AMBER_EDGE": "rgba(255, 176, 32, 110)",
+    "RED_WASH": "rgba(255, 77, 109, 45)",
+    "RED_WASH_STRONG": "rgba(255, 77, 109, 80)",
+    "RED_EDGE": "rgba(255, 77, 109, 180)",
+    "TEXT_MUTE_WASH": "rgba(123, 138, 165, 20)",
+
+    "CYAN_HOVER": "#5cf0ff",
+    "PURPLE_HOVER": "#9b83ff",
+    "CYAN_DEEP": "#00b8cc",
+    "PURPLE_DEEP": "#6448cc",
+    "ACCENT_ON": "#06121c",   # 渐变主按钮上的文字
+}
+
+#: 亮色。冷白底 + 蓝灰描边 + 青/紫强调，尽量保留霓虹的色相，只把明度翻过来。
+LIGHT = {
+    "BG": "#edf2f9",
+    "BG_DEEP": "#e4ecf7",
+    "PANEL": "#ffffff",
+    "PANEL_ALT": "#f4f8fd",
+    "PANEL_HI": "#e8f0fb",
+    "BORDER": "#d5e0ee",
+    "BORDER_HI": "#a9bddb",
+
+    # 青与紫都压到能在白底上读的深度；色相不变，仍是一眼能认出的那套霓虹
+    "CYAN": "#0079a8",
+    "CYAN_SOFT": "#2f6fa6",
+    "PURPLE": "#5b45d6",
+    "GREEN": "#00875f",
+    "AMBER": "#a26000",
+    "RED": "#c62b4c",
+
+    "TEXT": "#13203a",
+    "TEXT_DIM": "#51617c",
+    "TEXT_MUTE": "#8391a7",
+
+    # 浅底上的幕布：唱过的用偏亮的靛蓝而不是近黑的海军蓝 —— 原来的 #123f78
+    # 在白底上像墨块，和整页的冷白调性不搭。两档之间仍保留约 2.7 倍的明度差
+    # （与暗色主题一致），幕布边缘的字内渐变依然清楚。
+    "LYRIC_UNSUNG": "#6b9bd4",
+    "LYRIC_SUNG": "#1d4f96",
+    "LYRIC_CURTAIN_BAND": 0.8,
+
+    # 终端区刻意保持深色：它是「命令输出」，不是普通表单。日志行在追加时就把
+    # 颜色写进了 QTextDocument，跟着主题改底会留下大片读不清的旧颜色；固定深底
+    # + 固定配色既避免这个问题，也让亮色界面里保留一块硬核的科技感。
+    "CONSOLE_BG": "#070a11",
+    "CONSOLE_TEXT": "#c3d2e6",
+    "CONSOLE_DIM": "#7b8aa5",
+    "CONSOLE_CYAN": "#4fd8ff",
+    "CONSOLE_GREEN": "#3ddc97",
+    "CONSOLE_AMBER": "#ffc857",
+    "CONSOLE_RED": "#ff6b81",
+    "CONSOLE_PURPLE": "#a78bfa",
+
+    "SUN_COLOR": "#dd9500",
+    "MOON_COLOR": "#51617c",
+
+    "CYAN_WASH": "rgba(0, 121, 168, 24)",
+    "CYAN_WASH_STRONG": "rgba(0, 121, 168, 34)",
+    "GREEN_WASH": "rgba(0, 135, 95, 22)",
+    "GREEN_EDGE": "rgba(0, 135, 95, 120)",
+    "AMBER_WASH": "rgba(162, 96, 0, 22)",
+    "AMBER_EDGE": "rgba(162, 96, 0, 130)",
+    "RED_WASH": "rgba(198, 43, 76, 22)",
+    "RED_WASH_STRONG": "rgba(198, 43, 76, 40)",
+    "RED_EDGE": "rgba(198, 43, 76, 150)",
+    "TEXT_MUTE_WASH": "rgba(131, 145, 167, 18)",
+
+    "CYAN_HOVER": "#2f9cc3",
+    "PURPLE_HOVER": "#7a68e8",
+    "CYAN_DEEP": "#006184",
+    "PURPLE_DEEP": "#4936b8",
+    "ACCENT_ON": "#ffffff",
+}
+
+PALETTES = {"dark": DARK, "light": LIGHT}
+
+#: 当前主题名。切换只改这里和下面那批模块级 token。
+_current = "dark"
+
+#: 所有可随主题变化的 token 名（也是写进模块命名空间的那批名字）
+TOKENS = tuple(DARK)
 
 #: 日志级别对应的颜色
-LEVEL_COLORS = {
-    "info": TEXT,
-    "dim": TEXT_DIM,
-    "success": GREEN,
-    "warn": AMBER,
-    "error": RED,
-    "accent": CYAN,
-}
+LEVEL_COLORS: dict[str, str] = {}
+
+
+def _sync_tokens(name: str) -> None:
+    """把某套调色板写进模块命名空间，并刷新派生表。"""
+    values = PALETTES[name]
+    globals().update(values)
+    LEVEL_COLORS.update({
+        "info": values["TEXT"],
+        "dim": values["TEXT_DIM"],
+        "success": values["GREEN"],
+        "warn": values["AMBER"],
+        "error": values["RED"],
+        "accent": values["CYAN"],
+    })
+
+
+def normalize_theme(name: object) -> str:
+    """只接受 ``dark`` / ``light``，其余一律按暗色处理。"""
+    text = str(name or "").strip().lower()
+    return text if text in PALETTES else "dark"
+
+
+def current_theme() -> str:
+    return _current
+
+
+def is_dark() -> bool:
+    return _current == "dark"
+
+
+def set_theme(name: str) -> str:
+    """切换当前主题并返回规范化后的名字（不负责重绘界面）。"""
+    global _current
+    _current = normalize_theme(name)
+    _sync_tokens(_current)
+    return _current
+
+
+# 初始化：模块级 token 一开始就是暗色那套，保证 ``import`` 之后立即可用。
+_sync_tokens(_current)
 
 _UI_CANDIDATES = (
     "Noto Sans CJK SC", "Source Han Sans SC", "Noto Sans CJK JP",
@@ -182,7 +326,7 @@ QPushButton#Nav:hover {
 
 QPushButton#Nav:checked {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                stop:0 rgba(0, 229, 255, 38), stop:1 transparent);
+                stop:0 $CYAN_WASH, stop:1 transparent);
     border-left: 3px solid $CYAN;
     color: $CYAN;
     font-weight: 600;
@@ -220,6 +364,14 @@ QLabel#CardSubtitle {
     font-size: 12px;
 }
 
+/* 二维码占位框。原来是一条内联样式，换主题时不会跟着变，收进 QSS 统一管理 */
+QLabel#QrPlaceholder {
+    color: $TEXT_DIM;
+    font-size: 12px;
+    border: 1px dashed $BORDER_HI;
+    border-radius: 8px;
+}
+
 QLabel#PageTitle {
     color: $TEXT;
     font-size: 22px;
@@ -252,7 +404,7 @@ QFrame#HLine {
 QPushButton#Accent {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                 stop:0 $CYAN, stop:1 $PURPLE);
-    color: #06121c;
+    color: $ACCENT_ON;
     font-weight: 700;
     border: none;
     border-radius: 6px;
@@ -261,12 +413,12 @@ QPushButton#Accent {
 
 QPushButton#Accent:hover {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 #5cf0ff, stop:1 #9b83ff);
+                stop:0 $CYAN_HOVER, stop:1 $PURPLE_HOVER);
 }
 
 QPushButton#Accent:pressed {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 #00b8cc, stop:1 #6448cc);
+                stop:0 $CYAN_DEEP, stop:1 $PURPLE_DEEP);
 }
 
 QPushButton#Accent:disabled {
@@ -301,6 +453,12 @@ QPushButton#Ghost[compact="true"] {
     font-size: 12px;
 }
 
+/* 主题切换键：右侧留给自绘的太阳 / 月亮（见 widgets/themetoggle.py） */
+QPushButton#Ghost[themeToggle="true"] {
+    padding: 0 28px 0 10px;
+    font-size: 12px;
+}
+
 /* 播放条上的控制键：平时只有图标，悬停才浮出一层淡底色。
    不再画按钮边框 —— 一排方框在 70px 的条里显得又粗又挤 */
 QPushButton#Ghost[transport="flat"] {
@@ -324,8 +482,8 @@ QPushButton#Danger {
     padding: 8px 18px;
 }
 
-QPushButton#Danger:hover { background: rgba(255, 77, 109, 45); }
-QPushButton#Danger:pressed { background: rgba(255, 77, 109, 80); }
+QPushButton#Danger:hover { background: $RED_WASH; }
+QPushButton#Danger:pressed { background: $RED_WASH_STRONG; }
 QPushButton#Danger:disabled { color: $TEXT_MUTE; border-color: $BORDER; }
 
 /* ------------------------------------------------------------ 输入控件 */
@@ -349,9 +507,9 @@ QLineEdit:disabled, QPlainTextEdit:disabled {
     background: $PANEL;
 }
 
-QLineEdit[state="ok"]  { border-color: rgba(0, 255, 163, 120); }
-QLineEdit[state="warn"] { border-color: rgba(255, 176, 32, 160); }
-QLineEdit[state="bad"]  { border-color: rgba(255, 77, 109, 180); }
+QLineEdit[state="ok"]  { border-color: $GREEN_EDGE; }
+QLineEdit[state="warn"] { border-color: $AMBER_EDGE; }
+QLineEdit[state="bad"]  { border-color: $RED_EDGE; }
 
 QLineEdit[readOnly="true"] { color: $TEXT_DIM; }
 
@@ -388,7 +546,7 @@ QComboBox QAbstractItemView {
     border: 1px solid $BORDER_HI;
     border-radius: 6px;
     padding: 4px;
-    selection-background-color: rgba(0, 229, 255, 45);
+    selection-background-color: $CYAN_WASH_STRONG;
     selection-color: $CYAN;
     outline: none;
 }
@@ -545,7 +703,7 @@ QListWidget, QListView, QTreeWidget {
 QListWidget::item, QListView::item { padding: 5px 8px; border-radius: 4px; }
 
 QListWidget::item:selected, QListView::item:selected {
-    background: rgba(0, 229, 255, 45);
+    background: $CYAN_WASH_STRONG;
     color: $CYAN;
 }
 
@@ -560,7 +718,7 @@ QTableView, QTableWidget {
     border: 1px solid $BORDER;
     border-radius: 6px;
     gridline-color: transparent;
-    selection-background-color: rgba(0, 229, 255, 45);
+    selection-background-color: $CYAN_WASH_STRONG;
     selection-color: $CYAN;
     outline: none;
 }
@@ -727,8 +885,8 @@ QListView#QueueList { font-size: 12px; }
 /* ------------------------------------------------------------ 终端区 */
 
 QPlainTextEdit#Console {
-    background: $BG_DEEP;
-    color: #c3d2e6;
+    background: $CONSOLE_BG;
+    color: $CONSOLE_TEXT;
     border: none;
     border-radius: 0px;
     padding: 8px 10px;
@@ -751,7 +909,7 @@ QLabel#ConsoleTitle {
 }
 
 QLineEdit#StdinBar {
-    background: $BG_DEEP;
+    background: $CONSOLE_BG;
     border: 1px solid $BORDER_HI;
     border-radius: 4px;
     padding: 5px 9px;
@@ -767,21 +925,21 @@ QLabel#Chip {
 }
 
 QLabel#Chip[state="on"] {
-    background: rgba(0, 255, 163, 30);
+    background: $GREEN_WASH;
     color: $GREEN;
-    border: 1px solid rgba(0, 255, 163, 110);
+    border: 1px solid $GREEN_EDGE;
 }
 
 QLabel#Chip[state="off"] {
-    background: rgba(123, 138, 165, 20);
+    background: $TEXT_MUTE_WASH;
     color: $TEXT_DIM;
     border: 1px solid $BORDER_HI;
 }
 
 QLabel#Chip[state="warn"] {
-    background: rgba(255, 176, 32, 28);
+    background: $AMBER_WASH;
     color: $AMBER;
-    border: 1px solid rgba(255, 176, 32, 110);
+    border: 1px solid $AMBER_EDGE;
 }
 
 /* --------------------------------------------------------------- 其他 */
@@ -795,7 +953,7 @@ QMenu {
 }
 
 QMenu::item { padding: 6px 22px 6px 14px; border-radius: 4px; }
-QMenu::item:selected { background: rgba(0, 229, 255, 45); color: $CYAN; }
+QMenu::item:selected { background: $CYAN_WASH_STRONG; color: $CYAN; }
 QMenu::separator { height: 1px; background: $BORDER; margin: 5px 8px; }
 
 QSplitter::handle { background: $BORDER; }
@@ -834,52 +992,64 @@ QStatusBar::item { border: none; }
 
 
 def stylesheet() -> str:
-    """生成完整的全局样式表。"""
-    return _QSS.substitute(
-        BG=BG,
-        BG_DEEP=BG_DEEP,
-        PANEL=PANEL,
-        PANEL_ALT=PANEL_ALT,
-        PANEL_HI=PANEL_HI,
-        BORDER=BORDER,
-        BORDER_HI=BORDER_HI,
-        CYAN=CYAN,
-        CYAN_SOFT=CYAN_SOFT,
-        PURPLE=PURPLE,
-        GREEN=GREEN,
-        AMBER=AMBER,
-        RED=RED,
-        TEXT=TEXT,
-        TEXT_DIM=TEXT_DIM,
-        TEXT_MUTE=TEXT_MUTE,
-        MONO=font_css(mono_family()),
-    )
+    """按当前主题生成完整的全局样式表。"""
+    values = {name: globals()[name] for name in TOKENS}
+    values["MONO"] = font_css(mono_family())
+    return _QSS.substitute(values)
 
 
-def apply_theme(app) -> None:
-    """把主题应用到 QApplication（样式表 + 字体 + 调色板）。"""
+def apply_theme(app, name: str | None = None) -> str:
+    """把主题应用到 QApplication（样式表 + 字体 + 调色板）。
+
+    ``name`` 为空时沿用当前主题。返回实际生效的主题名。切换主题后要重画
+    自绘控件：``paintEvent`` 里现取 ``theme.*`` 的会跟着变，缓存成 pixmap 的
+    （占位封面等）由各页面自己的 ``theme_changed`` 钩子重建。
+    """
     from PyQt6.QtGui import QFont, QPalette
 
+    if name is not None:
+        set_theme(name)
     app.setStyleSheet(stylesheet())
     app.setFont(QFont(ui_family(), 10))
 
     # 占位符文字通过调色板设置：QSS 的 placeholder-text-color 各版本支持不一，
     # 而默认的占位色在深色背景上太亮，容易和真实内容混淆。
     palette = app.palette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(BG))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.Base, QColor(PANEL_ALT))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(PANEL))
+    palette.setColor(QPalette.ColorRole.Text, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.Button, QColor(PANEL_ALT))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(PANEL_ALT))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(TEXT))
     palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(TEXT_MUTE))
     palette.setColor(QPalette.ColorRole.Highlight, QColor(PURPLE))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.Link, QColor(CYAN))
     app.setPalette(palette)
 
+    # 自绘控件不经过 QSS，repolish 不会碰它们；统一 update 一次
+    for widget in app.allWidgets():
+        try:
+            widget.update()
+        except RuntimeError:  # 已进入删除队列的控件
+            pass
+    return current_theme()
 
-def glow(widget: QWidget, color: str = CYAN, blur: int = 26, alpha: int = 150):
+
+def glow(widget: QWidget, color: str | None = None, blur: int = 26, alpha: int = 150):
     """给控件加一圈霓虹辉光。
 
     QSS 没有 box-shadow，只能靠 QGraphicsDropShadowEffect 模拟。
     返回 effect 对象，需要动态改色时可以直接调整。
+
+    颜色默认在**调用时**取当前主题的强调色，不能写成默认参数 —— 那会在
+    ``import`` 那一刻就绑死成暗色值，切到亮色后仍是旧颜色。
     """
     effect = QGraphicsDropShadowEffect(widget)
-    tint = QColor(color)
+    tint = QColor(color or CYAN)
     tint.setAlpha(alpha)
     effect.setColor(tint)
     effect.setBlurRadius(blur)

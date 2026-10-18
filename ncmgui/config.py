@@ -242,6 +242,8 @@ def _defaults() -> dict[str, Any]:
             # 播放页里黑胶 : 歌词的宽度比例（[0.367, 0.633]），空表示用默认
             "split": [],
         },
+        # 界面外观。theme 取值 dark / light，由侧边栏的「主题」键切换
+        "ui": {"theme": "dark"},
         # 主窗口大小。用户缩放过后记在这里，下次启动照着打开
         "window": {"width": 1180, "height": 780, "maximized": False},
         # 自动更新。git_proxy 为空走系统代理，direct 表示直连

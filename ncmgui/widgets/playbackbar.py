@@ -356,6 +356,8 @@ class NowPlaying(QWidget):
         self.setFixedWidth(216)
 
         self._placeholder = images.placeholder(self.COVER_SIZE)
+        #: 当前真实封面；None 表示显示的是占位图
+        self._source: QPixmap | None = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -408,9 +410,16 @@ class NowPlaying(QWidget):
         )
         self.setToolTip(f"{name}\n{artist}\n点击打开播放页")
 
+    def theme_changed(self) -> None:
+        """占位图是构造时画好的 pixmap，换主题后重画；真实封面不动。"""
+        self._placeholder = images.placeholder(self.COVER_SIZE)
+        if self._source is None:
+            self.set_cover(None)
+
     def set_cover(self, pixmap: QPixmap | None) -> None:
         """缩略图；``None`` 用渐变占位图。"""
-        if pixmap is None or pixmap.isNull():
+        self._source = None if pixmap is None or pixmap.isNull() else pixmap
+        if self._source is None:
             pixmap = self._placeholder
         scaled = pixmap.scaled(
             self.COVER_SIZE,

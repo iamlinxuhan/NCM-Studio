@@ -10,6 +10,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -41,6 +42,7 @@ from .playback import PlaybackController
 from .widgets.card import Chip
 from .widgets.console import ConsolePanel, classify
 from .widgets.playbackbar import PlaybackBar
+from .widgets.themetoggle import ThemeToggle
 from .workers import BackgroundTask
 
 #: (键, 图标, 名称, 页面类)
@@ -167,10 +169,14 @@ class MainWindow(QMainWindow):
         brand_layout.addWidget(sub)
 
         self.login_chip = Chip("未登录", "off")
+        self.theme_toggle = ThemeToggle()
+        self.theme_toggle.clicked.connect(self.toggle_theme)
         chip_row = QHBoxLayout()
         chip_row.setContentsMargins(0, 10, 0, 0)
+        chip_row.setSpacing(8)
         chip_row.addWidget(self.login_chip)
         chip_row.addStretch(1)
+        chip_row.addWidget(self.theme_toggle)
         brand_layout.addLayout(chip_row)
 
         layout.addWidget(brand)
@@ -232,6 +238,58 @@ class MainWindow(QMainWindow):
         layout.addWidget(footer)
 
         return sidebar
+
+    # ---------------------------------------------------------------- 主题
+
+    def toggle_theme(self) -> None:
+        """切换明暗主题，写回配置，并通知所有自绘 / 缓存颜色的控件。"""
+        app = QApplication.instance()
+        if app is None:
+            return
+        target = "light" if theme.is_dark() else "dark"
+        theme.apply_theme(app, target)
+        # 记住用户选的主题；下次启动在 main.py 里先于建窗口读出来
+        self.cfg.set("ui.theme", target)
+        self.cfg.save()
+        self._refresh_theme_dependents()
+
+    def _refresh_theme_dependents(self) -> None:
+        """主题换过之后，把不吃 QSS 的那部分逐个刷新。"""
+        self.theme_toggle.refresh()
+        self._retint_glows()
+        self._refresh_console_tab_colors()
+        for widget in (self.playback_bar, self.player_page, *self.pages.values()):
+            hook = getattr(widget, "theme_changed", None)
+            if callable(hook):
+                hook()
+
+    def _retint_glows(self) -> None:
+        """主按钮的霓虹辉光是 QGraphicsDropShadowEffect，QSS 管不到。"""
+        for widget in QApplication.allWidgets():
+            if widget.objectName() != "Accent":
+                continue
+            effect = widget.graphicsEffect()
+            if not isinstance(effect, QGraphicsDropShadowEffect):
+                continue
+            tint = QColor(theme.CYAN)
+            tint.setAlpha(110)
+            effect.setColor(tint)
+
+    def _refresh_console_tab_colors(self) -> None:
+        """标签文字颜色是逐次 setTabTextColor 设的，换主题后要重设一遍。"""
+        bar = self.console_tabs.tabBar()
+        current = self.console_tabs.currentIndex()
+        for index in range(self.console_tabs.count()):
+            text = self.console_tabs.tabText(index)
+            if text.startswith("● "):
+                color = theme.CYAN
+            elif "失败" in text:
+                color = theme.RED
+            elif index == current:
+                color = theme.TEXT
+            else:
+                color = theme.TEXT_DIM
+            bar.setTabTextColor(index, QColor(color))
 
     # ------------------------------------------------------- 内容区 + 控制台
 

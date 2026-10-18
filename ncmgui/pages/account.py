@@ -169,8 +169,7 @@ class AccountPage(BasePage):
         self.qr_label = QLabel("点「生成二维码」\n二维码会显示在这里")
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_label.setFixedSize(QR_SIZE, QR_SIZE)
-        self.qr_label.setObjectName("CardSubtitle")
-        self.qr_label.setStyleSheet("border: 1px dashed #2b3c60; border-radius: 8px;")
+        self.qr_label.setObjectName("QrPlaceholder")
 
         self.qr_status = QLabel("尚未开始。")
         self.qr_status.setObjectName("Hint")

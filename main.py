@@ -182,7 +182,7 @@ def _self_test(window: MainWindow) -> int:
     try:
         view = ConsoleView()
         view.append_line("$ ncmctl download 1")
-        view.append_line("开始下载", theme.CYAN)
+        view.append_line("开始下载", theme.CONSOLE_CYAN)
         for percent in ("10%", "45%", "80%"):
             view.append_progress(f"进度 {percent}")
         view.append_line("完成 100%")
@@ -456,9 +456,11 @@ def main(argv: list[str] | None = None) -> int:
     # 界面照常显示，只是用系统默认图标，不影响使用
     app.setWindowIcon(QIcon(str(ICON_PATH)))
 
-    theme.apply_theme(app)
+    # 先读配置再应用主题：启动时就该是用户上次选的那一档，不能先闪一下暗色
+    cfg = Config()
+    theme.apply_theme(app, cfg.get("ui.theme", "dark"))
 
-    window = MainWindow(Config())
+    window = MainWindow(cfg)
     if window.start_maximized:
         window.showMaximized()
     else:

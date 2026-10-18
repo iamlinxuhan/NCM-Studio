@@ -965,6 +965,62 @@ def parse_any(payload: object) -> ParsedLyrics:
     return ParsedLyrics((), "empty")
 
 
+#: 合成逐字时的时间单元：西文单词整体算一个，其余（汉字、标点）逐个算。
+#: 空白不单独成单元，随后归到前一个单元里 —— 否则空格也会分到一份时间。
+_UNIT_RE = re.compile(r"[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*|\s+|.", re.DOTALL)
+
+
+def synthetic_words(line: TimedLine) -> tuple[Word, ...]:
+    """没有逐字数据时，把整行时长按词/字均摊成近似逐字时间。
+
+    界面用它让普通 LRC 与逐字歌词走同一条幕布渲染路径：中文按字、西文按词，
+    每个单元拿到的时间与它的可见字符数成正比（中文就是“每字一样长”）。
+    行尾的空白只算进前一个单元的时长，不额外占时间。
+
+    这只是**展示层**的近似，不是唱片公司给出的真实时间，因此不要写进 TTML。
+    """
+    if line.words or not line.text or line.end <= line.start:
+        return ()
+
+    units: list[tuple[int, int]] = []
+    leading: int | None = None
+    for match in _UNIT_RE.finditer(line.text):
+        start, end = match.span()
+        if line.text[start:end].isspace():
+            if units:
+                units[-1] = (units[-1][0], end)
+            elif leading is None:
+                leading = start
+            continue
+        if leading is not None:
+            start, leading = leading, None
+        units.append((start, end))
+    if not units:
+        return ()
+
+    weights = [
+        max(1, sum(1 for char in line.text[start:end] if not char.isspace()))
+        for start, end in units
+    ]
+    total = sum(weights)
+    duration = line.end - line.start
+    words: list[Word] = []
+    elapsed = 0
+    for (start, end), weight in zip(units, weights):
+        word_start = line.start + duration * elapsed / total
+        elapsed += weight
+        word_end = line.start + duration * elapsed / total
+        words.append(
+            Word(word_start, word_end, line.text[start:end], start, end)
+        )
+    return tuple(words)
+
+
+def words_for(line: TimedLine) -> tuple[Word, ...]:
+    """取可用的逐字数据：有真的用真的，没有就合成一份。"""
+    return line.words or synthetic_words(line)
+
+
 def curtain_char(line: TimedLine, position: float | None) -> float:
     """播放位置 → 行内字符位置（可以是小数）。
 
@@ -1941,6 +1997,50 @@ def _selftest() -> int:
     )
     check("幕布：零时长字不卡住后面的字", curtain_char(zero_line, 1.5), 1.5)
     check("line_index_at 也认 TimedLine", line_index_at([curtain_line], 1.5), 0)
+
+    # ---- 普通 LRC 的合成逐字：整行时长按词/字均摊
+    cjk = synthetic_words(TimedLine(0.0, 4.0, "你好世界"))
+    check("合成逐字：中文按字均分", len(cjk), 4)
+    check("合成逐字：每个字的起止时间",
+          [(round(w.start, 3), round(w.end, 3)) for w in cjk],
+          [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0)])
+    check("合成逐字：字符区间连续",
+          [(w.char_start, w.char_end) for w in cjk],
+          [(0, 1), (1, 2), (2, 3), (3, 4)])
+    check("合成逐字：文本与行文本一致",
+          "".join(w.text for w in cjk), "你好世界")
+
+    latin = synthetic_words(TimedLine(0.0, 3.0, "ab cd"))
+    check("合成逐字：西文按词分组", [w.text for w in latin], ["ab ", "cd"])
+    check("合成逐字：空格不额外分时间",
+          [(round(w.start, 3), round(w.end, 3)) for w in latin],
+          [(0.0, 1.5), (1.5, 3.0)])
+
+    mixed = synthetic_words(TimedLine(0.0, 3.0, "你 ab"))
+    check("合成逐字：中英混排的时间单元", [w.text for w in mixed], ["你 ", "ab"])
+    check("合成逐字：混排按可见字符数加权",
+          [(round(w.start, 3), round(w.end, 3)) for w in mixed],
+          [(0.0, 1.0), (1.0, 3.0)])
+    check("合成逐字：混排字符区间不重叠",
+          [(w.char_start, w.char_end) for w in mixed],
+          [(0, 2), (2, 4)])
+
+    check("合成逐字：已有逐字数据时不重复合成",
+          synthetic_words(curtain_line), ())
+    check("words_for：已有逐字时原样返回",
+          words_for(curtain_line), curtain_line.words)
+    check("合成逐字：空行返回空", synthetic_words(TimedLine(0.0, 1.0, "")), ())
+    check("合成逐字：零时长行返回空",
+          synthetic_words(TimedLine(1.0, 1.0, "abc")), ())
+    check("words_for：没有逐字时给合成的",
+          [w.text for w in words_for(TimedLine(0.0, 2.0, "ab"))], ["ab"])
+
+    synth_line = replace(curtain_line, words=synthetic_words(
+        TimedLine(1.0, 3.0, "你好世界")))
+    check("幕布：普通 LRC 也能按字推进",
+          round(curtain_char(synth_line, 1.75), 3), 1.5)
+    check("幕布：普通 LRC 行尾停在行末",
+          curtain_char(synth_line, 99.0), 4.0)
 
     # ---- 本地歌词读取：.ttml > .lrc > 内嵌
     with tempfile.TemporaryDirectory(prefix="ncmgui-lyrics-") as tmp:

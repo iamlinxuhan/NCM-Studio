@@ -44,24 +44,28 @@ _PAID_MARKS = ("[VIP]", "[付费专辑]", "[VIP音质]")
 
 
 def classify(text: str) -> str:
-    """根据内容猜测一行日志该用什么颜色。"""
+    """根据内容猜测一行日志该用什么颜色。
+
+    终端区在两种主题里都是深底（见 ``theme`` 里的 CONSOLE_*），所以这里取
+    终端专用色，而不是普通界面的强调色 —— 后者在亮色主题里会压暗到看不清。
+    """
     lowered = text.lower()
     if any(hint in lowered for hint in _ERROR_HINTS):
-        return theme.RED
+        return theme.CONSOLE_RED
     if any(hint in lowered for hint in _SUCCESS_HINTS):
-        return theme.GREEN
+        return theme.CONSOLE_GREEN
     # 分组小标题（明细里的 ▸）优先于「跳过」这类词，否则标题会被判成警告色
     if text.startswith("▸"):
-        return theme.CYAN
+        return theme.CONSOLE_CYAN
     if any(mark in text for mark in _PAID_MARKS):
-        return theme.AMBER
+        return theme.CONSOLE_AMBER
     if any(hint in lowered for hint in _WARN_HINTS):
-        return theme.AMBER
+        return theme.CONSOLE_AMBER
     if text.startswith("$") or text.startswith(">"):
-        return theme.CYAN
+        return theme.CONSOLE_CYAN
     if text.startswith("─") or text.startswith("#"):
-        return theme.TEXT_DIM
-    return theme.TEXT
+        return theme.CONSOLE_DIM
+    return theme.CONSOLE_TEXT
 
 
 class ConsoleView(QPlainTextEdit):
@@ -98,7 +102,7 @@ class ConsoleView(QPlainTextEdit):
             cursor.insertBlock()
 
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor(color or theme.TEXT))
+        fmt.setForeground(QColor(color or theme.CONSOLE_TEXT))
         cursor.insertText(text, fmt)
         self._autoscroll()
 
@@ -107,7 +111,7 @@ class ConsoleView(QPlainTextEdit):
         document = self.document()
         cursor = QTextCursor(document.lastBlock())
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor(color or theme.TEXT_DIM))
+        fmt.setForeground(QColor(color or theme.CONSOLE_DIM))
 
         if self._progress_active:
             # 选中最后一行的内容（不含段落分隔符）后整体替换
@@ -256,7 +260,7 @@ class ConsolePanel(QWidget):
         runner.finished.connect(self._on_finished)
         runner.failed.connect(self._on_failed)
 
-        self.view.append_line(f"$ {self.command_line}", theme.CYAN)
+        self.view.append_line(f"$ {self.command_line}", theme.CONSOLE_CYAN)
         self.view.append_line("")
 
     # ------------------------------------------------------------------ 槽
@@ -275,7 +279,7 @@ class ConsolePanel(QWidget):
         marked = self._tagger(text) if self._tagger else None
         if marked is not None:
             self._raw.append(marked)
-            self.view.append_line(marked, theme.AMBER)
+            self.view.append_line(marked, theme.CONSOLE_AMBER)
             return
         self._raw.append(text)
         self.view.append_line(text, classify(text))
@@ -283,13 +287,13 @@ class ConsolePanel(QWidget):
     def _on_progress(self, text: str) -> None:
         marked = self._tagger(text) if self._tagger else None
         if marked is not None:
-            self.view.append_progress(marked, theme.AMBER)
+            self.view.append_progress(marked, theme.CONSOLE_AMBER)
             return
         self.view.append_progress(text)
 
     def _on_failed(self, message: str) -> None:
         self._raw.append(message)
-        self.view.append_line(message, theme.RED)
+        self.view.append_line(message, theme.CONSOLE_RED)
 
     def _on_finished(self, code: int, seconds: float) -> None:
         self._tick.stop()
@@ -308,7 +312,7 @@ class ConsolePanel(QWidget):
         self.view.append_line("")
         self.view.append_line(
             f"── 进程结束，退出码 {code}，耗时 {self._format_duration(seconds)} ──",
-            theme.TEXT_DIM if code == 0 else theme.RED,
+            theme.CONSOLE_DIM if code == 0 else theme.CONSOLE_RED,
         )
         self.jobFinished.emit(code)
 
@@ -318,7 +322,7 @@ class ConsolePanel(QWidget):
         if self.runner and self.runner.is_running:
             self.stop_button.setEnabled(False)
             self.stop_button.setText("停止中…")
-            self.view.append_line("─ 正在请求停止…", theme.AMBER)
+            self.view.append_line("─ 正在请求停止…", theme.CONSOLE_AMBER)
             self.runner.stop()
 
     def _send_stdin(self) -> None:
@@ -326,7 +330,7 @@ class ConsolePanel(QWidget):
         if self.runner and self.runner.is_running:
             self.runner.send_line(text)
             # 回显，让用户确认输入确实送进去了
-            self.view.append_line(f"‹ 输入 › {text}", theme.PURPLE)
+            self.view.append_line(f"‹ 输入 › {text}", theme.CONSOLE_PURPLE)
             self.stdin_bar.clear()
 
     def _copy_command(self) -> None:
@@ -345,9 +349,9 @@ class ConsolePanel(QWidget):
         try:
             Path(path).write_text("\n".join(self._raw) + "\n", encoding="utf-8")
         except OSError as exc:
-            self.view.append_line(f"导出失败：{exc}", theme.RED)
+            self.view.append_line(f"导出失败：{exc}", theme.CONSOLE_RED)
         else:
-            self.view.append_line(f"日志已导出到 {path}", theme.GREEN)
+            self.view.append_line(f"日志已导出到 {path}", theme.CONSOLE_GREEN)
 
     def _update_meta(self) -> None:
         if self._started_at:
