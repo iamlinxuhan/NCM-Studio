@@ -28,7 +28,7 @@ from typing import Callable, Iterable, Sequence
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from . import player
+from . import localmusic, player
 from .resolver import Resolver, Song
 from .workers import BackgroundTask
 
@@ -91,6 +91,8 @@ class PlaybackController(QObject):
     stateChanged = pyqtSignal(str)
     positionChanged = pyqtSignal(float, float)  # position, duration
     volumeChanged = pyqtSignal(int)
+    #: 实际音质变了（本地文件解析出格式，或直链接口返回了降级后的档位）
+    qualityChanged = pyqtSignal()
     modeChanged = pyqtSignal(str)
     queueChanged = pyqtSignal()
     errorRaised = pyqtSignal(str)
@@ -126,6 +128,10 @@ class PlaybackController(QObject):
         self._paused = False
         self._volume = player.clamp_volume(cfg.get("player.volume", 70))
         self._level = str(cfg.get("player.level", "exhigh") or "exhigh")
+        #: 当前这首歌**实际**拿到的音质：本地文件是「无损 44.1kHz/16bit」
+        #: 这样的描述，流媒体是接口返回的档位值（可能低于请求值）。
+        #: 空串表示还不确定 —— 取链还没回来，或者本地文件头读不出来。
+        self._quality = ""
         self._mode = normalize_mode(cfg.get("player.mode", DEFAULT_MODE))
         self._history: list[int] = []
 
@@ -195,7 +201,13 @@ class PlaybackController(QObject):
 
     @property
     def level(self) -> str:
+        """**请求**的流媒体档位。它不代表实际播出来的音质，界面上别拿它冒充。"""
         return self._level
+
+    @property
+    def quality(self) -> str:
+        """当前曲目**实际**的音质；还不知道时为空串。"""
+        return self._quality
 
     @property
     def mode(self) -> str:
@@ -450,6 +462,8 @@ class PlaybackController(QObject):
         self._wanted = None
 
         self._current = song
+        # 换歌就先忘掉上一首的实际音质；本地分支马上填回来，流媒体等取链结果
+        self._set_quality("")
         self._position = 0.0
         self._anchor_pos = 0.0
         self._anchor_at = time.monotonic()
@@ -472,11 +486,16 @@ class PlaybackController(QObject):
             if not local.is_file():
                 self._fail(f"本地文件不存在：{local}")
                 return
+            # 本地音乐页扫描时已经算过音质；从别处塞进来的 Song 才现读文件头
+            self._set_quality(song.quality or localmusic.describe_quality(local))
             self._load(str(local))
             return
 
         local = self._local_path(song)
         if local is not None:
+            # 红心歌曲命中了下载目录里的文件：这时候播的是文件本身，
+            # 音质跟播放设置里的流媒体档位没有关系
+            self._set_quality(localmusic.describe_quality(local))
             self._load(str(local))
             return
 
@@ -534,6 +553,9 @@ class PlaybackController(QObject):
         self._load(source.url, source=source)
 
     def _load(self, target: str, source=None) -> None:
+        if source is not None:
+            # 接口会在非会员请求高音质时悄悄退回一档，这里记下的才是实际档位
+            self._set_quality(getattr(source, "level", "") or "")
         try:
             mpv = self._ensure_player()
             mpv.load(target)
@@ -849,6 +871,13 @@ class PlaybackController(QObject):
         self._awaiting_since = None
         self._set_state(STATE_ERROR)
         self.errorRaised.emit(message)
+
+    def _set_quality(self, quality: str) -> None:
+        quality = str(quality or "")
+        if quality == self._quality:
+            return
+        self._quality = quality
+        self.qualityChanged.emit()
 
     def _set_state(self, state: str) -> None:
         if state == self._state:

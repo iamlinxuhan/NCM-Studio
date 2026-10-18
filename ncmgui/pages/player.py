@@ -55,6 +55,33 @@ from .base import BasePage
 FOLLOW_PAUSE = 3.0
 
 
+def _level_text(value: str) -> str:
+    """档位值 → 界面文案；已经是人话（本地文件描述）就原样返回。"""
+    for name, level in ncmctl.DOWNLOAD_LEVELS:
+        if level == value:
+            return name
+    return value
+
+
+def quality_text(actual: str, song: Song | None, requested: str) -> str:
+    """右上角音质标签的文字（不含「音质：」前缀）。
+
+    ``requested`` 只是请求的流媒体档位：本地文件根本没有这一说，流媒体接口
+    也可能因为会员/版权降级返回。能拿到实际音质时一律以实际为准：本地文件
+    是「无损 44.1kHz/16bit」这样的格式描述，流媒体是接口返回的档位
+    （``actual``）。两者都没有时，流媒体才退回请求值；本地文件则显示「未知」，
+    不能拿一个跟文件无关的档位来凑。
+    """
+    quality = actual or (song.quality if song is not None else "")
+    if quality:
+        return _level_text(quality)
+    if song is None:
+        return "—"
+    if getattr(song, "path", ""):
+        return "未知"
+    return _level_text(requested)
+
+
 class QueueModel(QAbstractListModel):
     """播放队列。用 model/view，上千首也不会为每首建控件。"""
 
@@ -283,6 +310,8 @@ class PlayerPage(BasePage):
         self.playback.stateChanged.connect(self._on_state_changed)
         self.playback.positionChanged.connect(self._on_position_changed)
         self.playback.queueChanged.connect(self._on_queue_changed)
+        # 直链取回来才知道实际档位（接口可能降级），要跟着刷新右上角
+        self.playback.qualityChanged.connect(self._refresh_meta)
         self.playback.modeChanged.connect(lambda _mode: self._refresh_meta())
         self.covers.coverReady.connect(self._on_cover)
 
@@ -305,6 +334,7 @@ class PlayerPage(BasePage):
             self.artist_label.setText("")
             self.vinyl.set_art(self._placeholder)
             self._clear_lyrics("点一首歌，这里会显示歌词。")
+            self._refresh_meta()
             return
 
         self._cover_id = int(song.id)
@@ -339,13 +369,9 @@ class PlayerPage(BasePage):
         self._update_word_timer()
 
     def _refresh_meta(self) -> None:
-        level = self.playback.level
-        label = level
-        for name, value in ncmctl.DOWNLOAD_LEVELS:
-            if value == level:
-                label = name
-                break
-        self.level_label.setText(f"音质：{label}")
+        song = self.playback.current or self._current_song
+        text = quality_text(self.playback.quality, song, self.playback.level)
+        self.level_label.setText(f"音质：{text}")
 
     def _on_cover(self, song_id: int, pixmap: QPixmap) -> None:
         if self._cover_id is None or int(song_id) != self._cover_id:

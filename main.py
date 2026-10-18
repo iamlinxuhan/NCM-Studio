@@ -141,11 +141,46 @@ def _self_test(window: MainWindow) -> int:
                 problems.append(f"播放顺序切换到 {mode} 没有生效")
         playback.set_mode("loop")
 
+    # 右上角的音质必须写**实际**播放的音质。用户撞见过「标签写着极高 320 kbps、
+    # 实际播的是无损文件」：本地文件按文件格式显示，流媒体按直链接口返回的
+    # 档位（可能降级）显示，请求档位只在取链结果回来之前兜底
+    from ncmgui.pages.player import quality_text
+    from ncmgui.resolver import Song
+
+    quality_cases = [
+        (
+            "本地文件用文件音质",
+            quality_text(
+                "",
+                Song(id=1, name="A", path="/x.flac", quality="无损 44.1kHz/16bit"),
+                "exhigh",
+            ),
+            "无损 44.1kHz/16bit",
+        ),
+        (
+            "流媒体用接口返回的档位",
+            quality_text("lossless", Song(id=2, name="B"), "exhigh"),
+            "无损 FLAC",
+        ),
+        (
+            "取链未回时退回请求档位",
+            quality_text("", Song(id=3, name="C"), "exhigh"),
+            "极高 320 kbps",
+        ),
+        (
+            "本地文件读不出格式时不冒充流媒体档位",
+            quality_text("", Song(id=4, name="D", path="/x.flac"), "exhigh"),
+            "未知",
+        ),
+        ("未播放", quality_text("", None, "exhigh"), "—"),
+    ]
+    for name, got, want in quality_cases:
+        if got != want:
+            problems.append(f"音质标签：{name} 应为 {want!r}，实际 {got!r}")
+
     # 红心表格第 0 列的 ▶/❚❚ 只由模型状态决定，和当前有没有 mpv 无关
     source = getattr(liked, "model", None)
     if source is not None:
-        from ncmgui.resolver import Song
-
         source.set_songs([Song(id=1, name="自检", artists=("测试",))])
         source.set_playing(1)
         source.set_paused(False)
@@ -284,7 +319,7 @@ def _demo_songs():
             album=album,
             duration=seconds * 1000,  # Song.duration 是毫秒
             pic_url="",
-            # 截图里本地音乐页要展示「音乐质量」列；播放页不读这个字段
+            # 本地音乐页的「音乐质量」列，以及播放页右上角的实际音质
             quality=quality,
         )
         for index, (name, artist, album, seconds, quality) in enumerate(titles)
@@ -339,6 +374,10 @@ def _screenshot(window: MainWindow, target: str) -> int:
 
     # 截图只是画界面，不该顺手去拉歌单，也不该扫描真实目录
     window.defer_page_loads = True
+    # 配置里记着「上次最大化」时，resize() 对最大化窗口不生效，截出来会是
+    # 虚拟屏幕的尺寸。先还原再定尺寸，文档配图才可复现
+    if window.isMaximized():
+        window.showNormal()
     window.resize(1180, 820)
     local = window.pages.get("local")
     if local is not None:
