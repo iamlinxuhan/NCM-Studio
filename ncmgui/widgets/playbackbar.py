@@ -149,7 +149,7 @@ def _arrow_head(
     )
 
 
-def _transport_pixmap(kind: str) -> QPixmap:
+def _transport_pixmap(kind: str, color: QColor | None = None) -> QPixmap:
     """上一首 / 播放 / 暂停 / 下一首的图标，线条和三角都自己画。"""
     pixmap = QPixmap(40, 40)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -158,9 +158,9 @@ def _transport_pixmap(kind: str) -> QPixmap:
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.scale(2.0, 2.0)
-        color = QColor(theme.TEXT)
+        tint = QColor(color) if color is not None else QColor(theme.TEXT)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color)
+        painter.setBrush(tint)
 
         if kind == "play":
             triangle = QPainterPath()
@@ -193,7 +193,7 @@ def _transport_pixmap(kind: str) -> QPixmap:
     return pixmap
 
 
-def _control_pixmap(kind: str) -> QPixmap:
+def _control_pixmap(kind: str, color: QColor | None = None) -> QPixmap:
     """播放条上的模式/队列图标。
 
     和喇叭一样用 QPainter 画：彩色 emoji 字体改不了颜色，纯文字又太占宽度。
@@ -207,7 +207,7 @@ def _control_pixmap(kind: str) -> QPixmap:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.scale(2.0, 2.0)
 
-        color = QColor(theme.TEXT)
+        color = QColor(color) if color is not None else QColor(theme.TEXT)
         painter.setPen(
             QPen(
                 color,
@@ -286,6 +286,42 @@ def _control_pixmap(kind: str) -> QPixmap:
     finally:
         painter.end()
     return pixmap
+
+
+def _disabled_tint() -> QColor:
+    """禁用图标用的颜色。
+
+    自绘 pixmap 交给平台样式去淡化并不靠谱：Breeze 会把 40×40 的图标淡到
+    只剩一层影子，浅色主题下几乎看不见形状。这里自己把正文色和底色按
+    55 : 45 混一档 —— 一眼能看出「灰了」，但轮廓仍然清楚，两个主题都成立。
+    """
+    tint = QColor(theme.TEXT)
+    base = QColor(theme.PANEL)
+    return QColor(
+        round(tint.red() * 0.55 + base.red() * 0.45),
+        round(tint.green() * 0.55 + base.green() * 0.45),
+        round(tint.blue() * 0.55 + base.blue() * 0.45),
+    )
+
+
+def _transport_icon(kind: str) -> QIcon:
+    """上一首/播放/下一首的图标，含自己画的禁用态。
+
+    只给 Normal 的话，Qt 会用平台样式给禁用按钮生成一个淡化版本；各平台
+    淡得不一样，Breeze 上尤其淡。显式提供 Disabled 才能保证不管用什么
+    桌面主题，禁用时都还看得见。
+    """
+    icon = QIcon()
+    icon.addPixmap(_transport_pixmap(kind), QIcon.Mode.Normal)
+    icon.addPixmap(_transport_pixmap(kind, _disabled_tint()), QIcon.Mode.Disabled)
+    return icon
+
+
+def _control_icon(kind: str) -> QIcon:
+    icon = QIcon()
+    icon.addPixmap(_control_pixmap(kind), QIcon.Mode.Normal)
+    icon.addPixmap(_control_pixmap(kind, _disabled_tint()), QIcon.Mode.Disabled)
+    return icon
 
 
 class VolumePopup(QWidget):
@@ -542,7 +578,7 @@ class PlaybackBar(QWidget):
         button.setProperty("transport", "flat")
         button.setFixedSize(size, size)
         button.setIconSize(QSize(icon_size, icon_size))
-        button.setIcon(QIcon(_transport_pixmap(kind)))
+        button.setIcon(_transport_icon(kind))
         return button
 
     def _icon_button(self, kind: str, tip: str) -> QPushButton:
@@ -551,7 +587,7 @@ class PlaybackBar(QWidget):
         button.setProperty("transport", "flat")
         button.setFixedSize(34, 30)
         button.setIconSize(QSize(20, 20))
-        button.setIcon(QIcon(_control_pixmap(kind)))
+        button.setIcon(_control_icon(kind))
         button.setToolTip(tip)
         return button
 
@@ -564,6 +600,23 @@ class PlaybackBar(QWidget):
         self.playback.queueChanged.connect(self._on_queue_changed)
         if self.covers is not None:
             self.covers.coverReady.connect(self._on_cover_ready)
+
+    def theme_changed(self) -> None:
+        """按新的 ``theme.TEXT`` 重画所有自绘图标。
+
+        这些 pixmap 是构造时画好、之后一直复用的；不重画就会带着旧主题的
+        颜色留在界面上 —— 暗色启动切到亮色时，上一首/下一首/播放顺序/播放
+        列表全是近白色，落在浅底上几乎看不见。播放/暂停和音量因为状态一变
+        就重画，反而没这个问题，所以故障看起来只出在某几个按钮上。
+        """
+        self.now_playing.theme_changed()
+        self.prev_btn.setIcon(_transport_icon("prev"))
+        playing = self.playback.state == STATE_PLAYING
+        self.play_btn.setIcon(_transport_icon("pause" if playing else "play"))
+        self.next_btn.setIcon(_transport_icon("next"))
+        self.mode_btn.setIcon(_control_icon(self.playback.mode))
+        self.volume_btn.setIcon(QIcon(_speaker_pixmap(self.playback.volume)))
+        self.queue_btn.setIcon(_control_icon("queue"))
 
     # ---------------------------------------------------------------- 状态
 
@@ -593,7 +646,7 @@ class PlaybackBar(QWidget):
     def _on_state_changed(self, state: str) -> None:
         playing = state == STATE_PLAYING
         self.play_btn.setIcon(
-            QIcon(_transport_pixmap("pause" if playing else "play"))
+            _transport_icon("pause" if playing else "play")
         )
         self.progress.setEnabled(
             self._song is not None and self.playback.duration > 0
@@ -645,7 +698,7 @@ class PlaybackBar(QWidget):
 
     def _on_mode_changed(self, mode: str) -> None:
         label = mode_label(mode)
-        self.mode_btn.setIcon(QIcon(_control_pixmap(mode)))
+        self.mode_btn.setIcon(_control_icon(mode))
         self.mode_btn.setToolTip(f"播放顺序：{label}（点击切换）")
 
     def _on_queue_changed(self) -> None:

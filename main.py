@@ -43,6 +43,20 @@ from ncmgui.resources import ICON_PATH  # noqa: E402
 from ncmgui.window import MainWindow  # noqa: E402
 
 
+def _icon_ink(icon: QIcon) -> QColor | None:
+    """取图标里最实的一个像素，用来判断它是按哪个主题画的。"""
+    image = icon.pixmap(40, 40, QIcon.Mode.Normal, QIcon.State.Off).toImage()
+    best = None
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            if color.alpha() == 0:
+                continue
+            if best is None or color.alpha() > best.alpha():
+                best = color
+    return best
+
+
 def _self_test(window: MainWindow) -> int:
     """构建完成后做一遍结构性检查。"""
     from ncmgui.widgets.console import ConsolePanel, ConsoleView
@@ -140,6 +154,41 @@ def _self_test(window: MainWindow) -> int:
             if playback.mode != mode:
                 problems.append(f"播放顺序切换到 {mode} 没有生效")
         playback.set_mode("loop")
+
+    # 自绘图标必须跟着主题重画。用户撞见过暗色启动切到亮色后，上一首、下一首、
+    # 播放顺序、播放列表仍留着旧主题的近白色，落在浅底上几乎看不见 —— 只有
+    # 播放/暂停和音量因为状态一变就重画，看起来还是好的
+    bar = getattr(window, "playback_bar", None)
+    app = QApplication.instance()
+    if bar is None or app is None:
+        problems.append("主窗口没有播放条，主题图标自检无法进行")
+    else:
+        original = "dark" if theme.is_dark() else "light"
+        try:
+            for target in ("dark", "light"):
+                theme.apply_theme(app, target)
+                window._refresh_theme_dependents()
+                for name, button in (
+                    ("上一首", bar.prev_btn),
+                    ("下一首", bar.next_btn),
+                    ("播放顺序", bar.mode_btn),
+                    ("播放列表", bar.queue_btn),
+                ):
+                    ink = _icon_ink(button.icon())
+                    expect = QColor(theme.TEXT)
+                    if ink is None or max(
+                        abs(ink.red() - expect.red()),
+                        abs(ink.green() - expect.green()),
+                        abs(ink.blue() - expect.blue()),
+                    ) > 10:
+                        shown = ink.name() if ink is not None else "空"
+                        problems.append(
+                            f"{target} 主题下{name}图标没有按 theme.TEXT 重画"
+                            f"（实际 {shown}，期望 {expect.name()}）"
+                        )
+        finally:
+            theme.apply_theme(app, original)
+            window._refresh_theme_dependents()
 
     # 右上角的音质必须写**实际**播放的音质。用户撞见过「标签写着极高 320 kbps、
     # 实际播的是无损文件」：本地文件按文件格式显示，流媒体按直链接口返回的
