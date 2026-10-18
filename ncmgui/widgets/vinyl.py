@@ -53,6 +53,15 @@ class VinylWidget(QWidget):
         self._playing = False
         self._arm = 0.0
 
+        # 盘面（阴影、渐变、46 圈沟槽、外沿高光）是静态的，每帧重画一遍
+        # 纯属浪费；缓存成位图，只在尺寸/缩放比变化时重建
+        self._disc_cache: QPixmap | None = None
+        self._disc_cache_key: tuple[float, ...] | None = None
+        # 封面按当前圆标大小预先缩放好，避免每帧都在 paintEvent 里做
+        # SmoothTransformation（20 帧/秒就是每秒几十次重采样）
+        self._cover_cache: QPixmap | None = None
+        self._cover_cache_key: tuple[int, int] | None = None
+
         self.setMinimumSize(260, 260)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -68,6 +77,8 @@ class VinylWidget(QWidget):
 
     def set_art(self, pixmap: QPixmap | None) -> None:
         self._art = pixmap if pixmap is not None and not pixmap.isNull() else None
+        self._cover_cache = None
+        self._cover_cache_key = None
         self.update()
 
     def set_playing(self, playing: bool) -> None:
@@ -75,11 +86,32 @@ class VinylWidget(QWidget):
         if playing == self._playing:
             return
         self._playing = playing
-        if playing:
+        self._sync_timer()
+        self._animate_arm(1.0 if playing else 0.0)
+
+    # ------------------------------------------------------------ 可见性
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_timer()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        # 页面被切走时不空转；回来再继续
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self._disc_cache = None
+        self._disc_cache_key = None
+        self._cover_cache = None
+        self._cover_cache_key = None
+        super().resizeEvent(event)
+
+    def _sync_timer(self) -> None:
+        if self._playing and self.isVisible():
             self._timer.start()
         else:
             self._timer.stop()
-        self._animate_arm(1.0 if playing else 0.0)
 
     def finish_arm_animation(self) -> None:
         """截图用：跳过过渡，直接把唱臂放到当前状态该在的位置。"""
@@ -110,9 +142,83 @@ class VinylWidget(QWidget):
 
     def _rotate(self) -> None:
         self._angle = (self._angle + DEGREES_PER_FRAME) % 360.0
-        self.update()
+        # 只有封面在转，盘面和唱臂都没动。只失效圆标那一块，别让整个
+        # 控件（全屏时可能上千像素宽）每 50ms 重绘一次
+        self.update(self._label_rect().toAlignedRect())
 
     # ------------------------------------------------------------ 绘制
+
+    def _geometry(self) -> tuple[float, QPointF, float]:
+        side = min(self.width(), self.height())
+        radius = side * 0.395
+        center = QPointF(self.width() * 0.47, self.height() * 0.53)
+        return side, center, radius
+
+    def _label_rect(self) -> QRectF:
+        _, center, radius = self._geometry()
+        label_radius = radius * 0.62
+        # 圆标外还有一圈描边，留出抗锯齿的余量
+        margin = max(4.0, radius * 0.03)
+        extent = label_radius + margin
+        return QRectF(
+            center.x() - extent,
+            center.y() - extent,
+            extent * 2,
+            extent * 2,
+        )
+
+    def _disc_rect(self, center: QPointF, radius: float) -> QRectF:
+        # 阴影最大画到 1.02r，取 1.03r 留一点余量
+        extent = radius * 1.03
+        return QRectF(
+            center.x() - extent,
+            center.y() - extent,
+            extent * 2,
+            extent * 2,
+        )
+
+    def _disc_pixmap(self, center: QPointF, radius: float) -> QPixmap:
+        dpr = self.devicePixelRatioF()
+        key = (float(self.width()), float(self.height()), dpr)
+        if self._disc_cache is not None and self._disc_cache_key == key:
+            return self._disc_cache
+
+        rect = self._disc_rect(center, radius)
+        pixmap = QPixmap(
+            max(1, round(rect.width() * dpr)),
+            max(1, round(rect.height() * dpr)),
+        )
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.translate(-rect.left(), -rect.top())
+            self._paint_disc(painter, center, radius)
+        finally:
+            painter.end()
+
+        self._disc_cache = pixmap
+        self._disc_cache_key = key
+        return pixmap
+
+    def _scaled_art(self, label_radius: float) -> QPixmap | None:
+        if self._art is None:
+            return None
+        dpr = self.devicePixelRatioF()
+        size = max(1, round(label_radius * 2 * dpr))
+        key = (self._art.cacheKey(), size)
+        if self._cover_cache is None or self._cover_cache_key != key:
+            scaled = self._art.scaled(
+                size,
+                size,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            scaled.setDevicePixelRatio(dpr)
+            self._cover_cache = scaled
+            self._cover_cache_key = key
+        return self._cover_cache
 
     def paintEvent(self, event) -> None:  # noqa: N802
         side = min(self.width(), self.height())
@@ -125,7 +231,13 @@ class VinylWidget(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            self._paint_disc(painter, center, radius)
+
+            disc = self._disc_pixmap(center, radius)
+            dpr = disc.devicePixelRatio()
+            logical = QRectF(0.0, 0.0, disc.width() / dpr, disc.height() / dpr)
+            logical.moveTopLeft(self._disc_rect(center, radius).topLeft())
+            painter.drawPixmap(logical, disc, QRectF(disc.rect()))
+
             self._paint_label(painter, center, radius)
             self._paint_arm(painter, center, radius)
         finally:
@@ -190,18 +302,18 @@ class VinylWidget(QWidget):
         painter.setClipPath(clip)
 
         if self._art is not None:
-            size = int(label_radius * 2)
-            scaled = self._art.scaled(
-                size,
-                size,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.translate(cx, cy)
-            painter.rotate(self._angle)
-            painter.drawPixmap(
-                int(-scaled.width() / 2), int(-scaled.height() / 2), scaled
-            )
+            scaled = self._scaled_art(label_radius)
+            if scaled is not None:
+                dpr = scaled.devicePixelRatio()
+                width = scaled.width() / dpr
+                height = scaled.height() / dpr
+                painter.translate(cx, cy)
+                painter.rotate(self._angle)
+                painter.drawPixmap(
+                    QRectF(-width / 2, -height / 2, width, height),
+                    scaled,
+                    QRectF(scaled.rect()),
+                )
         else:
             fallback = QRadialGradient(cx, cy, label_radius)
             fallback.setColorAt(0.0, QColor(theme.PANEL_HI))
@@ -360,20 +472,6 @@ class VinylWidget(QWidget):
             )
         )
         painter.drawLine(shell_back, shell_front)
-        # 针尖朝向盘面
-        tip = QPointF(
-            shell_front.x() + normal.x() * radius * 0.018,
-            shell_front.y() + normal.y() * radius * 0.018,
-        )
-        painter.setPen(
-            QPen(
-                QColor(theme.CYAN) if self._playing else QColor("#cfd9e8"),
-                max(1.5, radius * 0.008),
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-            )
-        )
-        painter.drawLine(shell_front, tip)
 
         # 转轴底座
         painter.setBrush(QColor("#161d2c"))
