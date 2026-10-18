@@ -187,7 +187,12 @@ class CoverStore(QObject):
     ``song_id`` 是不是当前这首 —— 切歌很快时，前面那首的封面可能后到。
     """
 
-    coverReady = pyqtSignal(int, QPixmap)
+    #: 歌曲 ID 必须用 ``qint64``。网易云的新歌 ID 早已超过 32 位
+    #: （例如 3388734818），而 PyQt 的 ``pyqtSignal(int, ...)`` 对应 C++ 的
+    #: ``int``，会把 ID 截成负数（同一个 ID 发出后变成 -906232478）。接收方
+    #: 拿它和 ``_cover_id`` 一比就对不上，封面永远停在占位图 —— 图其实早就
+    #: 下载好并进了缓存。
+    coverReady = pyqtSignal("qint64", QPixmap)
 
     def __init__(
         self,
@@ -351,6 +356,17 @@ def _selftest() -> int:
         store.put(4, one)
         check("命中会刷新 LRU 位置", store.get(3), None)
         check("刚命中的那张还在", store.get(2) is one, True)
+
+        # 歌曲 ID 超过 32 位时，coverReady 不能把它截断。之前信号声明成
+        # ``pyqtSignal(int, ...)``，3388734818 发出去变成 -906232478，播放页
+        # 和底部播放条都认不出这是当前歌曲的封面，一直显示占位图
+        big_id = 3388734818
+        seen: list[int] = []
+        store.coverReady.connect(
+            lambda song_id, _pixmap: seen.append(int(song_id))
+        )
+        store.put(big_id, one)
+        check("64 位歌曲 ID 不被截断", seen, [big_id])
         if created:
             app.quit()
 
