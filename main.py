@@ -256,7 +256,9 @@ def _self_test(window: MainWindow) -> int:
         wrapper.resize(280, 120)
         wrapper.show()
         QApplication.processEvents()
-        wrapper.set_position(2.1)  # 幕布落在第一视觉行的 "your" 里
+        # 停在行首：不同平台的字体度量会让换行位置不同，但无论断在哪，
+        # 第二视觉行都一定是「还没唱到」的部分
+        wrapper.set_position(0.1)
         QApplication.processEvents()
 
         if wrapper._layout is None or wrapper._layout.lineCount() < 2:
