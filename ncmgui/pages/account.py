@@ -352,7 +352,8 @@ class AccountPage(BasePage):
         card = FormCard(
             "手机号登录",
             "不给密码就走短信验证码：ncmctl 发码后会在控制台等待输入，"
-            "在底部控制台的输入框里填验证码即可。",
+            "在底部控制台的输入框里填验证码即可 —— 输入框不回显，"
+            "内容也不会写进控制台或导出日志。",
         )
         self.phone_number = card.add_line(
             "手机号", value=self.cfg.get("login.phone", ""), placeholder="18800008888",
@@ -387,7 +388,9 @@ class AccountPage(BasePage):
         argv = ncmctl.build_login_phone(
             number, countrycode=country, password=password, timeout="10m", opts=self.opts()
         )
-        self.submit("手机号登录", argv)
+        # 短信验证码会从这个作业的 stdin 送进去；它是短期内可直接登录的凭据，
+        # 输入框必须密码回显，控制台和导出日志里不能留原文
+        self.submit("手机号登录", argv, sensitive_input=True)
 
     # ------------------------------------------------------------- Cookie
 

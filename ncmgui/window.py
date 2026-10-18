@@ -475,6 +475,7 @@ class MainWindow(QMainWindow):
         intro: list[str] | None = None,
         tagger: Callable[[str], str | None] | None = None,
         on_finish: Callable[["ConsolePanel", int], None] | None = None,
+        sensitive_input: bool = False,
     ):
         """启动一个作业。
 
@@ -491,6 +492,8 @@ class MainWindow(QMainWindow):
             所以可以放心开新作业、动界面。下载页用它接一个「下完再抓歌词」的
             后处理 —— 后处理需要往同一个面板里写输出，而面板是这里创建的，
             调用方拿不到，只能这样传回去。
+        :param sensitive_input: 这个作业的 stdin 是敏感内容（短信验证码、
+            密码、令牌）。输入框改用密码回显，回显行与导出日志都不记原文。
         :return: 启动成功返回 :class:`~ncmgui.runner.JobRunner`，否则返回 None
         """
         from .runner import JobRunner
@@ -511,6 +514,7 @@ class MainWindow(QMainWindow):
         panel = ConsolePanel(title, self)
         panel.bind(runner)
         panel.set_tagger(tagger)
+        panel.set_sensitive_input(sensitive_input)
         for line in intro or []:
             panel.view.append_line(line, classify(line))
 

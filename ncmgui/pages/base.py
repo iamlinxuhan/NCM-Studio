@@ -94,6 +94,7 @@ class BasePage(QWidget):
         intro: list[str] | None = None,
         tagger: Callable[[str], str | None] | None = None,
         on_finish: Callable[[object, int], None] | None = None,
+        sensitive_input: bool = False,
     ):
         """提交一个作业，返回 JobRunner 或 None。
 
@@ -101,9 +102,17 @@ class BasePage(QWidget):
         :param tagger: 见 :meth:`MainWindow.submit` —— 给运行中的输出行加标记
         :param on_finish: 见 :meth:`MainWindow.submit` —— 作业结束后的回调，
             参数是 ``(控制台面板, 退出码)``
+        :param sensitive_input: 见 :meth:`MainWindow.submit` —— stdin 是否敏感
+            （短信验证码、密码、令牌）
         """
         return self.window.submit(
-            title, argv, confirm, intro=intro, tagger=tagger, on_finish=on_finish
+            title,
+            argv,
+            confirm,
+            intro=intro,
+            tagger=tagger,
+            on_finish=on_finish,
+            sensitive_input=sensitive_input,
         )
 
     def is_logged_in(self) -> bool:

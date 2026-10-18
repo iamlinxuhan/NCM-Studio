@@ -176,6 +176,12 @@ class ConsolePanel(QWidget):
         self.command_line = ""
         self._raw: list[str] = []
         self._started_at = 0.0
+        #: 这个作业的 stdin 是不是敏感内容（短信验证码、密码、令牌）。
+        #: 是的话输入框用密码回显，回显行和导出日志都不出现原文。
+        self._sensitive_input = False
+        #: 最近一次敏感输入的值，用来把终端（尤其 Windows ConPTY）可能回显
+        #: 出来的原文从后续输出里抹掉
+        self._sensitive_value = ""
         #: 可选的「行变换器」。返回改写后的整行就按标记色显示，返回 None
         #: 表示这行跟它无关、走默认配色。下载页用它给 VIP 的进度行打标记。
         self._tagger: Callable[[str], str | None] | None = None
@@ -248,6 +254,25 @@ class ConsolePanel(QWidget):
         """装一个行变换器，用来给特定输出行加标记（见 ``_tagger``）。"""
         self._tagger = tagger
 
+    def set_sensitive_input(self, sensitive: bool = True) -> None:
+        """声明这个作业的 stdin 是敏感内容（短信验证码、密码、令牌）。
+
+        密码回显是防「肩窥 / 截图 / 录屏」的第一层；回显行和导出日志不写原文
+        是第二层 —— 控制台正文可以被旁观者看到，也可能被整段截图或复制走，
+        一次性验证码在有效期内同样能直接用来登录。
+        """
+        self._sensitive_input = bool(sensitive)
+        self.stdin_bar.setEchoMode(
+            QLineEdit.EchoMode.Password
+            if self._sensitive_input
+            else QLineEdit.EchoMode.Normal
+        )
+        self.stdin_bar.setPlaceholderText(
+            "敏感输入：内容不会显示，也不会写进日志"
+            if self._sensitive_input
+            else "向进程输入一行内容后回车（例如短信验证码）—— 仅交互式命令需要"
+        )
+
     def bind(self, runner: JobRunner) -> None:
         """连接一个已启动（或即将启动）的作业。"""
         self.runner = runner
@@ -274,6 +299,7 @@ class ConsolePanel(QWidget):
         self._update_meta()
 
     def _on_output(self, text: str) -> None:
+        text = self._scrub(text)
         # 进度条实际是走 output 过来的（pb 打的是 "\r<行>\n"），所以这里也要过
         # 一遍标注器 —— 下载时的 VIP 标记主要就是在这条路径上加的
         marked = self._tagger(text) if self._tagger else None
@@ -285,6 +311,7 @@ class ConsolePanel(QWidget):
         self.view.append_line(text, classify(text))
 
     def _on_progress(self, text: str) -> None:
+        text = self._scrub(text)
         marked = self._tagger(text) if self._tagger else None
         if marked is not None:
             self.view.append_progress(marked, theme.CONSOLE_AMBER)
@@ -292,6 +319,7 @@ class ConsolePanel(QWidget):
         self.view.append_progress(text)
 
     def _on_failed(self, message: str) -> None:
+        message = self._scrub(message)
         self._raw.append(message)
         self.view.append_line(message, theme.CONSOLE_RED)
 
@@ -329,9 +357,31 @@ class ConsolePanel(QWidget):
         text = self.stdin_bar.text()
         if self.runner and self.runner.is_running:
             self.runner.send_line(text)
-            # 回显，让用户确认输入确实送进去了
-            self.view.append_line(f"‹ 输入 › {text}", theme.CONSOLE_PURPLE)
+            if self._sensitive_input:
+                # 只留「送进去了」这个事实，不留内容。导出日志用的 _raw 也
+                # 不放原文 —— 导出的文件通常会留在磁盘上，比控制台更久
+                self._sensitive_value = text
+                self.view.append_line(
+                    "‹ 输入 › ••••••（敏感内容已隐藏）", theme.CONSOLE_PURPLE
+                )
+                self._raw.append("‹ 输入 ›（敏感内容已隐藏）")
+            else:
+                # 回显，让用户确认输入确实送进去了
+                self.view.append_line(f"‹ 输入 › {text}", theme.CONSOLE_PURPLE)
             self.stdin_bar.clear()
+
+    def _scrub(self, text: str) -> str:
+        """把终端回显出来的敏感输入从输出里抹掉。
+
+        POSIX 上 pty 的 ``ECHO`` 已经关了；Windows 的 ConPTY 不归我们管，
+        ncmctl 自己也可能把读到的内容再打一遍。抹掉的是**刚输入过的那个
+        值**，不是猜出来的模式，所以不会误伤普通日志。
+        """
+        # 太短的值（比如用户误输入一个「1」）替换起来会把正常日志打烂；
+        # 验证码/密码/令牌不会短到这个程度
+        if self._sensitive_input and len(self._sensitive_value) >= 4:
+            text = text.replace(self._sensitive_value, "••••••")
+        return text
 
     def _copy_command(self) -> None:
         QApplication.clipboard().setText(self.command_line)

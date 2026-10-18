@@ -34,7 +34,7 @@ from PyQt6.QtGui import (  # noqa: E402
     QPainter,
     QPixmap,
 )
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QLineEdit  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
 from ncmgui.config import Config, default_music_dir  # noqa: E402
@@ -231,6 +231,33 @@ def _self_test(window: MainWindow) -> int:
 
         panel = ConsolePanel("自检")
         panel.view.append_line("panel ok")
+
+        # 敏感 stdin（短信验证码）不能出现在控制台正文与导出日志里。用假 runner
+        # 走一遍真实的 _send_stdin 路径，不启动任何进程
+        class _FakeRunner:
+            is_running = True
+            sent = ""
+
+            def send_line(self, text: str) -> None:
+                self.sent = text
+
+        fake = _FakeRunner()
+        panel.runner = fake  # type: ignore[assignment]
+        panel.set_sensitive_input(True)
+        if panel.stdin_bar.echoMode() != QLineEdit.EchoMode.Password:
+            problems.append("敏感输入的输入框没有切换到密码回显")
+        panel.stdin_bar.setText("654321")
+        panel._send_stdin()
+        if fake.sent != "654321":
+            problems.append("敏感输入没有送达进程 stdin")
+        if "654321" in panel.view.toPlainText():
+            problems.append("敏感输入被回显到了控制台正文")
+        if "654321" in "\n".join(panel._raw):
+            problems.append("敏感输入被记进了导出日志")
+        # 终端（Windows ConPTY 等）可能把输入回显出来，后续输出里也要抹掉
+        panel._on_output("服务器回显 654321")
+        if "654321" in panel.view.toPlainText():
+            problems.append("终端回显的敏感输入没有被抹掉")
     except Exception as exc:  # pragma: no cover - 自检路径
         problems.append(f"控制台构造失败：{exc!r}")
 
