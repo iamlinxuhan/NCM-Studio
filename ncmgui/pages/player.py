@@ -483,6 +483,10 @@ class PlayerPage(BasePage):
         self._position_anchor = None
         self._current_line = -1
         self._lyric_lines = []
+        # 切歌/重建歌词要重新跟随。上一首里用户手动滚动留下的暂停如果还生效，
+        # 新歌的前几句就不会自动滚到视野里
+        self._follow_until = 0.0
+        self._reset_lyric_scroll()
         while self.lyric_layout.count():
             item = self.lyric_layout.takeAt(0)
             widget = item.widget()
@@ -542,6 +546,10 @@ class PlayerPage(BasePage):
                 self._set_line_state(row, True)
                 if time.monotonic() >= self._follow_until:
                     self._scroll_to(row[0])
+            elif time.monotonic() >= self._follow_until:
+                # 回到第一句之前（切歌、拖回开头）：必须回到顶部。之前这里什么都不做，
+                # 滚动条就停在上一首滚到的位置，新歌的前奏阶段一直卡在歌词中间
+                self._reset_lyric_scroll()
             self._update_word_timer()
 
         # 行号没变也要把位置交给当前行：幕布在同一个字的内部持续推进
@@ -559,6 +567,9 @@ class PlayerPage(BasePage):
             translation.style().polish(translation)
 
     def _scroll_to(self, label: QWidget) -> None:
+        # 刚重建完歌词时布局还没激活，所有 label 的 y() 都是 0，算出来的目标会
+        # 落在顶部。先强制排一次版，再按真实位置算
+        self.lyric_layout.activate()
         bar = self.lyric_scroll.verticalScrollBar()
         target = (
             label.y()
@@ -569,6 +580,9 @@ class PlayerPage(BasePage):
         if abs(target - bar.value()) < 2:
             return
 
+        # 连续换行时上一段 200ms 动画可能还没跑完，不叫停会互相抢滚动条
+        if self._scroll_anim is not None:
+            self._scroll_anim.stop()
         animation = QPropertyAnimation(bar, b"value", self)
         animation.setDuration(200)
         animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -576,6 +590,19 @@ class PlayerPage(BasePage):
         animation.setEndValue(target)
         animation.start()
         self._scroll_anim = animation
+
+    def _reset_lyric_scroll(self) -> None:
+        """把歌词滚回顶部，并停掉上一首还在跑的滚动动画。
+
+        切歌时 ``_clear_lyrics()`` 会删掉所有歌词控件，但滚动条的值和未完成的
+        动画还留着：动画继续把值推向中间，新歌词一套进去就停在中间，而不是
+        从第一句开始。
+        """
+        if self._scroll_anim is not None:
+            self._scroll_anim.stop()
+            self._scroll_anim = None
+        bar = self.lyric_scroll.verticalScrollBar()
+        bar.setValue(bar.minimum())
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if obj is self.lyric_scroll.viewport() and event.type() == QEvent.Type.Wheel:

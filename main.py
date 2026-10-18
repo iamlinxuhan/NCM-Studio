@@ -190,6 +190,41 @@ def _self_test(window: MainWindow) -> int:
             theme.apply_theme(app, original)
             window._refresh_theme_dependents()
 
+    # 切歌后歌词必须回到顶部。用户撞见过上一首的滚动位置被新歌词继承，
+    # 新歌前奏期间歌词停在中间；上一首没跑完的滚动动画也会把位置继续往里带
+    player_page = getattr(window, "player_page", None)
+    if player_page is None:
+        problems.append("主窗口没有播放页，歌词滚动自检无法进行")
+    else:
+        demo_lines = [
+            TimedLine(start=30.0 + i * 3, end=33.0 + i * 3, text=f"第 {i} 句")
+            for i in range(20)
+        ]
+        page = player_page
+        bar = page.lyric_scroll.verticalScrollBar()
+        page._build_lyrics(demo_lines)
+        QApplication.processEvents()
+        # 歌词区在自检时没有真实滚动范围，手动给一个，专门验「重建时归零」
+        bar.setRange(0, 1000)
+        bar.setValue(500)
+        page._clear_lyrics("正在加载歌词…")
+        if bar.value() != bar.minimum():
+            problems.append(
+                f"清空歌词后滚动条没有回到顶部（实际 {bar.value()}）"
+            )
+
+        page._build_lyrics(demo_lines)
+        QApplication.processEvents()
+        bar.setRange(0, 1000)
+        bar.setValue(500)
+        page._current_line = 5
+        page._update_current_line(0.0)
+        if bar.value() != bar.minimum():
+            problems.append(
+                f"位置回到第一句之前时歌词没有回顶（实际 {bar.value()}）"
+            )
+        page._clear_lyrics()
+
     # 右上角的音质必须写**实际**播放的音质。用户撞见过「标签写着极高 320 kbps、
     # 实际播的是无损文件」：本地文件按文件格式显示，流媒体按直链接口返回的
     # 档位（可能降级）显示，请求档位只在取链结果回来之前兜底
