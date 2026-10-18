@@ -266,9 +266,21 @@ class LyricLineWidget(QWidget):
         left = PAD_X + curtain_x - band
         right = PAD_X + curtain_x + band
 
-        layer.setCompositionMode(
-            QPainter.CompositionMode.CompositionMode_DestinationIn
+        # 遮罩单独画一张图，再整体乘到深色字上。
+        #
+        # 不能只对「该显示深色」的行做 DestinationIn：这个混合模式只处理
+        # 被画到的像素，没画到的位置保留原样 —— 换行后的第二视觉行没人去
+        # 碰，就会一直保持深色。之前单行歌词看不出问题，一旦挤压换行，
+        # 整行未播放的部分全变深，就是这个原因。
+        mask = QImage(
+            image.size(),
+            QImage.Format.Format_ARGB32_Premultiplied,
         )
+        mask.setDevicePixelRatio(dpr)
+        mask.fill(Qt.GlobalColor.transparent)
+
+        shade = QPainter(mask)
+        shade.setPen(Qt.PenStyle.NoPen)
         for index in range(layout.lineCount()):
             text_line = layout.lineAt(index)
             rect = QRectF(
@@ -279,13 +291,18 @@ class LyricLineWidget(QWidget):
             )
             if index < visual_index:
                 # 幕布已经扫过去的视觉行：整行深色
-                layer.fillRect(rect, QColor(255, 255, 255, 255))
+                shade.fillRect(rect, QColor(255, 255, 255, 255))
             elif index == visual_index:
                 gradient = QLinearGradient(left, 0.0, right, 0.0)
                 gradient.setColorAt(0.0, QColor(255, 255, 255, 255))
                 gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
-                layer.fillRect(rect, gradient)
-            # 后面的视觉行保持透明，露出底下的浅色字
+                shade.fillRect(rect, gradient)
+            # 后面的视觉行留空（透明），乘上去就把深色字擦掉，露出浅色底字
+        shade.end()
 
+        layer.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_DestinationIn
+        )
+        layer.drawImage(0, 0, mask)
         layer.end()
         painter.drawImage(0, 0, image)

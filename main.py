@@ -225,6 +225,75 @@ def _self_test(window: MainWindow) -> int:
             )
         page._clear_lyrics()
 
+    # 当前行换行成两个视觉行时，幕布只扫到第一行，第二行没唱到的字必须还是
+    # 浅色。旧实现只对高亮区域做 DestinationIn，没被画到的第二行保持深色，
+    # 于是窗口一窄、歌词一换行，未播放的部分整块变深
+    try:
+        from ncmgui.widgets.lyricline import LyricLineWidget, PAD_Y
+
+        text = "Why not something like your old man"
+        words = []
+        acc = ""
+        for index, word in enumerate(text.split(" ")):
+            token = word if index == 0 else " " + word
+            start = len(acc)
+            acc += token
+            words.append(
+                Word(
+                    start=index * 0.5,
+                    end=(index + 1) * 0.5,
+                    text=token,
+                    char_start=start,
+                    char_end=len(acc),
+                )
+            )
+        wrapper = LyricLineWidget(
+            TimedLine(start=0.0, end=3.5, text=text, words=tuple(words))
+        )
+        wrapper.set_current(True)
+        # 不真正弹窗，只让它完成排版和绘制
+        wrapper.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        wrapper.resize(280, 120)
+        wrapper.show()
+        QApplication.processEvents()
+        wrapper.set_position(2.1)  # 幕布落在第一视觉行的 "your" 里
+        QApplication.processEvents()
+
+        if wrapper._layout is None or wrapper._layout.lineCount() < 2:
+            problems.append("歌词换行自检用例没有换行（字体度量变了？）")
+        else:
+            image = wrapper.grab().toImage()
+            second = wrapper._layout.lineAt(1)
+            dpr = image.devicePixelRatio()
+            top = int((PAD_Y + second.y()) * dpr)
+            bottom = int((PAD_Y + second.y() + second.height()) * dpr)
+            best = None
+            for y in range(max(0, top), min(image.height(), bottom)):
+                for x in range(image.width()):
+                    color = image.pixelColor(x, y)
+                    if color.alpha() and (best is None or color.alpha() > best.alpha()):
+                        best = color
+            sung = QColor(theme.LYRIC_SUNG)
+            unsung = QColor(theme.LYRIC_UNSUNG)
+
+            def distance(color: QColor, ref: QColor) -> int:
+                return (
+                    (color.red() - ref.red()) ** 2
+                    + (color.green() - ref.green()) ** 2
+                    + (color.blue() - ref.blue()) ** 2
+                )
+
+            if best is None:
+                problems.append("歌词换行自检取不到第二视觉行的像素")
+            elif distance(best, unsung) >= distance(best, sung):
+                problems.append(
+                    f"换行后未播放的歌词用成了已播放的深色（实际 {best.name()}）"
+                )
+        wrapper.close()
+        wrapper.deleteLater()
+    except Exception as exc:  # noqa: BLE001 - 自检要报告而不是崩掉
+        problems.append(f"歌词换行渲染自检失败：{exc!r}")
+
     # 右上角的音质必须写**实际**播放的音质。用户撞见过「标签写着极高 320 kbps、
     # 实际播的是无损文件」：本地文件按文件格式显示，流媒体按直链接口返回的
     # 档位（可能降级）显示，请求档位只在取链结果回来之前兜底
