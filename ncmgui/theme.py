@@ -457,6 +457,7 @@ QPushButton#Ghost[compact="true"] {
 QPushButton#Ghost[themeToggle="true"] {
     padding: 0 28px 0 10px;
     font-size: 12px;
+    text-align: left;
 }
 
 /* 播放条上的控制键：平时只有图标，悬停才浮出一层淡底色。

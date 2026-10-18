@@ -116,7 +116,7 @@ class ThemeToggle(QPushButton):
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("主题", parent)
+        super().__init__("主题（点击以切换）", parent)
         self.setObjectName("Ghost")
         self.setProperty("compact", "true")
         self.setProperty("themeToggle", "true")

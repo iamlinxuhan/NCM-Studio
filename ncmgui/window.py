@@ -176,8 +176,14 @@ class MainWindow(QMainWindow):
         chip_row.setSpacing(8)
         chip_row.addWidget(self.login_chip)
         chip_row.addStretch(1)
-        chip_row.addWidget(self.theme_toggle)
         brand_layout.addLayout(chip_row)
+
+        # 「主题（点击以切换）」比登录状态宽得多，挤在同一行会溢出侧边栏，
+        # 所以单独占一行
+        theme_row = QHBoxLayout()
+        theme_row.setContentsMargins(0, 8, 0, 0)
+        theme_row.addWidget(self.theme_toggle, 1)
+        brand_layout.addLayout(theme_row)
 
         layout.addWidget(brand)
 
