@@ -72,8 +72,13 @@ def upgrade_url(url: str, size: int = DEFAULT_SIZE) -> str:
 
 
 def _opener(proxy: str = ""):
-    """按配置构造 opener。空串走系统默认，``direct`` 强制直连。"""
-    proxy = (proxy or "").strip()
+    """按配置构造 opener。空串走系统默认，``direct`` 强制直连。
+
+    与更新器共用 :func:`ncmgui.netutil.normalize_proxy` 的校验规则。
+    """
+    from .netutil import normalize_proxy
+
+    proxy = normalize_proxy(proxy)
     if proxy == "direct":
         return urllib.request.build_opener(urllib.request.ProxyHandler({}))
     if proxy:
@@ -95,7 +100,11 @@ def fetch(url: str, proxy: str = "", timeout: float = 10.0) -> bytes:
         },
     )
     try:
-        with _opener(proxy).open(request, timeout=timeout) as response:
+        opener = _opener(proxy)
+    except ValueError as exc:
+        raise RuntimeError(f"代理设置无效：{exc}") from exc
+    try:
+        with opener.open(request, timeout=timeout) as response:
             return response.read()
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"封面下载失败：HTTP {exc.code}") from exc

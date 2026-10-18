@@ -15,12 +15,18 @@ flac 里 ``format_tags`` 是空的，连 artist/title 都没有，歌词自然�
 毫秒是 NetEase 的扩展写法；Elisa 25.04 的解析器把三位当百分秒再 ×10，一句歌词能晚
 出 9 秒，而 Debian trixie 装的正是这个版本（详见 :func:`canonical_timestamps`）。
 
-三种模式（值就是界面下拉框的 ``userData``）：
+``LyricV1`` 接口（``ncmctl curl LyricV1``）还多给一份 ``yrc``：带**逐字时间**的
+歌词。播放页按这份时间在原文上从左到右拉动一块深色“幕布”，幕布边缘落在单个
+字/单词内部时也是连续渐变。``yrc`` 同时可以落成 ``.ttml`` 逐字歌词文件。
+
+四种模式（值就是界面下拉框的 ``userData``）：
 
 ``none``
     不下载歌词。
 ``lrc``
     在音频文件旁边写一个同名的 ``.lrc``。**默认**，不动音频文件本身。
+``ttml``
+    写一个同名的 ``.ttml``，保留逐字时间与译文。
 ``embed``
     把歌词写进音频文件的标签（flac 的 Vorbis 注释 / mp3 的 ID3 USLT …）。
     这是唯一会**改写用户文件**的模式。
@@ -41,11 +47,13 @@ import bisect
 import os
 import re
 import threading
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from . import fsutil
 from .resolver import VARIANT_RE
 
 # --------------------------------------------------------------------------- #
@@ -54,15 +62,30 @@ from .resolver import VARIANT_RE
 
 MODE_NONE = "none"
 MODE_LRC = "lrc"
+MODE_TTML = "ttml"
 MODE_EMBED = "embed"
 
 #: ``(显示名, 值)``，直接喂给 :meth:`~ncmgui.widgets.form.FormCard.add_combo`。
 #: 默认那一项由调用方通过 ``download.lyric`` 配置项决定，见 config.py。
 MODES: list[tuple[str, str]] = [
     ("独立 .lrc 文件", MODE_LRC),
+    ("逐字 .ttml 文件", MODE_TTML),
     ("写入音频标签（内嵌）", MODE_EMBED),
     ("不下载歌词", MODE_NONE),
 ]
+
+# --------------------------------------------------------------------------- #
+# 逐字模型与 TTML 命名空间
+# --------------------------------------------------------------------------- #
+
+TTML_NS = "http://www.w3.org/ns/ttml"
+TTM_NS = "http://www.w3.org/ns/ttml#metadata"
+ITUNES_NS = "http://www.itunes.com/DTDs/2009/09/itunes"
+
+#: TTML 里表示“这一份是译文”的 role 值
+_TRANSLATION_ROLES = frozenset({"x-translation", "translation"})
+#: 罗马音等辅助行，不参与原文与译文
+_ROMAN_ROLES = frozenset({"x-roman", "x-romanization", "x-romanisation"})
 
 #: 认得出是音频的扩展名。只影响"能不能被找到"，写入支持与否另有一套（见 ``_FIELD``）。
 AUDIO_SUFFIXES = frozenset(
@@ -421,10 +444,588 @@ def split_translation(text: str) -> tuple[str, str]:
     return "\n".join(original), "\n".join(translation)
 
 
-def line_index_at(lines: Sequence[tuple[float, str]], position: float | None) -> int:
+# --------------------------------------------------------------------------- #
+# 逐字模型：YRC / TTML
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class Word:
+    """一个带时间的字/词。时间单位是秒，字符区间落在所属行文本里。"""
+
+    start: float
+    end: float
+    text: str
+    char_start: int = 0
+    char_end: int = 0
+
+
+@dataclass(frozen=True)
+class TimedLine:
+    """一行歌词。``words`` 为空表示只有行级时间，``translation`` 可为空。"""
+
+    start: float
+    end: float
+    text: str
+    words: tuple[Word, ...] = ()
+    translation: str = ""
+
+
+@dataclass(frozen=True)
+class ParsedLyrics:
+    """解析结果。``source`` 是 yrc / lrc / ttml / empty，便于界面交代来源。"""
+
+    lines: tuple[TimedLine, ...]
+    source: str = ""
+
+    @property
+    def has_words(self) -> bool:
+        return any(line.words for line in self.lines)
+
+
+def _ttml_time(value: str | None, default: float | None = None) -> float | None:
+    """TTML 时间属性 → 秒。
+
+    认 ``hh:mm:ss.mmm`` / ``mm:ss.mmm`` / 纯秒数 / ``1.5s`` / ``800ms``。
+    TTML 时间格式五花八门，这里只接受明确的几种；认不出就抛
+    :class:`LyricsError`，而不是把它当成 0 秒悄悄排到最前面。
+    """
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    lower = text.lower()
+    try:
+        if lower.endswith("ms"):
+            result = float(lower[:-2]) / 1000.0
+        elif lower.endswith("s"):
+            result = float(lower[:-1])
+        else:
+            parts = text.split(":")
+            if len(parts) == 3:
+                result = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            elif len(parts) == 2:
+                result = int(parts[0]) * 60 + float(parts[1])
+            elif len(parts) == 1:
+                result = float(parts[0])
+            else:
+                raise ValueError(text)
+    except ValueError as exc:
+        raise LyricsError(f"认不出 TTML 时间：{text}") from exc
+    if result != result or result < 0:  # NaN / 负数
+        raise LyricsError(f"TTML 时间不合理：{text}")
+    return result
+
+
+def _format_ttml_time(seconds: float) -> str:
+    """秒 → ``hh:mm:ss.mmm``。"""
+    total_ms = int(round(max(0.0, float(seconds)) * 1000))
+    hours, rest = divmod(total_ms, 3_600_000)
+    minutes, rest = divmod(rest, 60_000)
+    secs, millis = divmod(rest, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _lrc_timestamp(seconds: float) -> str:
+    """秒 → ``[mm:ss.xx]``，给从 YRC 降级写 LRC 时用。"""
+    centis = int(round(max(0.0, float(seconds)) * 100))
+    return f"[{centis // 6000:02d}:{centis // 100 % 60:02d}.{centis % 100:02d}]"
+
+
+def _fill_line_ends(lines: Sequence[TimedLine]) -> list[TimedLine]:
+    """补上缺失的行结束时间。
+
+    普通 LRC 没有结束时间：用下一行的开始，最后一行给 5 秒。YRC/TTML 的行结束
+    通常已经有了，但若它早于最后一个字，就延长到字尾 —— 否则最后一个字唱到一半，
+    整行就被判定为“已经过去”了。
+    """
+    result = list(lines)
+    for index, line in enumerate(result):
+        end = line.end
+        if end <= line.start:
+            next_start = result[index + 1].start if index + 1 < len(result) else None
+            if next_start is not None and next_start > line.start:
+                end = next_start
+            else:
+                end = line.start + 5.0
+        if line.words:
+            end = max(end, max(word.end for word in line.words))
+        result[index] = replace(line, end=end)
+    return result
+
+
+# ---- YRC ------------------------------------------------------------------ #
+
+#: `[行开始毫秒,行时长毫秒]`；行内是若干 `(字开始毫秒,字时长毫秒,标志)正文`
+_YRC_LINE_RE = re.compile(r"^\[\s*(\d+)\s*,\s*(\d+)\s*\]")
+_YRC_WORD_RE = re.compile(r"\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*\)")
+
+
+def _yrc_line(start_ms: int, dur_ms: int, rest: str) -> TimedLine | None:
+    """解析一整行 YRC（``rest`` 是行头之后的部分）。"""
+    start = start_ms / 1000.0
+    matches = list(_YRC_WORD_RE.finditer(rest))
+    if not matches:
+        body = rest.strip()
+        if not body:
+            return None
+        return TimedLine(start, start, body)
+
+    segments: list[tuple[float, float, str]] = []
+    first = matches[0]
+    leading = rest[: first.start()]
+    if leading.strip():
+        segments.append((start, int(first.group(1)) / 1000.0, leading))
+
+    for index, match in enumerate(matches):
+        word_start = int(match.group(1)) / 1000.0
+        word_dur = int(match.group(2)) / 1000.0
+        text_start = match.end()
+        text_end = matches[index + 1].start() if index + 1 < len(matches) else len(rest)
+        word_text = rest[text_start:text_end]
+        if not word_text:
+            continue
+        segments.append((word_start, word_start + word_dur if word_dur > 0 else word_start, word_text))
+
+    text = "".join(segment[2] for segment in segments)
+    if not text.strip():
+        return None
+
+    words: list[Word] = []
+    offset = 0
+    for word_start, word_end, word_text in segments:
+        char_start = offset
+        offset += len(word_text)
+        words.append(Word(word_start, word_end, word_text, char_start, offset))
+
+    if dur_ms > 0:
+        end = (start_ms + dur_ms) / 1000.0
+    elif words:
+        end = max(word.end for word in words)
+    else:
+        end = start
+    return TimedLine(start, end, text, tuple(words))
+
+
+def parse_yrc(text: str) -> ParsedLyrics:
+    """网易云 YRC → :class:`ParsedLyrics`。
+
+    文件里混着两种行：
+
+    * ``{"t":0,"c":[{"tx":"作词: ..."}]}`` —— JSONL 元数据，跳过；
+    * ``[行开始,行时长](字开始,字时长,标志)字...`` —— 字时间是**绝对毫秒**。
+
+    正文用正则 match 的位置切片，而不是先把标签删掉再拼：歌词正文里本来就可能
+    出现括号，先删标签会把正文一起吃掉。混进来的普通 LRC 行走
+    :func:`parse_timed_lines` 兜底。
+    """
+    yrc_lines: list[TimedLine] = []
+    plain: list[str] = []
+    for raw in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("{"):
+            continue
+        match = _YRC_LINE_RE.match(stripped)
+        if match is None:
+            plain.append(raw)
+            continue
+        line = _yrc_line(int(match.group(1)), int(match.group(2)), stripped[match.end():])
+        if line is not None:
+            yrc_lines.append(line)
+
+    for start, body in parse_timed_lines("\n".join(plain)):
+        yrc_lines.append(TimedLine(start, start, body))
+
+    lines = sorted(yrc_lines, key=lambda item: item.start)
+    if not lines:
+        return ParsedLyrics((), "yrc")
+    return ParsedLyrics(tuple(_fill_line_ends(lines)), "yrc")
+
+
+# ---- TTML ----------------------------------------------------------------- #
+
+def _local_name(tag: str) -> str:
+    """``{namespace}p`` → ``p``。TTML 的命名空间前缀不固定，只认本地名。"""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _ttml_attr(element: ET.Element, name: str) -> str:
+    """按本地名取属性，兼容任意前缀（``ttm:role`` / ``role``）。"""
+    for key, value in element.attrib.items():
+        if _local_name(key) == name:
+            return value
+    return ""
+
+
+def _clean_xml_text(value: str) -> str:
+    return re.sub(r"[ \t\r\n]+", " ", value or "")
+
+
+def _xml_text(element: ET.Element) -> str:
+    """元素里所有文本节点按文档顺序拼接（不跳过任何 span）。"""
+    return "".join(_clean_xml_text(part) for part in element.itertext())
+
+
+def _ttml_segments(
+    element: ET.Element,
+) -> tuple[list[tuple[str, str, float | None, float | None]], list[str]]:
+    """一行 ``<p>`` → (文本/字片段, 行内译文列表)。
+
+    片段按文档顺序保留，原文与逐字 span 混排也不会乱序。``<span>`` 的 tail
+    若是同一行里的空格（不含换行）就保留；缩进产生的换行空白丢弃，这样自己
+    写出的缩进 TTML 读回来不会每个字之间多一个空格。
+    """
+    segments: list[tuple[str, str, float | None, float | None]] = []
+    translations: list[str] = []
+
+    def add_text(value: str, *, raw: str = "") -> None:
+        cleaned = _clean_xml_text(value)
+        if not cleaned:
+            return
+        if cleaned.strip():
+            segments.append(("text", cleaned, None, None))
+        elif segments and "\n" not in raw and "\r" not in raw:
+            segments.append(("text", " ", None, None))
+
+    def visit(node: ET.Element) -> None:
+        add_text(node.text or "", raw=node.text or "")
+        for child in node:
+            local = _local_name(child.tag)
+            role = _ttml_attr(child, "role")
+            if local == "span" and role in _TRANSLATION_ROLES:
+                value = _xml_text(child).strip()
+                if value:
+                    translations.append(value)
+            elif local == "span" and role in _ROMAN_ROLES:
+                pass
+            elif local == "span":
+                value = _xml_text(child)
+                if value.strip():
+                    segments.append((
+                        "word",
+                        value,
+                        _ttml_time(_ttml_attr(child, "begin"), None),
+                        _ttml_time(_ttml_attr(child, "end"), None),
+                    ))
+            elif local == "br":
+                segments.append(("text", " ", None, None))
+            else:
+                visit(child)
+            add_text(child.tail or "", raw=child.tail or "")
+
+    visit(element)
+    return segments, translations
+
+
+def _ttml_line(
+    begin: float | None,
+    end: float | None,
+    segments: Sequence[tuple[str, str, float | None, float | None]],
+    inline_translation: str,
+) -> TimedLine | None:
+    """把片段拼成 ``TimedLine``，并修正首尾空白带来的字符偏移。"""
+    pieces: list[str] = []
+    raw_words: list[tuple[float | None, float | None, int, int]] = []
+    offset = 0
+    for kind, value, word_begin, word_end in segments:
+        pieces.append(value)
+        if kind == "word":
+            raw_words.append((word_begin, word_end, offset, offset + len(value)))
+        offset += len(value)
+
+    full = "".join(pieces)
+    text = full.strip()
+    if not text:
+        return None
+    left = len(full) - len(full.lstrip())
+    right = len(full) - len(full.rstrip())
+    limit = len(full) - right
+
+    line_start = 0.0 if begin is None else begin
+    line_end = 0.0 if end is None else end
+
+    filled: list[tuple[float, float, int, int]] = []
+    for index, (word_begin, word_end, char_start, char_end) in enumerate(raw_words):
+        if word_begin is None:
+            word_begin = filled[-1][1] if filled else line_start
+        if word_end is None:
+            next_start = None
+            for later in range(index + 1, len(raw_words)):
+                if raw_words[later][0] is not None:
+                    next_start = raw_words[later][0]
+                    break
+            if next_start is not None:
+                word_end = next_start
+            elif end is not None and end > word_begin:
+                word_end = end
+            else:
+                word_end = word_begin + 0.5
+        if word_end < word_begin:
+            word_end = word_begin
+        start_char = max(left, char_start) - left
+        end_char = min(limit, char_end) - left
+        if end_char > start_char:
+            filled.append((word_begin, word_end, start_char, end_char))
+
+    words = tuple(
+        Word(word_begin, word_end, text[start_char:end_char], start_char, end_char)
+        for word_begin, word_end, start_char, end_char in filled
+    )
+    return TimedLine(line_start, line_end, text, words, inline_translation)
+
+
+def parse_ttml(text: str) -> ParsedLyrics:
+    """TTML（含 AMLL 的逐字写法）→ :class:`ParsedLyrics`。
+
+    结构按元素本地名认，不依赖前缀；``ttm:role="x-translation"`` 的 span 只进
+    译文，不算原文；独立的译文 ``<p>`` 按开始时间挂到同一行或最近一行（0.5 秒
+    容差）。``x-roman`` 直接忽略。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise LyricsError("TTML 歌词是空的")
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise LyricsError(f"TTML 歌词解析失败：{exc}") from exc
+    if _local_name(root.tag) != "tt":
+        raise LyricsError("TTML 歌词缺少 <tt> 根节点")
+
+    originals: list[tuple[float | None, float | None, list, str]] = []
+    translations: list[tuple[float | None, str]] = []
+    for element in root.iter():
+        if _local_name(element.tag) != "p":
+            continue
+        role = _ttml_attr(element, "role")
+        if role in _ROMAN_ROLES:
+            continue
+        begin = _ttml_time(_ttml_attr(element, "begin"), None)
+        end = _ttml_time(_ttml_attr(element, "end"), None)
+        if role in _TRANSLATION_ROLES:
+            value = _xml_text(element).strip()
+            if value:
+                translations.append((begin, value))
+            continue
+        segments, inline = _ttml_segments(element)
+        content = "".join(segment[1] for segment in segments)
+        if not content.strip():
+            if inline:
+                translations.append((begin, " ".join(inline)))
+            continue
+        originals.append((begin, end, segments, " ".join(inline)))
+
+    lines: list[TimedLine] = []
+    for begin, end, segments, inline in originals:
+        line = _ttml_line(begin, end, segments, inline)
+        if line is not None and line.text.strip():
+            lines.append(line)
+    lines.sort(key=lambda item: item.start)
+    lines = _fill_line_ends(lines)
+
+    for begin, value in translations:
+        anchor = 0.0 if begin is None else begin
+        candidates = [
+            index
+            for index, line in enumerate(lines)
+            if abs(line.start - anchor) <= 0.5
+            or line.start - 0.5 <= anchor <= line.end + 0.5
+        ]
+        if not candidates:
+            continue
+        target = min(candidates, key=lambda index: abs(lines[index].start - anchor))
+        line = lines[target]
+        if line.translation:
+            if value not in line.translation:
+                lines[target] = replace(line, translation=f"{line.translation} {value}")
+        else:
+            lines[target] = replace(line, translation=value)
+
+    return ParsedLyrics(tuple(lines), "ttml")
+
+
+def to_ttml(parsed: ParsedLyrics) -> str:
+    """:class:`ParsedLyrics` → TTML 文本。
+
+    没有逐字数据的行整行放 ``<p>``；有逐字数据时每个 ``Word`` 一个 ``<span>``，
+    并在根节点标 ``itunes:timing="Word"``。译文统一用
+    ``ttm:role="x-translation"``，第三方播放器不认时至少原文和字时间还在。
+    """
+    if not parsed.lines:
+        return ""
+    ET.register_namespace("", TTML_NS)
+    ET.register_namespace("ttm", TTM_NS)
+    ET.register_namespace("itunes", ITUNES_NS)
+
+    attrs = {f"{{{ITUNES_NS}}}timing": "Word"} if any(line.words for line in parsed.lines) else {}
+    tt = ET.Element(f"{{{TTML_NS}}}tt", attrs)
+    body = ET.SubElement(tt, f"{{{TTML_NS}}}body")
+    div = ET.SubElement(body, f"{{{TTML_NS}}}div")
+
+    for line in parsed.lines:
+        attrs = {"begin": _format_ttml_time(line.start)}
+        if line.end > line.start:
+            attrs["end"] = _format_ttml_time(line.end)
+        p = ET.SubElement(div, f"{{{TTML_NS}}}p", attrs)
+        if line.words:
+            for word in line.words:
+                span = ET.SubElement(
+                    p,
+                    f"{{{TTML_NS}}}span",
+                    {
+                        "begin": _format_ttml_time(word.start),
+                        "end": _format_ttml_time(word.end),
+                    },
+                )
+                span.text = word.text
+        else:
+            p.text = line.text
+        if line.translation:
+            span = ET.SubElement(p, f"{{{TTML_NS}}}span", {f"{{{TTM_NS}}}role": "x-translation"})
+            span.text = line.translation
+
+    ET.indent(tt, space="  ")
+    return ET.tostring(tt, encoding="utf-8", xml_declaration=True).decode("utf-8") + "\n"
+
+
+def looks_like_ttml(text: str) -> bool:
+    """粗略判断一段文本是不是 TTML；用于 ``parse_any`` 区分字符串来源。"""
+    head = (text or "").lstrip()
+    return head.startswith("<") and ("<tt" in head[:4096] or ":tt" in head[:4096])
+
+
+# ---- 统一入口 -------------------------------------------------------------- #
+
+def _lrc_lines(text: str) -> list[TimedLine]:
+    return _fill_line_ends(
+        [TimedLine(start, start, body) for start, body in parse_timed_lines(text)]
+    )
+
+
+def _attach_lrc_translations(parsed: ParsedLyrics, tlyric: str) -> ParsedLyrics:
+    """按厘秒（容差 0.5 秒）把 ``tlyric`` 挂到解析结果上。"""
+    mapping = translation_map(tlyric)
+    if not mapping:
+        return parsed
+    lines = list(parsed.lines)
+    keys = list(mapping)
+    for index, line in enumerate(lines):
+        if line.translation:
+            continue
+        key = int(round(line.start * 100))
+        value = mapping.get(key)
+        if value is None:
+            nearby = [candidate for candidate in keys if abs(candidate - key) <= 50]
+            if nearby:
+                value = mapping[min(nearby, key=lambda candidate: abs(candidate - key))]
+        if value:
+            lines[index] = replace(line, translation=value)
+    return replace(parsed, lines=tuple(lines))
+
+
+def parse_any(payload: object) -> ParsedLyrics:
+    """接口响应 / 本地文件 → :class:`ParsedLyrics`。
+
+    * ``dict``：优先 ``yrc``（逐字），失败或为空再退到 ``lrc``；``tlyric``
+      按时间挂译文。
+    * ``str``：像 TTML 就按 TTML 解析；否则先 :func:`split_translation`，
+      再按 LRC 行级解析。
+    * 原文是占位串而译文有内容时，用译文当行来源。
+    """
+    if isinstance(payload, Lyric):
+        payload = {"lrc": payload.original, "tlyric": payload.translation, "yrc": payload.yrc}
+
+    if isinstance(payload, str):
+        if looks_like_ttml(payload):
+            return parse_ttml(payload)
+        original, translation = split_translation(payload)
+        return parse_any({"lrc": original, "tlyric": translation})
+
+    if not isinstance(payload, dict):
+        return ParsedLyrics((), "empty")
+
+    yrc = _lyric_field(payload, "yrc")
+    lrc = _lyric_field(payload, "lrc")
+    tlyric = _lyric_field(payload, "tlyric")
+
+    if yrc.strip():
+        parsed = parse_yrc(yrc)
+        if parsed.lines:
+            return _attach_lrc_translations(parsed, tlyric)
+
+    if lrc.strip() and has_content(lrc):
+        lines = _lrc_lines(lrc)
+        if lines:
+            return _attach_lrc_translations(ParsedLyrics(tuple(lines), "lrc"), tlyric)
+
+    if tlyric.strip() and has_content(tlyric):
+        lines = _lrc_lines(tlyric)
+        if lines:
+            return ParsedLyrics(tuple(lines), "lrc")
+
+    return ParsedLyrics((), "empty")
+
+
+def curtain_char(line: TimedLine, position: float | None) -> float:
+    """播放位置 → 行内字符位置（可以是小数）。
+
+    只做纯计算，不碰 Qt：控件拿这个值再用 ``QTextLayout.cursorToX`` 换算成横坐标。
+    字/词内部按它自己的演唱时长线性推进，字词之间按空隙时长推进，最后一个字
+    之后按行尾剩余时间推进到行末。还没到第一个字时停在它的左边界。
+    """
+    if not line.words:
+        return 0.0
+    try:
+        value = float(position) if position is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    if value != value:  # NaN
+        return 0.0
+
+    words = line.words
+    ranges: list[tuple[int, int]] = []
+    offset = 0
+    for word in words:
+        start = word.char_start
+        end = word.char_end
+        if end <= start:
+            start, end = offset, offset + len(word.text)
+        ranges.append((start, end))
+        offset += len(word.text)
+    total = max(offset, len(line.text))
+
+    if value <= words[0].start:
+        return float(ranges[0][0])
+
+    for index, word in enumerate(words):
+        char_start, char_end = ranges[index]
+        if word.end > word.start and word.start <= value < word.end:
+            ratio = (value - word.start) / (word.end - word.start)
+            return char_start + (char_end - char_start) * ratio
+        if value < word.start:
+            if index == 0:
+                return float(char_start)
+            previous = words[index - 1]
+            previous_start, previous_end = ranges[index - 1]
+            gap = word.start - previous.end
+            ratio = (value - previous.end) / gap if gap > 0 else 1.0
+            ratio = max(0.0, min(1.0, ratio))
+            return previous_end + (char_start - previous_end) * ratio
+
+    last_start, last_end = ranges[-1]
+    last_word = words[-1]
+    if line.end > last_word.end and value >= last_word.end:
+        ratio = (value - last_word.end) / (line.end - last_word.end)
+        ratio = max(0.0, min(1.0, ratio))
+        return last_end + (total - last_end) * ratio
+    return float(last_end)
+
+
+def line_index_at(lines: Sequence[tuple[float, str]] | Sequence[TimedLine],
+                  position: float | None) -> int:
     """``position`` 秒时应该高亮第几行；还没到第一句返回 ``-1``。
 
-    ``lines`` 必须是 :func:`parse_timed_lines` 排好序的返回值。
+    ``lines`` 可以是 :func:`parse_timed_lines` 的 ``(秒, 正文)``，也可以是
+    :class:`TimedLine`；两种都只取开始时间。
     """
     if not lines or position is None:
         return -1
@@ -434,20 +1035,35 @@ def line_index_at(lines: Sequence[tuple[float, str]], position: float | None) ->
         return -1
     if value != value:  # NaN
         return -1
-    times = [pair[0] for pair in lines]
+    times = [item.start if isinstance(item, TimedLine) else item[0] for item in lines]
     return bisect.bisect_right(times, value) - 1
 
 
+def read_local_lyrics(audio: Path) -> tuple[str, str]:
+    """读音频旁边的本地歌词，返回 ``(格式, 文本)``。
+
+    优先级 ``.ttml`` > ``.lrc`` > 内嵌。TTML 放在最前面：用户如果特意留了逐字
+    文件，就该按逐字显示，而不是被同名的旧 ``.lrc`` 盖住。
+    """
+    text = _read_text(ttml_path(audio))
+    if text.strip():
+        return "ttml", text
+    text = _read_text(lrc_path(audio))
+    if text.strip():
+        return "lrc", text
+    text = read_embedded(audio)
+    if text.strip():
+        return "embed", text
+    return "", ""
+
+
 def read_local(audio: Path) -> str:
-    """优先读音频旁边的 ``.lrc``，没有再读文件内嵌的歌词；都没有返回空串。
+    """优先读音频旁边的 ``.ttml`` / ``.lrc``，再读文件内嵌的歌词；都没有返回空串。
 
     播放页不该直接碰 :func:`_read_text` / :func:`read_embedded` 这两个内部细节，
     本地歌词的读取顺序集中在这里，改起来只有一处。
     """
-    text = _read_text(lrc_path(audio))
-    if text.strip():
-        return text
-    return read_embedded(audio)
+    return read_local_lyrics(audio)[1]
 
 
 def normalize(text: str) -> str:
@@ -469,17 +1085,22 @@ def normalize(text: str) -> str:
 
 @dataclass(frozen=True)
 class Lyric:
-    """一次 ``Lyric`` 接口调用拿到的歌词。"""
+    """一次 ``Lyric`` / ``LyricV1`` 接口调用拿到的歌词。"""
 
     original: str = ""
     translation: str = ""
+    yrc: str = ""
 
     @property
     def is_empty(self) -> bool:
-        return not has_content(self.original) and not has_content(self.translation)
+        return (
+            not has_content(self.original)
+            and not has_content(self.translation)
+            and not bool(self.yrc.strip())
+        )
 
     def text(self) -> str:
-        """最终要写出去的文本；这首歌没有歌词时返回空串。
+        """最终要写出去的 LRC 文本；这首歌没有歌词时返回空串。
 
         这里是**唯一的出口**：``.lrc`` 与写标签两条路径都从这里拿文本，所以时间戳
         的写法也统一在这一步落实（见 :func:`canonical_timestamps`）。
@@ -489,20 +1110,43 @@ class Lyric:
         elif has_content(self.translation):
             # 原文是占位串但翻译有内容：极少见，但宁可写翻译也别什么都不写
             body = self.translation
+        elif self.yrc.strip():
+            # 只有逐字歌词（接口没给 lrc）时，降级成行级 LRC 也能写
+            parsed = self.parsed()
+            body = "".join(
+                _lrc_timestamp(line.start) + line.text + "\n"
+                + (
+                    _lrc_timestamp(line.start) + line.translation + "\n"
+                    if line.translation
+                    else ""
+                )
+                for line in parsed.lines
+            )
         else:
             return ""
         return canonical_timestamps(normalize(body))
 
+    def parsed(self) -> ParsedLyrics:
+        """按逐字优先的顺序解析成带时间轴的结构。"""
+        return parse_any(
+            {"lrc": self.original, "tlyric": self.translation, "yrc": self.yrc}
+        )
+
+    def to_ttml(self) -> str:
+        """写出 TTML 文本；没有歌词时返回空串。"""
+        return to_ttml(self.parsed())
+
 
 def parse(payload: object) -> Lyric:
-    """把 ``ncmctl curl Lyric`` 的响应整理成 :class:`Lyric`。
+    """把 ``ncmctl curl Lyric`` / ``LyricV1`` 的响应整理成 :class:`Lyric`。
 
-    两个字段都是 ``{"version": .., "lyric": "..."}`` 的形状，但也容忍直接给字符串
-    （接口换写法时不至于整个功能哑掉）。
+    三个字段都是 ``{"version": .., "lyric": "..."}`` 的形状，但也容忍直接给字符串
+    （接口换写法时不至于整个功能哑掉）。旧 ``Lyric`` 接口没有 ``yrc``，取到空串。
     """
     return Lyric(
         original=_lyric_field(payload, "lrc"),
         translation=_lyric_field(payload, "tlyric"),
+        yrc=_lyric_field(payload, "yrc"),
     )
 
 
@@ -522,6 +1166,11 @@ def _lyric_field(payload: object, key: str) -> str:
 def lrc_path(audio: Path) -> Path:
     """音频文件对应的 ``.lrc`` 路径：同名换后缀，放在它旁边。"""
     return audio.with_suffix(".lrc")
+
+
+def ttml_path(audio: Path) -> Path:
+    """音频文件对应的 ``.ttml`` 路径：同名换后缀，放在它旁边。"""
+    return audio.with_suffix(".ttml")
 
 
 def _read_text(path: Path) -> str:
@@ -626,12 +1275,18 @@ def read_embedded(path: Path) -> str:
 
 
 def embed(path: Path, text: str) -> None:
-    """把歌词写进音频标签。
+    """把歌词原子地写进音频标签。
 
-    只支持 :data:`_FIELD` 里列出的容器加 mp3；其余格式明确报错，而不是"写了个
-    看似成功但读不回来的标签"。
+    mutagen 在原来的音频文件上就地改标签，异常/断电可能把整首音频写坏。这里先
+    复制一份**同后缀**临时文件（mutagen 靠后缀识别容器），改完再 ``os.replace``；
+    任何一步失败原文件字节不动。
     """
     ensure_embed_support()
+    fsutil.atomic_edit(path, lambda tmp: _embed_in_place(tmp, text))
+
+
+def _embed_in_place(path: Path, text: str) -> None:
+    """在给定文件上写标签（``embed`` 的临时文件版本）。"""
     suffix = path.suffix.lower()
 
     if suffix == ".mp3":
@@ -775,6 +1430,20 @@ def apply(base: str, targets: Sequence[Path], lyric: Lyric, mode: str) -> Outcom
     if not targets:
         return Outcome("missing", base, f"{base}：输出目录里没找到对应的音频文件")
 
+    if mode == MODE_TTML:
+        if isinstance(lyric, Lyric):
+            if lyric.is_empty:
+                return Outcome("empty", base, f"{base}：接口没有给出歌词（查无歌词或纯音乐）")
+            text = lyric.to_ttml()
+        else:
+            parsed = parse_any(str(lyric or ""))
+            if not parsed.lines:
+                return Outcome("empty", base, f"{base}：接口没有给出歌词（查无歌词或纯音乐）")
+            text = to_ttml(parsed)
+        if not text.strip():
+            return Outcome("empty", base, f"{base}：接口没有给出歌词（查无歌词或纯音乐）")
+        return _write_ttml(base, targets, text)
+
     text = lyric.text() if isinstance(lyric, Lyric) else str(lyric or "")
     if not text.strip():
         return Outcome("empty", base, f"{base}：接口没有给出歌词（查无歌词或纯音乐）")
@@ -802,7 +1471,24 @@ def _write_lrc(base: str, targets: Sequence[Path], text: str) -> Outcome:
             existing = _read_text(dest)
             if existing and not outdated(existing):
                 continue
-            dest.write_text(text, encoding="utf-8")
+            fsutil.atomic_write_text(dest, text)
+            written += 1
+        except OSError as exc:
+            return Outcome("failed", base, f"{base}：写 {dest.name} 失败 —— {exc}")
+    if not written:
+        return Outcome("skipped", base)
+    return Outcome("ok", base)
+
+
+def _write_ttml(base: str, targets: Sequence[Path], text: str) -> Outcome:
+    """写同名 ``.ttml``。内容相同就跳过，重复跑不会反复改文件时间。"""
+    written = 0
+    for audio in targets:
+        dest = ttml_path(audio)
+        try:
+            if _read_text(dest).strip() == text.strip():
+                continue
+            fsutil.atomic_write_text(dest, text)
             written += 1
         except OSError as exc:
             return Outcome("failed", base, f"{base}：写 {dest.name} 失败 —— {exc}")
@@ -846,6 +1532,18 @@ def satisfied(targets: Sequence[Path], mode: str) -> bool:
             if not text or outdated(text):
                 return False
         return True
+    if mode == MODE_TTML:
+        for audio in targets:
+            text = _read_text(ttml_path(audio))
+            if not text.strip():
+                return False
+            try:
+                parsed = parse_ttml(text)
+            except LyricsError:
+                return False
+            if not parsed.lines:
+                return False
+        return True
     if mode == MODE_EMBED:
         for audio in targets:
             text = read_embedded(audio)
@@ -867,6 +1565,7 @@ def collect(
     parallel: int = 4,
     on_progress: Callable[[int, int, str], None] | None = None,
     on_note: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Report:
     """给一批歌抓歌词并落盘。
 
@@ -877,12 +1576,14 @@ def collect(
         自检时可以塞个假的。
     :param on_progress: ``(已完成, 总数, 当前主干)``，用来刷一行计数
     :param on_note: 值得单独打一行的说明（失败、找不到文件……）
+    :param should_stop: 每个任务开始前检查一次；关窗时置位，剩下的歌不再处理。
+        已经开始的写入会做完，不会留下半截文件（见 :mod:`ncmgui.fsutil`）。
 
     回调是在**工作线程**里调用的，界面那边务必只做「发信号」这种线程安全的动作。
     """
     items = list(pairs)
     report = Report(total=len(items))
-    if mode not in (MODE_LRC, MODE_EMBED) or not items:
+    if mode not in (MODE_LRC, MODE_TTML, MODE_EMBED) or not items:
         return report
 
     if mode == MODE_EMBED:
@@ -894,6 +1595,8 @@ def collect(
 
     def work(pair: tuple[str, int]) -> None:
         nonlocal done
+        if should_stop is not None and should_stop():
+            return
         base, song_id = pair
         targets = targets_for(base, index)
 
@@ -1062,15 +1765,199 @@ def _selftest() -> int:
     )
     check("译文里没有时间戳的行丢掉", translation_map("[by:x]\n纯文本"), {})
 
-    # ---- 本地歌词读取：.lrc 优先于内嵌
+    # ---- YRC：逐字时间
+    yrc_text = (
+        '{"t":0,"c":[{"tx":"作词: 某人"}]}\n'
+        "[1000,2000](1000,500,0)你(1500,500,0)好(2000,500,0)世(2500,500,0)界\n"
+        "[4000,1500](4000,1000,0)再(5000,500,0)见"
+    )
+    yrc = parse_yrc(yrc_text)
+    check("YRC 跳过 JSONL 元数据、行数", len(yrc.lines), 2)
+    check("YRC 来源", yrc.source, "yrc")
+    check("YRC 行文本", [line.text for line in yrc.lines], ["你好世界", "再见"])
+    check(
+        "YRC 行时间",
+        [(line.start, line.end) for line in yrc.lines],
+        [(1.0, 3.0), (4.0, 5.5)],
+    )
+    check(
+        "YRC 字时间（绝对毫秒）",
+        [(word.start, word.end) for word in yrc.lines[0].words],
+        [(1.0, 1.5), (1.5, 2.0), (2.0, 2.5), (2.5, 3.0)],
+    )
+    check(
+        "YRC 字符区间",
+        [(word.char_start, word.char_end) for word in yrc.lines[0].words],
+        [(0, 1), (1, 2), (2, 3), (3, 4)],
+    )
+    check("YRC 有逐字数据", yrc.has_words, True)
+
+    # 正文里的括号不能被当成字标签删掉
+    paren = parse_yrc("[0,1000](0,400,0)a(b)c(400,600,0)d").lines[0]
+    check("YRC 正文含括号", paren.text, "a(b)cd")
+    check(
+        "YRC 正文含括号时字符区间仍对",
+        [(word.text, word.char_start, word.char_end) for word in paren.words],
+        [("a(b)c", 0, 5), ("d", 5, 6)],
+    )
+    check("YRC 负标志也认", parse_yrc("[0,1000](0,500,-1)甲").lines[0].text, "甲")
+
+    mixed = parse_yrc("[00:01.00]普通\n[2000,1000](2000,500,0)逐(2500,500,0)字")
+    check("YRC 混入普通 LRC 行时都保留", [line.text for line in mixed.lines], ["普通", "逐字"])
+    check("YRC 普通行结束补到下一行开始", mixed.lines[0].end, 2.0)
+    check(
+        "YRC 行时长为 0 时用最后一个字结尾",
+        parse_yrc("[3000,0](3000,400,0)甲(3400,600,0)乙").lines[0].end,
+        4.0,
+    )
+
+    # ---- TTML：读写与译文
+    payload = {"yrc": "[1000,1000](1000,500,0)你(1500,500,0)好",
+               "tlyric": {"lyric": "[00:01.00]你好"}}
+    parsed = parse_any(payload)
+    check("parse_any 逐字优先", parsed.source, "yrc")
+    check("parse_any 给逐字行挂译文", parsed.lines[0].translation, "你好")
+
+    parsed = parse_any(
+        {"lrc": {"lyric": "[00:01.00]原文"}, "tlyric": {"lyric": "[00:01.00]译文"}}
+    )
+    check("没有 yrc 时回退 LRC", parsed.source, "lrc")
+    check("LRC 译文按时间挂上", parsed.lines[0].translation, "译文")
+
+    parsed = parse_any(
+        {"lrc": {"lyric": "[00:00.00]暂无歌词"}, "tlyric": {"lyric": "[00:01.00]译文"}}
+    )
+    check("原文是占位串时用译文当行来源", [line.text for line in parsed.lines], ["译文"])
+
+    ttml_sample = """<?xml version="1.0" encoding="utf-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata"
+    xmlns:itunes="http://www.itunes.com/DTDs/2009/09/itunes" itunes:timing="Word">
+  <body><div>
+    <p begin="00:00:01.000" end="00:00:03.000">
+      <span begin="00:00:01.000" end="00:00:01.500">Hello</span>
+      <span begin="00:00:01.500" end="00:00:02.000"> world</span>
+      <span ttm:role="x-translation">你好世界</span>
+    </p>
+    <p begin="00:00:04.000" end="00:00:05.000">Bye</p>
+    <p begin="00:00:04.000" end="00:00:05.000" ttm:role="x-translation">再见</p>
+    <p begin="00:00:04.000" end="00:00:05.000" ttm:role="x-roman">bai</p>
+  </div></body>
+</tt>
+"""
+    parsed = parse_ttml(ttml_sample)
+    check("TTML 行数（译文与罗马音不算原文）", len(parsed.lines), 2)
+    check("TTML 行文本保留空格", [line.text for line in parsed.lines], ["Hello world", "Bye"])
+    check("TTML 行时间", [(line.start, line.end) for line in parsed.lines], [(1.0, 3.0), (4.0, 5.0)])
+    check(
+        "TTML 字时间",
+        [(word.start, word.end, word.text) for word in parsed.lines[0].words],
+        [(1.0, 1.5, "Hello"), (1.5, 2.0, " world")],
+    )
+    check("TTML 行内译文", parsed.lines[0].translation, "你好世界")
+    check("TTML 独立译文行挂到同一行", parsed.lines[1].translation, "再见")
+    check("TTML 来源", parsed.source, "ttml")
+    check("looks_like_ttml 认得出", looks_like_ttml(ttml_sample), True)
+    check("looks_like_ttml 不误判 LRC", looks_like_ttml("[00:01.00]x"), False)
+
+    # 自己写出的 TTML 必须能原样读回来
+    source = ParsedLyrics(
+        (
+            TimedLine(
+                1.0, 3.0, "你好世界",
+                (
+                    Word(1.0, 1.5, "你", 0, 1),
+                    Word(1.5, 2.0, "好", 1, 2),
+                    Word(2.0, 2.5, "世", 2, 3),
+                    Word(2.5, 3.0, "界", 3, 4),
+                ),
+                "你好，世界",
+            ),
+            TimedLine(3.5, 5.0, "再见 & <test>", (), "再见"),
+        ),
+        "yrc",
+    )
+    xml = to_ttml(source)
+    check("TTML 有逐字时标 Word timing", 'itunes:timing="Word"' in xml, True)
+    back = parse_ttml(xml)
+    check("TTML 往返行数", len(back.lines), 2)
+    check("TTML 往返文本", [line.text for line in back.lines],
+          ["你好世界", "再见 & <test>"])
+    check(
+        "TTML 往返字时间",
+        [(word.start, word.end) for word in back.lines[0].words],
+        [(1.0, 1.5), (1.5, 2.0), (2.0, 2.5), (2.5, 3.0)],
+    )
+    check("TTML 往返字文本", [word.text for word in back.lines[0].words],
+          ["你", "好", "世", "界"])
+    check("TTML 往返译文", [line.translation for line in back.lines], ["你好，世界", "再见"])
+    check("TTML 转义 < 与 &", "&amp;" in xml and "&lt;" in xml, True)
+
+    plain = ParsedLyrics((TimedLine(1.0, 2.0, "只有一行"),), "lrc")
+    plain_xml = to_ttml(plain)
+    check("TTML 没有逐字时不标 Word timing", "itunes:timing" in plain_xml, False)
+    check("TTML 无逐字时整行输出并读回", parse_ttml(plain_xml).lines[0].text, "只有一行")
+    check("空歌词写出空串", to_ttml(ParsedLyrics((), "empty")), "")
+    try:
+        parse_ttml("<tt><body><div><p>坏</p>")
+    except LyricsError:
+        malformed = True
+    else:
+        malformed = False
+    check("坏 TTML 明确报错", malformed, True)
+    try:
+        parse_ttml("<not-ttml />")
+    except LyricsError:
+        not_ttml = True
+    else:
+        not_ttml = False
+    check("没有 <tt> 根节点明确报错", not_ttml, True)
+
+    # ---- 幕布位置：纯函数，方便离线验证
+    curtain_line = TimedLine(
+        1.0, 3.0, "你好世界",
+        (
+            Word(1.0, 1.5, "你", 0, 1),
+            Word(1.5, 2.0, "好", 1, 2),
+            Word(2.0, 2.5, "世", 2, 3),
+            Word(2.5, 3.0, "界", 3, 4),
+        ),
+    )
+    check("幕布：第一词之前停在左边界", curtain_char(curtain_line, 0.5), 0.0)
+    check("幕布：词中间是半个字", curtain_char(curtain_line, 1.25), 0.5)
+    check("幕布：词边界正好整字", curtain_char(curtain_line, 1.5), 1.0)
+    check("幕布：最后一词中间", curtain_char(curtain_line, 2.75), 3.5)
+    check("幕布：行尾之后停在行末", curtain_char(curtain_line, 99), 4.0)
+    check("幕布：位置未知时不推进", curtain_char(curtain_line, None), 0.0)
+    check("幕布：没有逐字数据", curtain_char(TimedLine(1.0, 2.0, "abc"), 1.5), 0.0)
+
+    gap_line = TimedLine(
+        1.0, 3.0, "你 好",
+        (Word(1.0, 1.5, "你", 0, 1), Word(2.0, 2.5, "好", 2, 3)),
+    )
+    check("幕布：词间空隙按空隙时长推进", curtain_char(gap_line, 1.75), 1.5)
+    zero_line = TimedLine(
+        1.0, 2.0, "你好",
+        (Word(1.0, 1.0, "你", 0, 1), Word(1.0, 2.0, "好", 1, 2)),
+    )
+    check("幕布：零时长字不卡住后面的字", curtain_char(zero_line, 1.5), 1.5)
+    check("line_index_at 也认 TimedLine", line_index_at([curtain_line], 1.5), 0)
+
+    # ---- 本地歌词读取：.ttml > .lrc > 内嵌
     with tempfile.TemporaryDirectory(prefix="ncmgui-lyrics-") as tmp:
         local = Path(tmp) / "甲 - 歌.flac"
         local.write_bytes(b"x")
         check("都没有时读不到", read_local(local), "")
+        check("都没有时格式为空", read_local_lyrics(local), ("", ""))
         lrc_path(local).write_text("[00:01.00]本地\n", encoding="utf-8")
         check("优先读同名 .lrc", read_local(local), "[00:01.00]本地\n")
+        check("读本地时报告 lrc 格式", read_local_lyrics(local)[0], "lrc")
+        ttml_text = to_ttml(parse_yrc("[1000,1000](1000,500,0)逐(1500,500,0)字"))
+        ttml_path(local).write_text(ttml_text, encoding="utf-8")
+        check("同名 .ttml 优先于 .lrc", read_local(local), ttml_text)
+        check("读本地时报告 ttml 格式", read_local_lyrics(local)[0], "ttml")
+        ttml_path(local).unlink()
         lrc_path(local).unlink()
-        check("删掉 .lrc 后回到空（内嵌也读不出）", read_local(local), "")
+        check("删掉后回到空（内嵌也读不出）", read_local(local), "")
 
     # ---- 时间戳统一成两位小数。Elisa 25.04 把三位小数当百分秒算，能差出 9 秒，
     #      所以"写出去的文本里不许再有三位小数"是个必须守住的约束
@@ -1240,6 +2127,58 @@ def _selftest() -> int:
         check("空 lrc 文件不算已写过",
               satisfied([root / "乙 - 没写过.flac"], MODE_LRC), False)
 
+    # ---- 写 .ttml（逐字）
+    with tempfile.TemporaryDirectory(prefix="ncmgui-lyrics-") as tmp:
+        root = Path(tmp)
+        audio = root / "甲 - 歌.flac"
+        audio.write_bytes(b"x")
+        lyric = Lyric(
+            "[00:01.00]你好世界",
+            "[00:01.00]你好，世界",
+            "[1000,2000](1000,500,0)你(1500,500,0)好(2000,500,0)世(2500,500,0)界",
+        )
+        check("ttml_path 同名换后缀", ttml_path(audio).name, "甲 - 歌.ttml")
+        check("模式列表里有逐字 TTML", (("逐字 .ttml 文件", MODE_TTML) in MODES), True)
+        check("模式名", mode_label(MODE_TTML), "逐字 .ttml 文件")
+
+        outcome = apply("甲 - 歌", [audio], lyric, MODE_TTML)
+        dest = ttml_path(audio)
+        check("TTML 写入成功", outcome.status, "ok")
+        check("TTML 落盘", dest.is_file(), True)
+        check("TTML 模式不写 .lrc", lrc_path(audio).exists(), False)
+        written = dest.read_text("utf-8")
+        back = parse_ttml(written)
+        check("TTML 写出的行数是 1", len(back.lines), 1)
+        check("TTML 写出的逐字数", len(back.lines[0].words), 4)
+        check("TTML 写出的译文", back.lines[0].translation, "你好，世界")
+        check("TTML 写出的字时间", [(w.start, w.end) for w in back.lines[0].words],
+              [(1.0, 1.5), (1.5, 2.0), (2.0, 2.5), (2.5, 3.0)])
+        check("satisfied 认得出 TTML", satisfied([audio], MODE_TTML), True)
+        check("再写一次跳过（幂等）",
+              apply("甲 - 歌", [audio], lyric, MODE_TTML).status, "skipped")
+
+        dest.write_text("不是 TTML", encoding="utf-8")
+        check("坏 TTML 不算已写过", satisfied([audio], MODE_TTML), False)
+
+        # 接口只给了 yrc（没有 lrc）也能写出逐字 TTML
+        only_yrc = Lyric(yrc="[2000,1000](2000,500,0)只(2500,500,0)有")
+        check("只有 yrc 也能输出 TTML",
+              parse_ttml(only_yrc.to_ttml()).lines[0].text, "只有")
+        check("只有 yrc 的 Lyric 不算空", only_yrc.is_empty, False)
+        outcome = apply("甲 - 歌", [audio], only_yrc, MODE_TTML)
+        check("只有 yrc 也能落盘", outcome.status, "ok")
+        check("只有 yrc 时写出的字", len(parse_ttml(dest.read_text("utf-8")).lines[0].words), 2)
+
+        # 只有逐字歌词时，LRC 模式也要能降级写出带时间戳的文本
+        outcome = apply("甲 - 歌", [audio], only_yrc, MODE_LRC)
+        check("只有 yrc 时 LRC 降级写入", outcome.status, "ok")
+        lrc_text = lrc_path(audio).read_text("utf-8")
+        check("LRC 降级文本含时间戳", "[00:02.00]只有" in lrc_text, True)
+
+        check("TTML 模式对占位串是 empty",
+              apply("甲 - 歌", [audio], Lyric("[00:00.00]暂无歌词"), MODE_TTML).status,
+              "empty")
+
     # ---- 写标签（需要 mutagen）
     try:
         import mutagen  # noqa: F401
@@ -1339,6 +2278,20 @@ def _selftest() -> int:
               collect([("乙 - 二", 2)], fake.lyric, root, MODE_NONE).written, 0)
         check("批量：空输入直接返回",
               collect([], fake.lyric, root, MODE_LRC).total, 0)
+
+        (root / "戊 - 五.flac").write_bytes(b"x")
+        report = collect([("戊 - 五", 2)], fake.lyric, root, MODE_TTML, parallel=1)
+        check("批量：TTML 模式写入", report.written, 1)
+        check("批量：TTML 文件落盘", ttml_path(root / "戊 - 五.flac").is_file(), True)
+
+        # 关窗时置位：还没开始的任务不再请求接口
+        before = len(fake.calls)
+        report = collect(
+            [("戊 - 五", 2), ("乙 - 二", 2)], fake.lyric, root, MODE_TTML, parallel=1,
+            should_stop=lambda: True,
+        )
+        check("批量：should_stop 后不再请求接口", len(fake.calls) - before, 0)
+        check("批量：should_stop 后没有新写入", report.written, 0)
 
         report = collect([("甲 - 一", 1)], fake.lyric, root, MODE_LRC, parallel=1)
         check("problems 超过上限时截断并提示",

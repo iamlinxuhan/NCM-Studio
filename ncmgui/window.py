@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QHBoxLayout,
     QLabel,
@@ -21,7 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import APP_NAME, VERSION, ncmctl, theme
-from .config import Config
+from .config import Config, cleanup_private_tmp
 from .images import CoverStore
 from .mpris import MprisService
 from .pages.account import AccountPage
@@ -39,6 +41,7 @@ from .playback import PlaybackController
 from .widgets.card import Chip
 from .widgets.console import ConsolePanel, classify
 from .widgets.playbackbar import PlaybackBar
+from .workers import BackgroundTask
 
 #: (键, 图标, 名称, 页面类)
 NAV_ITEMS = (
@@ -82,6 +85,13 @@ class MainWindow(QMainWindow):
         self.mpris = MprisService(self.playback, self, parent=self)
         #: 从播放页「返回」时回到的导航页
         self._last_page_key = "account"
+
+        # 上次异常退出可能留下含二维码/Cookie 的临时文件；只清超过一小时的，
+        # 不会碰到同时运行的另一个实例正在用的文件
+        try:
+            cleanup_private_tmp()
+        except OSError:
+            pass
 
         self.setWindowTitle(f"{APP_NAME} · 第三方音乐播放器")
         self.setMinimumSize(920, 620)
@@ -635,7 +645,66 @@ class MainWindow(QMainWindow):
                 panels.append(panel)
         return panels
 
+    def _wait_critical_tasks(self) -> bool:
+        """等后台的歌词/封面写入收尾；返回 False 表示用户选择继续运行。"""
+        pending = BackgroundTask.pending_critical()
+        if not pending:
+            return True
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("正在写入歌词/封面")
+        box.setText(f"还有 {len(pending)} 个后台任务正在写入文件。")
+        box.setInformativeText(
+            "退出会先请求它们停下，最多等 5 秒。写入是原子的，最多是少处理几首，"
+            "不会留下半写文件。"
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        box.button(QMessageBox.StandardButton.Ok).setText("等它结束再退出")
+        box.button(QMessageBox.StandardButton.Cancel).setText("继续运行")
+        box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        if box.exec() != QMessageBox.StandardButton.Ok:
+            return False
+
+        for task in pending:
+            task.cancel()
+
+        deadline = time.monotonic() + 5.0
+        while BackgroundTask.pending_critical() and time.monotonic() < deadline:
+            # 封面任务结束后会接着启动歌词任务；每轮都对新出现的任务补一次
+            # cancel，否则那个任务会在关窗途中继续跑
+            for task in BackgroundTask.pending_critical():
+                task.cancel()
+            # 关键任务结束时要发 done/failed，槽函数在主线程；不转事件循环
+            # 它们会一直排队，界面看起来像卡死
+            QApplication.processEvents()
+            time.sleep(0.02)
+
+        if not BackgroundTask.pending_critical():
+            return True
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("后台任务仍未结束")
+        box.setText("等了 5 秒仍有任务在写文件。")
+        box.setInformativeText(
+            "现在退出不会损坏文件（写入是原子的），但当前这一批可能没处理完。"
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        box.button(QMessageBox.StandardButton.Ok).setText("仍然退出")
+        box.button(QMessageBox.StandardButton.Cancel).setText("继续等待")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        return box.exec() == QMessageBox.StandardButton.Ok
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if not self._wait_critical_tasks():
+            event.ignore()
+            return
+
         running = self._running_panels()
         if running:
             names = "、".join(panel.title for panel in running)

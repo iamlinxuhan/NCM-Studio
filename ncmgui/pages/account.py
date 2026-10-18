@@ -24,7 +24,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from .. import ncmctl
+from .. import config, ncmctl
 from ..widgets.card import Chip, accent_button, danger_button, ghost_button
 from ..widgets.form import FormCard
 from .base import BasePage
@@ -58,6 +58,9 @@ class AccountPage(BasePage):
         self._qr_runner = None
         self._qr_from_stdout: str | None = None
         self._qr_shown = False
+        #: 尚未删除的 Cookie 临时文件。正常路径随作业结束删除；退出或作业
+        #: 没能启动时由 shutdown() 兜底。
+        self._pending_temp: set[str] = set()
 
         self._build_status_card()
         self._build_qrcode_card()
@@ -214,7 +217,9 @@ class AccountPage(BasePage):
             return
 
         self._cleanup_qr_dir()
-        self._qr_dir = tempfile.mkdtemp(prefix="ncmctl-qr-")
+        self._qr_dir = tempfile.mkdtemp(
+            prefix="ncmctl-qr-", dir=str(config.private_tmp_dir())
+        )
         self._qr_shown = False
         self._qr_from_stdout = None
 
@@ -358,7 +363,8 @@ class AccountPage(BasePage):
         )
         self.phone_password = card.add_line(
             "密码", placeholder="留空则改用短信验证码", password=True,
-            hint="密码会以明文出现在进程参数里（ncmctl 本身的限制），介意的话请用扫码登录。",
+            hint="⚠️ 密码会作为命令行参数传递，可能被同机其他用户、进程监控工具或"
+                 "系统日志读取。若条件允许，请优先使用扫码登录、短信登录或 Cookie 导入。",
         )
 
         run = accent_button("登录")
@@ -414,6 +420,10 @@ class AccountPage(BasePage):
         if not file_path and not content:
             self.warn("请选择 Cookie 文件，或直接粘贴 Cookie 内容。")
             return
+        if file_path and not self.check_path(
+            self.cookie_file, "Cookie 文件", require_exists=True
+        ):
+            return
 
         temp_file: str | None = None
         if not file_path and content:
@@ -421,6 +431,7 @@ class AccountPage(BasePage):
             if not temp_file:
                 self.warn("无法写入临时文件，请改用文件导入。")
                 return
+            self._pending_temp.add(temp_file)
             file_path = temp_file
 
         argv = ncmctl.build_login_cookie(
@@ -431,14 +442,24 @@ class AccountPage(BasePage):
         runner = self.submit("Cookie 登录", argv)
         if runner and temp_file:
             # 进程读完就可以删了；留一点余量
-            runner.finished.connect(lambda *_: self._remove_temp(temp_file))
+            runner.finished.connect(lambda *_: self._discard_temp(temp_file))
+        elif temp_file:
+            # 作业没启动成功：ncmctl 根本不会读这个文件，立刻删掉
+            self._discard_temp(temp_file)
 
     @staticmethod
     def _write_secure_temp(content: str) -> str | None:
-        """把 Cookie 内容写进只有本人可读的临时文件。"""
+        """把 Cookie 内容写进只有本人可读的临时文件。
+
+        放在本程序自己的 ``config_dir()/tmp``（``0700``）下，而不是全局临时
+        目录：Cookie 等同于账号凭据，随机文件名挡不住同机用户枚举目录。
+        """
         handle = -1
         try:
-            handle, path = tempfile.mkstemp(prefix="ncmctl-cookie-", suffix=".txt")
+            handle, path = tempfile.mkstemp(
+                prefix="ncmctl-cookie-", suffix=".txt",
+                dir=str(config.private_tmp_dir()),
+            )
             _restrict_to_owner(handle)
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
                 handle = -1  # 交给 stream 管了，别再自己 close
@@ -456,6 +477,17 @@ class AccountPage(BasePage):
         except OSError:
             pass
 
+    def _discard_temp(self, path: str) -> None:
+        self._pending_temp.discard(path)
+        self._remove_temp(path)
+
+    def shutdown(self) -> None:
+        """关窗时清掉二维码目录与所有 Cookie 临时文件。"""
+        self._qr_timer.stop()
+        self._cleanup_qr_dir()
+        for path in tuple(self._pending_temp):
+            self._discard_temp(path)
+
     # --------------------------------------------------------- CookieCloud
 
     def _build_cookiecloud_card(self) -> None:
@@ -466,7 +498,8 @@ class AccountPage(BasePage):
         self.cc_uuid = card.add_line("UUID", value=self.cfg.get("login.cc_uuid", ""))
         self.cc_password = card.add_line(
             "密码", placeholder="CookieCloud 端的密码", password=True,
-            hint="会以明文出现在进程参数中。",
+            hint="⚠️ 密码会作为命令行参数传递，可能被同机其他用户、进程监控工具或"
+                 "系统日志读取。若条件允许，请优先使用扫码登录、短信登录或 Cookie 导入。",
         )
         self.cc_server = card.add_line(
             "服务器", value=self.cfg.get("login.cc_server", "http://127.0.0.1:8088"),

@@ -21,6 +21,10 @@ vendor/
 squashfs-root/
 AppDir/
 
+# 发布签名私钥（只应存在于 ~/.config/ncm-studio-release/，绝不入库）
+signing-key*.pem
+*.release-key
+
 # 编辑器
 .vscode/
 .idea/

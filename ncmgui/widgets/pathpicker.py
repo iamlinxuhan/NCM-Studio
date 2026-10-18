@@ -101,6 +101,22 @@ class PathPicker(QWidget):
         """当前路径是否会引发问题（不存在、类型不符、不可写）。"""
         return self._state()[0] != "bad"
 
+    def problem(self, require_exists: bool = False) -> str:
+        """返回阻止提交的原因；空串表示可以用。
+
+        :param require_exists: 即使控件本身允许「运行前自动创建」，也要求路径
+            已经存在（例如上传源、CA 证书这类不能由程序代建的输入）。
+        """
+        state, message = self._state()
+        if state == "bad":
+            return message
+        raw = self.edit.text().strip()
+        if require_exists and raw:
+            path = Path(os.path.expanduser(raw))
+            if not path.exists():
+                return "路径不存在"
+        return ""
+
     def reveal(self) -> None:
         """在文件管理器中打开当前路径。"""
         self._on_reveal()
@@ -129,26 +145,28 @@ class PathPicker(QWidget):
             if not path.exists():
                 return "warn", "目录尚不存在，运行前会自动创建"
             if not os.access(path, os.W_OK):
-                return "warn", "目录不可写，请检查权限"
+                return "bad", "目录不可写，请检查权限"
             return "ok", ""
 
         if self.mode == "file":
             if not path.exists():
-                return "warn", "文件不存在"
+                return "bad", "文件不存在"
             if path.is_dir():
                 return "bad", "这是一个目录，请选择文件"
             return "ok", ""
 
         if self.mode == "any":
             if not path.exists():
-                return "warn", "路径不存在"
+                return "bad", "路径不存在"
             return "ok", ""
 
         # save 模式
         if path.exists():
             return "ok", ""
         if not path.parent.exists():
-            return "warn", "上级目录不存在"
+            return "bad", "上级目录不存在"
+        if not os.access(path.parent, os.W_OK):
+            return "bad", "上级目录不可写，请检查权限"
         return "ok", ""
 
     def _on_text_changed(self, _text: str) -> None:

@@ -39,6 +39,13 @@ TEXT = "#e6edf7"        # 正文
 TEXT_DIM = "#7b8aa5"    # 次要文字
 TEXT_MUTE = "#4d5b75"   # 禁用 / 占位
 
+# 逐字歌词：未唱的字浅蓝，幕布扫过之后变深；LYRIC_CURTAIN_BAND 是软边宽度相对
+# 字号的倍数（实际取 max(10px, 字号 * 倍数)），保证边缘落在单个字内部时也看得
+# 出从左到右的连续渐变。
+LYRIC_UNSUNG = "#a9d6ff"
+LYRIC_SUNG = "#4a7fd0"
+LYRIC_CURTAIN_BAND = 0.8
+
 #: 日志级别对应的颜色
 LEVEL_COLORS = {
     "info": TEXT,
@@ -688,6 +695,8 @@ QScrollArea#LyricsArea, QWidget#LyricsBody {
     border: none;
 }
 
+/* 原文行由 LyricLineWidget 自绘（见 widgets/lyricline.py）；这里的
+   QLabel#LyricLine 只用于占位文字和译文行。 */
 QLabel#LyricLine {
     color: $TEXT_DIM;
     font-size: 15px;

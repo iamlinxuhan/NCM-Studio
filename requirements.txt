@@ -40,6 +40,14 @@ mutagen>=1.47
 # 实现，不需要 libdbus；Windows/macOS 用的是各自系统的媒体控件，不装它。
 dbus-next>=0.2.3; sys_platform == "linux"
 
+# 自动更新的签名验证（Ed25519）。
+#
+# 安装包与 SHA256SUMS 来自同一个 Release，只比哈希没有独立信任根。发布者用
+# 离线私钥给 SHA256SUMS 签名，本程序内置公钥验签，验不过就拒绝安装。
+# 私钥不进 CI、不进仓库。PyInstaller 自带 cryptography 的 hook，无需额外配置。
+# 缺失时程序照常运行，只是「设置 → 更新本程序」会拒绝自动安装并提示手动下载。
+cryptography>=42
+
 # 可选：二维码登录的兜底渲染。
 # ncmctl 会自己生成 qrcode.png，本程序优先直接显示它；
 # 只有在 PNG 没生成时，才用这个库把终端里打印的二维码内容渲染出来。

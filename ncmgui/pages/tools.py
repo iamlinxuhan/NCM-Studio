@@ -58,6 +58,8 @@ class ToolsPage(BasePage):
         if kind == "eapi" and not url:
             self.warn("EAPI 加密必须填写请求路由，例如 /eapi/v3/song/detail。")
             return
+        if not self.check_path(self.enc_output, "输出文件"):
+            return
         try:
             argv = ncmctl.build_crypto_encrypt(
                 self.enc_payload.toPlainText(),
@@ -113,6 +115,8 @@ class ToolsPage(BasePage):
         self.content.addWidget(card)
 
     def _run_decrypt(self) -> None:
+        if not self.check_path(self.dec_output, "输出文件"):
+            return
         try:
             argv = ncmctl.build_crypto_decrypt(
                 self.dec_cipher.toPlainText(),
@@ -168,6 +172,8 @@ class ToolsPage(BasePage):
         self.content.addWidget(card)
 
     def _run_curl(self) -> None:
+        if not self.check_path(self.curl_output, "输出文件"):
+            return
         try:
             argv = ncmctl.build_curl(
                 self.curl_method.text(),

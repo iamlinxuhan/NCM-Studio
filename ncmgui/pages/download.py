@@ -273,6 +273,9 @@ class DownloadPage(BasePage):
     def _output_dir(self) -> str:
         return self.output.path()
 
+    def _check_output(self) -> bool:
+        return self.check_path(self.output, "输出目录")
+
     def _start_task(self, work, busy_text: str, mode: str, fallback=None) -> None:
         """在后台跑一次解析。
 
@@ -375,6 +378,8 @@ class DownloadPage(BasePage):
             return
         if not self.require_login("查重"):
             return
+        if not self._check_output():
+            return
         self.save_config()
         output = self._output_dir()
         self._start_task(
@@ -389,6 +394,8 @@ class DownloadPage(BasePage):
             self.warn("请至少填写一个歌曲 ID 或链接。")
             return
         if not self.require_login("下载"):
+            return
+        if not self._check_output():
             return
 
         if self.level.currentData() == "hires":
@@ -436,6 +443,8 @@ class DownloadPage(BasePage):
 
     def _download_liked(self) -> None:
         if not self.require_login("下载我喜欢的音乐"):
+            return
+        if not self._check_output():
             return
         self.save_config()
         output = self._output_dir()
@@ -597,9 +606,11 @@ class DownloadPage(BasePage):
                     f"封面 {done}/{total} · {base}"
                 ),
                 on_note=signals.note.emit,
+                should_stop=task.cancel_event.is_set,
             )
 
-        task = BackgroundTask(work, parent=self)
+        # critical：关窗时最多等它 5 秒，别让标签写到一半就退出
+        task = BackgroundTask(work, parent=self, critical=True)
         self._cover_task = task
         task.done.connect(lambda report, p=panel: self._on_covers_done(p, report, then))
         task.failed.connect(lambda message, p=panel: self._on_covers_failed(p, message, then))
@@ -650,9 +661,10 @@ class DownloadPage(BasePage):
                     f"歌词 {done}/{total} · {base}"
                 ),
                 on_note=signals.note.emit,
+                should_stop=task.cancel_event.is_set,
             )
 
-        task = BackgroundTask(work, parent=self)
+        task = BackgroundTask(work, parent=self, critical=True)
         self._lyric_task = task
         task.done.connect(lambda report, p=panel: self._on_lyrics_done(p, report))
         task.failed.connect(lambda message, p=panel: self._on_lyrics_failed(p, message))

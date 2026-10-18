@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,8 +41,62 @@ def _config_root() -> Path:
 
 
 def config_dir() -> Path:
-    """返回本程序的配置目录，按平台惯例走。"""
-    return _config_root() / APP_DIR_NAME
+    """返回本程序的配置目录，按平台惯例走。
+
+    POSIX 上建目录时用 ``0700``：配置里存着下载路径、代理、账号标识等，
+    同机其他用户没有理由能读。
+    """
+    return _private_dir(_config_root() / APP_DIR_NAME)
+
+
+def _private_dir(path: Path) -> Path:
+    """建立（或收紧）一个只有本人可读写的目录；失败不抛异常。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "posix":
+            os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
+def private_tmp_dir() -> Path:
+    """本程序专用的临时目录（``config_dir()/tmp``，POSIX 下 ``0700``）。
+
+    二维码目录、Cookie 临时文件这类东西含登录凭据，不能落在全局 ``/tmp``：
+    那儿的目录名可被同机其他用户枚举，默认权限也未必只给本人。
+    """
+    return _private_dir(config_dir() / "tmp")
+
+
+def cleanup_private_tmp(max_age: float = 3600.0) -> int:
+    """删掉 ``private_tmp_dir()`` 里超龄的二维码/Cookie 残留，返回删除数。
+
+    正常退出时页面会自己清理；这里兜住崩溃、断电或强制结束留下的东西。
+    只处理本程序自己的前缀，不碰目录里的其它文件。
+    """
+    root = private_tmp_dir()
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+
+    deadline = time.time() - max(0.0, float(max_age))
+    removed = 0
+    for entry in entries:
+        if not entry.name.startswith(("ncmctl-qr-", "ncmctl-cookie-")):
+            continue
+        try:
+            if entry.lstat().st_mtime > deadline:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def config_file() -> Path:
@@ -121,13 +177,20 @@ def _migrate_legacy_config(target: Path) -> None:
     download = data.get("download")
     if isinstance(download, dict) and download.get("output") == str(_legacy_music_dir()):
         download["output"] = str(default_music_dir())
+    tmp = target.with_name(target.name + ".tmp")
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
+        _private_dir(target.parent)
+        tmp.write_text(
             json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
+        if os.name == "posix":
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
     except OSError:
-        pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def default_ncm_dir() -> Path:
@@ -231,17 +294,27 @@ class Config:
         self._data = merged
 
     def save(self) -> bool:
-        """原子写入配置文件；失败时返回 False 而不是抛异常。"""
+        """原子写入配置文件；失败时返回 False 而不是抛异常。
+
+        配置里可能有账号标识、代理与本地路径，POSIX 下建目录用 ``0700``、
+        文件用 ``0600``。Windows 依赖用户目录本身的 ACL。
+        """
+        tmp = self.path.with_name(self.path.name + ".tmp")
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_name(self.path.name + ".tmp")
+            _private_dir(self.path.parent)
             tmp.write_text(
                 json.dumps(self._data, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
+            if os.name == "posix":
+                os.chmod(tmp, 0o600)
             os.replace(tmp, self.path)
             return True
         except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
             return False
 
     def get(self, key: str, default: Any = None) -> Any:

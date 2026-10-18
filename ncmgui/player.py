@@ -701,6 +701,9 @@ class MpvPlayer:
                 stderr=subprocess.PIPE,
                 env=env,
                 creationflags=creationflags,
+                # POSIX 下让 mpv 自成一个会话：终端里按 Ctrl+C 时信号不会
+                # 绕过本程序直接打到播放器，留下一个「界面还在、声音没了」的状态
+                start_new_session=not _IS_WINDOWS,
             )
         except OSError as exc:
             self._cleanup_endpoint()

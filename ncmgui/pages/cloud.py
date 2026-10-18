@@ -79,6 +79,8 @@ class CloudPage(BasePage):
         if not source:
             self.warn("请先选择要上传的文件或文件夹。")
             return
+        if not self.check_path(self.source, "上传源", require_exists=True):
+            return
         if not self.require_login("上传到云盘"):
             return
 

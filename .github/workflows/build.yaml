@@ -107,8 +107,12 @@ jobs:
           python -m ncmgui.covers
           # 封面地址改写与 LRU 缓存
           python -m ncmgui.images
-          # Release 版本比较、资产名、SHA256SUMS 解析、安装形态分支
+          # Release 版本比较、资产名、SHA256SUMS 解析、Ed25519 验签、安装形态分支
           python -m ncmgui.updater
+          # 原子写失败回滚、无临时文件残留
+          python -m ncmgui.fsutil
+          # 代理串规范化
+          python -m ncmgui.netutil
 
       - name: 打包
         env:
@@ -329,11 +333,16 @@ jobs:
           } > RELEASE_NOTES.md
           cat RELEASE_NOTES.md
 
-      - name: 创建 Release
+      # 刻意建成草稿：CI 只有仓库写权限，拿不到离线签名私钥（也不该拿）。
+      # 草稿不会被 releases/latest 返回；本地跑 scripts/release_sign.py 给
+      # SHA256SUMS 签完名、复核通过后才把草稿转正。这样未签名或签名出错的
+      # 版本永远不会进入自动更新链。
+      - name: 创建 Release（草稿）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            --draft \
             --title "$GITHUB_REF_NAME" \
             --notes-file RELEASE_NOTES.md \
             dist/*

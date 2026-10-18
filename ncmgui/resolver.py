@@ -708,15 +708,23 @@ class Resolver:
             raise ResolveError(f"歌手 {artist_id} 没有取到任何作品")
         return ids
 
+    def lyric_v1(self, song_id: int) -> dict:
+        """``LyricV1``：比旧 ``Lyric`` 多一份 ``yrc``（逐字时间）。"""
+        return self._curl("LyricV1", {"id": int(song_id)})
+
     def lyric(self, song_id: int) -> dict:
-        """取一首歌的歌词，原样返回 ``Lyric`` 接口的响应。
+        """取一首歌的歌词，优先 ``LyricV1``，拿不到逐字数据再退旧 ``Lyric``。
 
-        响应里有三份：``lrc``（原文）、``tlyric``（中文翻译）、``romalrc``（罗马音），
-        整理它们的是 :mod:`ncmgui.lyrics` —— 这一层只负责把请求发出去。
-
-        放在这里而不是让调用方直接用 ``_curl``，是因为地址是 ``int64`` 而别的方法
-        有的是字符串（``PlaylistDetail.id``），这种细节不该散到外面去。
+        ``LyricV1`` 是较新的接口，旧版 ncmctl 可能没有；接口不认、网络失败或
+        返回的三份歌词全空时都回退，不让“逐字”这个增强把原来的歌词功能弄坏。
+        整理响应的是 :mod:`ncmgui.lyrics` —— 这一层只负责把请求发出去。
         """
+        try:
+            payload = self.lyric_v1(song_id)
+        except ResolveError:
+            payload = None
+        if _has_lyric(payload):
+            return payload  # type: ignore[return-value]
         return self._curl("Lyric", {"id": int(song_id)})
 
     def song_details(self, ids: Sequence[int], batch: int = DETAIL_BATCH) -> list[Song]:
@@ -833,6 +841,27 @@ def _last_line(proc: subprocess.CompletedProcess) -> str:
 # --------------------------------------------------------------------------- #
 # 自检
 # --------------------------------------------------------------------------- #
+
+def _has_lyric(payload: object) -> bool:
+    """响应里有没有任何一份非空歌词（不判断占位串，那是 lyrics 模块的事）。
+
+    不导入 :mod:`ncmgui.lyrics`：后者反向依赖本模块的 ``VARIANT_RE``，互相
+    import 会成环。
+    """
+    if not isinstance(payload, dict):
+        return False
+    for key in ("lrc", "yrc", "tlyric"):
+        node = payload.get(key)
+        if isinstance(node, dict):
+            text = node.get("lyric") or ""
+        elif isinstance(node, str):
+            text = node
+        else:
+            text = ""
+        if str(text).strip():
+            return True
+    return False
+
 
 def _selftest() -> int:
     """不需要网络，只验证命名规则、目标解析与查重逻辑。"""
@@ -1101,6 +1130,49 @@ def _selftest() -> int:
     check("song_url 的 id 是字符串", fake.calls[0][1]["id"], "123")
     check("song_url 透传音质", fake.calls[0][1]["level"], "lossless")
     check("song_url 返回 URL", result.url, "u")
+
+    # ---- 歌词：LyricV1 优先，拿不到逐字数据时回退旧 Lyric
+    class _FakeLyric(Resolver):
+        def __init__(self, v1_result=None, v1_error=False) -> None:
+            self.calls: list[tuple[str, dict]] = []
+            self.v1_result = v1_result
+            self.v1_error = v1_error
+
+        def _curl(self, method: str, data: dict) -> dict:
+            self.calls.append((method, data))
+            if method == "LyricV1":
+                if self.v1_error:
+                    raise ResolveError("接口不支持")
+                return self.v1_result  # type: ignore[return-value]
+            return {"lrc": {"lyric": "[00:01.00]旧接口"}}
+
+    v1_payload = {
+        "lrc": {"lyric": "[00:01.00]逐字歌"},
+        "yrc": {"lyric": "[1000,2000](1000,500,0)逐(1500,500,0)字"},
+        "tlyric": {"lyric": "[00:01.00]译文"},
+    }
+    fake = _FakeLyric(v1_payload)
+    got = fake.lyric(42)
+    check("歌词优先调 LyricV1", [call[0] for call in fake.calls], ["LyricV1"])
+    check("歌词 id 是整数", fake.calls[0][1]["id"], 42)
+    check("LyricV1 有数据时直接用", got is v1_payload, True)
+
+    fake = _FakeLyric({"lrc": {"lyric": ""}, "yrc": {"lyric": ""}, "tlyric": {"lyric": ""}})
+    got = fake.lyric(43)
+    check("LyricV1 全空时回退旧接口",
+          [call[0] for call in fake.calls], ["LyricV1", "Lyric"])
+    check("回退后拿到旧接口歌词", got["lrc"]["lyric"], "[00:01.00]旧接口")
+
+    fake = _FakeLyric(v1_error=True)
+    got = fake.lyric(44)
+    check("LyricV1 报错时回退旧接口",
+          [call[0] for call in fake.calls], ["LyricV1", "Lyric"])
+    check("报错回退后仍拿到歌词", got["lrc"]["lyric"], "[00:01.00]旧接口")
+
+    check("_has_lyric 认字符串字段",
+          _has_lyric({"lrc": "[00:01.00]x"}), True)
+    check("_has_lyric 忽略空字段",
+          _has_lyric({"lrc": {"lyric": "  "}, "yrc": {"lyric": ""}}), False)
 
     # ---- 目录不存在时不应抛错
     check("不存在的目录返回空集合", existing_bases("/nonexistent/nope"), set())

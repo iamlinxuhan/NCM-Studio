@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
 from ncmgui.config import Config, default_music_dir  # noqa: E402
+from ncmgui.lyrics import TimedLine, Word  # noqa: E402
 from ncmgui.resources import ICON_PATH  # noqa: E402
 from ncmgui.window import MainWindow  # noqa: E402
 
@@ -290,8 +291,9 @@ def _demo_songs():
     ]
 
 
-def _demo_lyrics() -> list[tuple[float, str]]:
-    return [
+def _demo_lyrics() -> list[TimedLine]:
+    """截图用的歌词。当前句带逐字时间，好让幕布正好停在「以」字中间。"""
+    items = [
         (0.0, "夜航"),
         (12.0, "作词：沈以诚"),
         (18.0, "作曲：沈以诚"),
@@ -311,6 +313,21 @@ def _demo_lyrics() -> list[tuple[float, str]]:
         (141.0, "风把云吹向更远的海面"),
         (150.0, "我数着舷窗外的星"),
     ]
+
+    lines: list[TimedLine] = []
+    for index, (start, text) in enumerate(items):
+        end = items[index + 1][0] if index + 1 < len(items) else start + 5.0
+        if text == "如果夜色可以慢一点":
+            # 9 个字均分 8.5 秒；66.7 秒时幕布走到第 6 个字「以」的中间
+            step = (end - start) / len(text)
+            words = tuple(
+                Word(start + i * step, start + (i + 1) * step, char, i, i + 1)
+                for i, char in enumerate(text)
+            )
+            lines.append(TimedLine(start, end, text, words))
+        else:
+            lines.append(TimedLine(start, end, text))
+    return lines
 
 
 def _screenshot(window: MainWindow, target: str) -> int:
@@ -341,9 +358,9 @@ def _screenshot(window: MainWindow, target: str) -> int:
     songs = _demo_songs()
     cover = _demo_cover()
     page = window.player_page
-    page.set_demo(songs[0], cover, _demo_lyrics(), position=67.0)
+    page.set_demo(songs[0], cover, _demo_lyrics(), position=66.7)
     window.playback_bar.set_demo(
-        songs[0], position=67.0, duration=222.0, volume=70, mode="loop"
+        songs[0], position=66.7, duration=222.0, volume=70, mode="loop"
     )
     window.open_player_page(queue=False)
     QApplication.processEvents()
@@ -359,7 +376,7 @@ def _screenshot(window: MainWindow, target: str) -> int:
         cover,
         _demo_lyrics(),
         queue=songs,
-        position=67.0,
+        position=66.7,
     )
     window.open_player_page(queue=True)
     for _ in range(3):

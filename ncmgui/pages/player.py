@@ -46,6 +46,7 @@ from ..playback import (
 )
 from ..resolver import Resolver, Song
 from ..widgets.card import Card, ghost_button
+from ..widgets.lyricline import LyricLineWidget
 from ..widgets.vinyl import VinylWidget
 from ..workers import BackgroundTask
 from .base import BasePage
@@ -136,8 +137,8 @@ class PlayerPage(BasePage):
         self._current_song: Song | None = None
         self._lyric_generation = 0
         self._lyric_task: BackgroundTask | None = None
-        self._lyric_lines: list[tuple[float, str]] = []
-        self._lyric_rows: list[tuple[QLabel, QLabel | None]] = []
+        self._lyric_lines: list[lyrics.TimedLine] = []
+        self._lyric_rows: list[tuple[LyricLineWidget, QLabel | None]] = []
         self._current_line = -1
         self._follow_until = 0.0
         self._scroll_anim: QPropertyAnimation | None = None
@@ -145,6 +146,13 @@ class PlayerPage(BasePage):
         self._demo_mode = False
         self._split_applied = False
         self._split_dirty = False
+        # 逐字幕布：播放位置事件只用来对锚点，真正的推进靠这个 30ms 定时器。
+        # 只在“正在播放 + 当前行有逐字数据”时跑，暂停/切歌/无逐字立刻停。
+        self._position_anchor: tuple[float, float] | None = None
+        self._word_timer = QTimer(self)
+        self._word_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._word_timer.setInterval(30)
+        self._word_timer.timeout.connect(self._tick_words)
         # 拖动时每像素都写盘没必要，松手 400ms 后再记一次
         self._split_timer = QTimer(self)
         self._split_timer.setSingleShot(True)
@@ -307,6 +315,10 @@ class PlayerPage(BasePage):
 
     def _on_state_changed(self, state: str) -> None:
         playing = state == STATE_PLAYING
+        if not playing:
+            # 暂停/缓冲期间定时器停掉；锚点也清空，恢复播放时按 mpv 的实际位置重开，
+            # 免得把暂停的时长算进幕布推进里
+            self._position_anchor = None
         self.vinyl.set_playing(playing)
         self.state_label.setText(
             {
@@ -317,6 +329,7 @@ class PlayerPage(BasePage):
                 STATE_ERROR: "播放失败",
             }.get(state, state)
         )
+        self._update_word_timer()
 
     def _refresh_meta(self) -> None:
         level = self.playback.level
@@ -336,7 +349,43 @@ class PlayerPage(BasePage):
 
     def _on_position_changed(self, position: float, _duration: float) -> None:
         # 进度条与时间只在底部常驻播放条上有一份；这一页用位置来对齐歌词
-        self._update_current_line(position)
+        try:
+            value = float(position)
+        except (TypeError, ValueError):
+            return
+        # mpv 的位置事件是离散的；记下锚点，定时器在两次事件之间插值，
+        # 幕布才不会一顿一顿地跳。
+        self._position_anchor = (value, time.monotonic())
+        self._update_current_line(value)
+        self._update_word_timer()
+
+    def _tick_words(self) -> None:
+        """30ms 推进一次幕布位置，只重绘当前行。"""
+        if self._position_anchor is None:
+            self._word_timer.stop()
+            return
+        anchor, stamp = self._position_anchor
+        self._update_current_line(anchor + (time.monotonic() - stamp))
+
+    def _update_word_timer(self) -> None:
+        """按“是否在播放 + 当前行有没有逐字数据”启停定时器。"""
+        if self._demo_mode or self.playback.state != STATE_PLAYING:
+            self._word_timer.stop()
+            return
+        index = self._current_line
+        has_words = (
+            0 <= index < len(self._lyric_lines)
+            and bool(self._lyric_lines[index].words)
+        )
+        if not has_words:
+            self._word_timer.stop()
+            return
+        now = time.monotonic()
+        if self._position_anchor is None or now - self._position_anchor[1] > 0.5:
+            position = getattr(self.playback, "position", 0.0) or 0.0
+            self._position_anchor = (float(position), now)
+        if not self._word_timer.isActive():
+            self._word_timer.start()
 
     # ---------------------------------------------------------------- 歌词
 
@@ -350,14 +399,10 @@ class PlayerPage(BasePage):
 
         local = str(getattr(song, "path", "") or "")
         if local:
-            text = lyrics.read_local(Path(local))
-            # 下载时译文被插在原文下一行（同一时间戳），这里拆回去，
-            # 让本地歌词也用和在线歌词一样的「原文 + 小号译文」排版
-            original, translated = lyrics.split_translation(text)
-            self._apply_payload(
-                {"lrc": {"lyric": original}, "tlyric": {"lyric": translated}},
-                generation,
-            )
+            # .ttml > .lrc > 内嵌；parse_any 会自己区分 TTML / LRC，
+            # 本地和在线走同一套解析与渲染
+            _format, text = lyrics.read_local_lyrics(Path(local))
+            self._apply_payload(text, generation)
             return
 
         if self.window.defer_page_loads:
@@ -384,21 +429,15 @@ class PlayerPage(BasePage):
     def _apply_payload(self, payload, generation: int) -> None:
         if generation != self._lyric_generation:
             return
-        parsed = lyrics.parse(payload)
-        if lyrics.has_content(parsed.original):
-            lines = lyrics.parse_timed_lines(parsed.original)
-            translations = lyrics.translation_map(parsed.translation)
-        elif lyrics.has_content(parsed.translation):
-            lines = lyrics.parse_timed_lines(parsed.translation)
-            translations = {}
-        else:
+        try:
+            parsed = lyrics.parse_any(payload)
+        except lyrics.LyricsError:
+            self._clear_lyrics("歌词解析失败")
+            return
+        if not parsed.lines:
             self._clear_lyrics("暂无歌词")
             return
-
-        if not lines:
-            self._clear_lyrics("暂无歌词")
-            return
-        self._build_lyrics(lines, translations)
+        self._build_lyrics(parsed.lines)
 
     def _lyric_failed(self, generation: int) -> None:
         if generation != self._lyric_generation:
@@ -406,6 +445,10 @@ class PlayerPage(BasePage):
         self._clear_lyrics("歌词获取失败")
 
     def _clear_lyrics(self, placeholder: str = "") -> None:
+        self._word_timer.stop()
+        self._position_anchor = None
+        self._current_line = -1
+        self._lyric_lines = []
         while self.lyric_layout.count():
             item = self.lyric_layout.takeAt(0)
             widget = item.widget()
@@ -426,25 +469,19 @@ class PlayerPage(BasePage):
             self.lyric_layout.addWidget(label)
         self.lyric_layout.addStretch(1)
 
-    def _build_lyrics(self, lines: list[tuple[float, str]], translations: dict[int, str]) -> None:
+    def _build_lyrics(self, lines: Sequence[lyrics.TimedLine]) -> None:
         self._clear_lyrics()
         self._lyric_lines = list(lines)
         self._current_line = -1
 
-        for seconds, body in lines:
-            original = QLabel(body)
-            original.setObjectName("LyricLine")
-            original.setProperty("current", "false")
-            original.setProperty("translation", "false")
-            original.setWordWrap(True)
-            original.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for line in self._lyric_lines:
+            original = LyricLineWidget(line)
             # 插在最后的弹簧之前
             self.lyric_layout.insertWidget(self.lyric_layout.count() - 1, original)
 
-            translated = translations.get(int(round(seconds * 100)))
             translation_label = None
-            if translated:
-                translation_label = QLabel(translated)
+            if line.translation:
+                translation_label = QLabel(line.translation)
                 translation_label.setObjectName("LyricLine")
                 translation_label.setProperty("current", "false")
                 translation_label.setProperty("translation", "true")
@@ -457,33 +494,37 @@ class PlayerPage(BasePage):
 
         self._update_current_line(self.playback.position)
 
-    def _update_current_line(self, position: float) -> None:
+    def _update_current_line(self, position: float | None) -> None:
         if not self._lyric_lines:
             return
         index = lyrics.line_index_at(self._lyric_lines, position)
-        if index == self._current_line:
-            return
 
-        if 0 <= self._current_line < len(self._lyric_rows):
-            self._set_line_state(self._lyric_rows[self._current_line], False)
-        self._current_line = index
-        if index < 0 or index >= len(self._lyric_rows):
-            return
+        if index != self._current_line:
+            if 0 <= self._current_line < len(self._lyric_rows):
+                self._set_line_state(self._lyric_rows[self._current_line], False)
+            self._current_line = index
+            if 0 <= index < len(self._lyric_rows):
+                row = self._lyric_rows[index]
+                self._set_line_state(row, True)
+                if time.monotonic() >= self._follow_until:
+                    self._scroll_to(row[0])
+            self._update_word_timer()
 
-        row = self._lyric_rows[index]
-        self._set_line_state(row, True)
-        if time.monotonic() >= self._follow_until:
-            self._scroll_to(row[0])
+        # 行号没变也要把位置交给当前行：幕布在同一个字的内部持续推进
+        if 0 <= index < len(self._lyric_rows):
+            self._lyric_rows[index][0].set_position(position)
 
-    def _set_line_state(self, row: tuple[QLabel, QLabel | None], current: bool) -> None:
-        for label in row:
-            if label is None:
-                continue
-            label.setProperty("current", "true" if current else "false")
-            label.style().unpolish(label)
-            label.style().polish(label)
+    def _set_line_state(
+        self, row: tuple[LyricLineWidget, QLabel | None], current: bool
+    ) -> None:
+        original, translation = row
+        original.set_current(current)
+        if translation is not None:
+            translation.setProperty("current", "true" if current else "false")
+            translation.style().unpolish(translation)
+            translation.style().polish(translation)
 
-    def _scroll_to(self, label: QLabel) -> None:
+    def _scroll_to(self, label: QWidget) -> None:
         bar = self.lyric_scroll.verticalScrollBar()
         target = (
             label.y()
@@ -632,7 +673,7 @@ class PlayerPage(BasePage):
         self,
         song: Song,
         cover: QPixmap | None,
-        lines: list[tuple[float, str]],
+        lines: Sequence[lyrics.TimedLine],
         *,
         queue: Sequence[Song] = (),
         position: float = 0.0,
@@ -642,7 +683,7 @@ class PlayerPage(BasePage):
         self._on_track_changed(song)
         if cover is not None:
             self.vinyl.set_art(cover)
-        self._build_lyrics(lines, {})
+        self._build_lyrics(lines)
         self._on_state_changed(STATE_PLAYING)
         # 截图不等 450ms 的唱臂动画，否则会拍到停在半路的样子
         self.vinyl.finish_arm_animation()

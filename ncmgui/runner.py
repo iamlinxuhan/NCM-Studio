@@ -79,6 +79,20 @@ _PARTIAL_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*|\][^\x07\x1b]*)?$")
 _PTY_ROWS = 40
 _PTY_COLS = 120
 
+#: 会向子进程注入代码/库的环境变量。ncmctl 是独立程序，不需要它们；
+#: 从被污染的终端启动本程序时，这些变量会把任意 .so 或 Python 模块带进子进程。
+_INJECTION_ENV = (
+    "LD_PRELOAD",
+    "DYLD_INSERT_LIBRARIES",
+    "PYTHONPATH",
+    "PYTHONHOME",
+)
+
+
+def clean_env(env) -> dict[str, str]:
+    """复制一份环境变量，剔除可注入类变量；其余（PATH、HOME、库路径）保留。"""
+    return {key: value for key, value in env.items() if key not in _INJECTION_ENV}
+
 
 # --------------------------------------------------------------------------- #
 # 伪终端会话：POSIX 与 Windows 两套实现背后的窄接口
@@ -384,8 +398,12 @@ class JobRunner(QObject):
 
     @property
     def command_line(self) -> str:
-        """可直接粘贴回终端执行的完整命令。"""
-        return ncmctl.describe([self.binary, *self.argv])
+        """可直接粘贴回终端执行的完整命令。
+
+        密码、请求头、XEAPI 密钥等参数的值会显示成 ``******``：它们本来就会
+        出现在进程列表里，再写进界面、剪贴板和导出的日志只会扩大暴露面。
+        """
+        return ncmctl.describe(ncmctl.redact_argv([self.binary, *self.argv]))
 
     @property
     def elapsed(self) -> float:
@@ -406,8 +424,8 @@ class JobRunner(QObject):
         self._partial = ""
         self._ansi_carry = ""
 
-        env = os.environ.copy()
-        env.update(self.extra_env)
+        env = clean_env(os.environ)
+        env.update(clean_env(self.extra_env))
 
         session: _PtySession | None = None
         message = ""

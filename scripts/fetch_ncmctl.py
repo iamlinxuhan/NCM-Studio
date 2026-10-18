@@ -11,7 +11,8 @@
 写死在仓库里，上游动了任何字节这里就会失败。
 
 升级到新版本时：改 ``NCMCTL_VERSION``，跑一次脚本让它报出新的实际校验和，填进
-``_CHECKSUMS``。
+``_CHECKSUMS``。``_CHECKSUMS`` 是仓库内的信任锚，改它的提交必须单独走代码评审 ——
+否则「把一个来路不明的二进制钉进来」和正常升级在 diff 里长得一模一样。
 """
 
 from __future__ import annotations

@@ -124,5 +124,20 @@ class BasePage(QWidget):
     def warn(self, message: str, title: str = "无法执行") -> None:
         QMessageBox.warning(self, title, message)
 
+    def check_path(self, picker, label: str, require_exists: bool = False) -> bool:
+        """提交前检查一个 PathPicker；有问题时弹提示并返回 False。
+
+        :param require_exists: 路径必须已经存在（上传源、证书、配置文件）。
+        """
+        checker = getattr(picker, "problem", None)
+        problem = checker(require_exists=require_exists) if callable(checker) else ""
+        if not problem:
+            return True
+        self.warn(f"{label}：{problem}")
+        edit = getattr(picker, "edit", None)
+        if edit is not None:
+            edit.setFocus()
+        return False
+
     def toast(self, message: str) -> None:
         self.window.toast(message)

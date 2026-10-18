@@ -94,10 +94,48 @@ def describe(argv: list[str]) -> str:
     """把参数数组渲染成可直接粘贴到终端的一行，用于日志回显。
 
     引号规则跟着平台走，这样「复制命令」按钮拿到的字符串在目标平台上能直接跑。
+    **不会脱敏** —— 需要回显或复制时先过一遍 :func:`redact_argv`。
     """
     if _IS_WINDOWS:
         return subprocess.list2cmdline(argv)
     return shlex.join(argv)
+
+
+#: 后面跟敏感值的参数。这些值仍会原样交给 ncmctl（接口只支持从 argv 读），
+#: 但不能进入界面回显、复制命令或导出日志。
+SENSITIVE_FLAGS = frozenset({
+    "--password", "-p",
+    "--headers",
+    "--xeapi-session-key",
+    "--dynamic-key",
+})
+
+REDACTED = "******"
+
+
+def redact_argv(argv: list[str]) -> list[str]:
+    """把敏感参数的值替换成 ``******``，参数结构保持不变。
+
+    同时处理 ``--flag value`` 与 ``--flag=value`` 两种写法。真实 argv 不受影响：
+    这只用于显示，执行时仍用原始列表。
+    """
+    out: list[str] = []
+    hide_next = False
+    for token in argv:
+        if hide_next:
+            out.append(REDACTED)
+            hide_next = False
+            continue
+        name, separator, _value = token.partition("=")
+        if name in SENSITIVE_FLAGS:
+            if separator:
+                out.append(f"{name}={REDACTED}")
+            else:
+                out.append(token)
+                hide_next = True
+            continue
+        out.append(token)
+    return out
 
 
 def parse_targets(text: str) -> list[str]:
@@ -173,13 +211,23 @@ def find_binary(explicit: str = "") -> str | None:
     """
     explicit = (explicit or "").strip()
     if explicit:
-        found = shutil.which(explicit)
-        if found:
-            return found
         candidate = Path(explicit).expanduser()
-        # 显式指定了却找不到，如实返回 None 让界面报错。不能悄悄退回随包的那份，
-        # 否则用户填错的路径永远发现不了
-        return str(candidate) if _is_executable(candidate) else None
+        # 裸名字（不含分隔符、不是绝对路径）只允许 ncmctl / ncmctl.exe 走 PATH。
+        # 不能把用户随手填的 "evil" 当成命令名去 PATH 里解析 —— 那等于让设置页
+        # 变成一个任意命令启动器。
+        looks_like_path = (
+            candidate.is_absolute()
+            or explicit.startswith("~")
+            or "/" in explicit
+            or "\\" in explicit
+        )
+        if looks_like_path:
+            # 显式指定了却找不到，如实返回 None 让界面报错。不能悄悄退回随包的那份，
+            # 否则用户填错的路径永远发现不了
+            return str(candidate) if _is_executable(candidate) else None
+        if explicit in ("ncmctl", "ncmctl.exe"):
+            return shutil.which(explicit)
+        return None
 
     bundled = bundled_binary()
     if bundled:
@@ -899,6 +947,48 @@ def _selftest() -> int:
         build_sign(False, GlobalOpts(home="/srv/h", config="/c.yaml", debug=True)),
         ["sign", "--home", "/srv/h", "-c", "/c.yaml", "--debug"],
     )
+
+    # 凭据遮罩
+    check(
+        "密码分离写法被遮罩",
+        redact_argv(["login", "phone", "--password", "hunter2", "188"]),
+        ["login", "phone", "--password", REDACTED, "188"],
+    )
+    check(
+        "密码等号写法被遮罩",
+        redact_argv(["login", "phone", "--password=hunter2"]),
+        ["login", "phone", f"--password={REDACTED}"],
+    )
+    check(
+        "多个敏感参数都遮罩",
+        redact_argv(["-p", "a", "--headers", '{"Cookie":"x"}',
+                     "--xeapi-session-key", "k", "--dynamic-key", "d", "ok"]),
+        ["-p", REDACTED, "--headers", REDACTED,
+         "--xeapi-session-key", REDACTED, "--dynamic-key", REDACTED, "ok"],
+    )
+    check(
+        "普通参数不受影响",
+        redact_argv(["download", "--output", "/music", "123"]),
+        ["download", "--output", "/music", "123"],
+    )
+
+    # 二进制定位：只接受带路径的显式值，裸名字只认 ncmctl
+    with tempfile.TemporaryDirectory(prefix="ncmgui-bin-") as tmp:
+        fake = Path(tmp) / "evil"
+        fake.write_bytes(b"#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        real = Path(tmp) / "my-ncmctl"
+        real.write_bytes(b"#!/bin/sh\nexit 0\n")
+        real.chmod(0o755)
+
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = tmp + os.pathsep + old_path
+        try:
+            check("裸名字不解析任意命令", find_binary("evil"), None)
+            check("显式完整路径可用", find_binary(str(real)), str(real))
+        finally:
+            os.environ["PATH"] = old_path
+        check("填错路径不悄悄回退", find_binary(str(Path(tmp) / "missing")), None)
 
     # 目标解析
     parsed = parse_targets("2161154646\n# 注释\n2161154646  https://music.163.com/song?id=1,\n")

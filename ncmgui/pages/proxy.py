@@ -75,7 +75,8 @@ class ProxyPage(BasePage):
         self.xeapi_key = xeapi.add_line(
             "Session Key", value=self.cfg.get("proxy.xeapi_key", ""),
             placeholder="16 / 24 / 32 字节的 ASCII 密钥", password=True,
-            hint="会以明文出现在进程参数中，仅在本机可信环境下使用。",
+            hint="⚠️ Session Key 会作为命令行参数传递，可能被同机其他用户、"
+                 "进程监控工具或系统日志读取。请只在可信的本机环境使用。",
         )
         self.xeapi_state = xeapi.add_path(
             "状态文件", mode="file", value=self.cfg.get("proxy.xeapi_state", ""),
@@ -97,6 +98,19 @@ class ProxyPage(BasePage):
     def _start(self) -> None:
         if self._runner and self._runner.is_running:
             self.warn("代理已经在运行了。")
+            return
+
+        if self.ca_cert.path() and not self.check_path(
+            self.ca_cert, "CA 证书", require_exists=True
+        ):
+            return
+        if self.ca_key.path() and not self.check_path(
+            self.ca_key, "CA 私钥", require_exists=True
+        ):
+            return
+        if self.xeapi_state.path() and not self.check_path(
+            self.xeapi_state, "XEAPI 状态文件", require_exists=True
+        ):
             return
 
         spec = ncmctl.ProxySpec(

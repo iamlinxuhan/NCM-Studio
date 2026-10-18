@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -40,11 +41,26 @@ class BackgroundTask(QObject):
     #: 失败，携带面向用户的错误说明
     failed = pyqtSignal(str)
 
-    def __init__(self, fn: Callable[[], Any], parent: QObject | None = None) -> None:
+    #: 仍在跑的任务。关窗时用来等「正在写盘」的任务收尾。
+    _active: set["BackgroundTask"] = set()
+    _active_lock = threading.Lock()
+
+    def __init__(
+        self,
+        fn: Callable[[], Any],
+        parent: QObject | None = None,
+        *,
+        critical: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._fn = fn
         self._thread: threading.Thread | None = None
         self._finished = False
+        #: 关键任务（写歌词/封面/标签）在关窗时要多等一会儿，避免写到一半退出。
+        #: 写入本身是原子的，等不到也只是少处理几首，不会损坏文件。
+        self.critical = bool(critical)
+        #: 置位后任务在下一次检查点收手。任务函数需要主动查询它。
+        self.cancel_event = threading.Event()
 
     # ------------------------------------------------------------------ 控制
 
@@ -55,8 +71,37 @@ class BackgroundTask(QObject):
         self._thread = threading.Thread(
             target=self._run, name="ncmgui-task", daemon=True
         )
+        with BackgroundTask._active_lock:
+            BackgroundTask._active.add(self)
         self._thread.start()
         return True
+
+    def cancel(self) -> None:
+        """请求任务在下一次检查点停止（不会强杀线程）。"""
+        self.cancel_event.set()
+
+    @classmethod
+    def pending_critical(cls) -> list["BackgroundTask"]:
+        """还没结束的关键任务快照。"""
+        with cls._active_lock:
+            return [task for task in cls._active
+                    if task.critical and not task._finished]
+
+    @classmethod
+    def wait_critical(cls, timeout_ms: int = 5000) -> bool:
+        """等关键任务结束，最多 ``timeout_ms`` 毫秒。
+
+        返回 True 表示已全部结束；False 表示超时。调用方在主线程里等的时候
+        应当穿插 ``processEvents``，否则完成信号得不到处理。
+        """
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        while True:
+            if not cls.pending_critical():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.02, remaining))
 
     @property
     def is_running(self) -> bool:
@@ -79,6 +124,8 @@ class BackgroundTask(QObject):
             self._emit(self.done, result)
         finally:
             self._finished = True
+            with BackgroundTask._active_lock:
+                BackgroundTask._active.discard(self)
 
     @staticmethod
     def _emit(signal, payload: object) -> None:

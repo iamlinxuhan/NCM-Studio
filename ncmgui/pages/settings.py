@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import QLabel, QMessageBox, QProgressBar, QScrollArea
 
 from .. import NCMCTL_VERSION, VERSION, ncmctl, player, updater
 from ..config import config_dir
+from ..netutil import ProxyError, normalize_proxy
 from ..widgets.card import accent_button, danger_button, ghost_button
 from ..widgets.form import FormCard
 from ..workers import BackgroundTask
@@ -215,7 +216,59 @@ class SettingsPage(BasePage):
         card.add_row_of(save, reset)
         self.content.addWidget(card)
 
+    def _confirm_debug(self) -> bool:
+        """开启 ``--debug`` 前确认一次；取消则把开关退回去。"""
+        if not self.debug.isChecked() or bool(self.cfg.get("debug", False)):
+            return self.debug.isChecked()
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("开启详细日志")
+        box.setText("--debug 会把请求头与响应体写进控制台，导出的日志里也会有。")
+        box.setInformativeText(
+            "其中可能包含 Cookie、token 等凭据。只在排查问题时临时开启，"
+            "处理完记得关掉。"
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        box.button(QMessageBox.StandardButton.Ok).setText("仍然开启")
+        box.button(QMessageBox.StandardButton.Cancel).setText("取消")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Ok:
+            self.debug.setChecked(False)
+            return False
+        return True
+
     def _save(self) -> None:
+        # 代理串在这里统一校验并规范化：裸 host:port 补 http://，socks5 直接拒绝
+        for label, field in (
+            ("GitHub 代理", self.app_proxy),
+            ("下载代理", self.update_proxy),
+        ):
+            try:
+                field.setText(normalize_proxy(field.text()))
+            except ProxyError as exc:
+                self.warn(f"{label}：{exc}")
+                field.setFocus()
+                return
+
+        # 留空表示「自动探测 / 用默认值」，只有显式填了才要求存在
+        if self.binary_path.path() and not self.check_path(
+            self.binary_path, "ncmctl 路径", require_exists=True
+        ):
+            return
+        if self.mpv_path.path() and not self.check_path(
+            self.mpv_path, "mpv 路径", require_exists=True
+        ):
+            return
+        if self.home.path() and not self.check_path(self.home, "状态目录"):
+            return
+        if self.config_file.path() and not self.check_path(
+            self.config_file, "配置文件", require_exists=True
+        ):
+            return
+        self._confirm_debug()
         self.save_config()
         self.cfg.save()
         self.window.reload_binary()
@@ -280,7 +333,9 @@ class SettingsPage(BasePage):
         self.app_proxy = card.add_line(
             "GitHub 代理", value=self.cfg.get("update.git_proxy", ""),
             placeholder="留空走系统代理；填 direct 强制直连",
-            hint="检查更新和下载安装包都走这个设置。",
+            hint="检查更新和下载安装包都走这个设置。HTTP 代理转发 HTTPS 时走 "
+                 "CONNECT 隧道，TLS 仍端到端加密，但代理能看到目标域名 —— "
+                 "请只在可信网络使用。",
         )
         self.app_check_on_start = card.add_switch(
             "每次启动检查更新",
@@ -501,6 +556,15 @@ class SettingsPage(BasePage):
         new = target.with_name(target.name + ".new")
         part = new.with_name(new.name + ".part")
 
+        # 上一次安装失败/中断可能留下半个下载文件；不先清掉的话，下载器可能
+        # 追加写入或直接沿用旧内容
+        self._install_files = (new, part)
+        for stale in (new, part):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
         holder: dict[str, BackgroundTask] = {}
 
         def work():
@@ -560,6 +624,7 @@ class SettingsPage(BasePage):
 
         self.app_progress.setVisible(False)
         self._installing = False
+        self._install_files = ()
         self._sync_app_buttons()
         self.app_status.setText("更新已就绪，正在重启…")
         try:
@@ -571,8 +636,18 @@ class SettingsPage(BasePage):
             return
         self.window.close()
 
+    def _cleanup_install_files(self) -> None:
+        """删掉本次安装留下的 ``.part`` / ``.new``；失败不打扰用户。"""
+        for path in getattr(self, "_install_files", ()):
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+        self._install_files = ()
+
     def _on_install_failed(self, message: str) -> None:
         self._installing = False
+        self._cleanup_install_files()
         self.app_progress.setVisible(False)
         self._sync_app_buttons()
         self.app_status.setText(f"安装失败：{message}")
@@ -594,7 +669,9 @@ class SettingsPage(BasePage):
         self.update_proxy = card.add_line(
             "下载代理", value=self.cfg.get("update.proxy", ""),
             placeholder="留空使用内置代理链；填 direct 强制直连",
-            hint="国内网络直连 GitHub 常常失败，留空通常最省事。",
+            hint="国内网络直连 GitHub 常常失败，留空通常最省事。HTTP 代理转发 "
+                 "HTTPS 走 CONNECT 隧道，TLS 仍端到端加密，但代理能看到目标域名 —— "
+                 "请只在可信网络使用。",
         )
 
         self.update_button = danger_button("立即更新")

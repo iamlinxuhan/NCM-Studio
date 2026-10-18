@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from . import fsutil
 from .lyrics import index_audio, targets_for
 
 MODE_FILE = "file"
@@ -162,10 +163,20 @@ def read_artwork(path: Path | str) -> bytes | None:
 
 
 def embed(path: Path, data: bytes) -> None:
-    """把封面写进音频标签；不支持的容器明确报错。"""
+    """原子地把封面写进音频标签；不支持的容器明确报错。
+
+    先复制一份同后缀临时文件再改，成功后 ``os.replace``。mutagen 就地写标签，
+    磁盘满或进程被杀时可能把整首音频写坏 —— 那样用户得到的是一个再也播不了
+    的文件，而不是一条报错。
+    """
     kind = image_kind(data)
     if kind is None:
         raise CoverError("拿到的不是可识别的图片")
+    fsutil.atomic_edit(Path(path), lambda tmp: _embed_in_place(tmp, data, kind))
+
+
+def _embed_in_place(path: Path, data: bytes, kind: tuple[str, str]) -> None:
+    """在给定的（临时）音频文件上写标签。调用方负责原子替换。"""
     mime = kind[1]
     path = Path(path)
     suffix = path.suffix.lower()
@@ -334,7 +345,7 @@ def apply(base: str, targets: Sequence[Path], data: bytes, mode: str) -> Outcome
                 if find_cover(audio) is not None:
                     continue
                 dest = Path(audio).with_suffix(kind[0])
-                dest.write_bytes(data)
+                fsutil.atomic_write_bytes(dest, data)
             else:
                 if read_embedded(audio) is not None:
                     continue
@@ -358,6 +369,7 @@ def collect(
     parallel: int = 4,
     on_progress: Callable[[int, int, str], None] | None = None,
     on_note: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Report:
     """给一批歌抓封面并落盘。
 
@@ -367,6 +379,7 @@ def collect(
         不依赖 Qt 和具体的 HTTP 实现，自检时可以塞个假的。
     :param on_progress: ``(已完成, 总数, 当前主干)``
     :param on_note: 值得单独打一行的说明（失败、找不到文件……）
+    :param should_stop: 每个任务开始前检查一次；关窗时置位，剩下的歌不再处理。
 
     回调是在**工作线程**里调用的，界面那边务必只做「发信号」这种线程安全的动作。
     """
@@ -381,6 +394,8 @@ def collect(
 
     def work(pair: tuple[str, str]) -> None:
         nonlocal done
+        if should_stop is not None and should_stop():
+            return
         base, url = pair
         targets = targets_for(base, index)
 

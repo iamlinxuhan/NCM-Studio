@@ -63,6 +63,8 @@ class NcmPage(BasePage):
         if not inputs:
             self.warn("请先添加至少一个 .ncm 文件或文件夹。")
             return
+        if not self.check_path(self.output, "输出目录"):
+            return
 
         self.save_config()
         argv = ncmctl.build_ncm(

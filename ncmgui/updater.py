@@ -5,6 +5,9 @@
 1. 读 ``releases/latest``（GitHub 会自动跳过草稿与预发布）；
 2. 下载对应平台的资产到**目标同目录**的 ``.new`` 文件；
 3. 用 Release 里的 ``SHA256SUMS`` 校验 —— **拿不到校验文件就拒绝安装**；
+   校验和本身还要用 ``SHA256SUMS.sig`` 验证 —— 两个文件来自同一个 Release，
+   只看哈希等于让发布者自己给自己作证；签名用的私钥离线保管、不进 CI，
+   公钥固定在本模块里，才是真正的信任根；
 4. 替换并重启（AppImage / macOS 直接原子替换；Windows 交给一个等待进程
    退出后再移动文件的小脚本）。
 
@@ -15,6 +18,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -36,6 +41,15 @@ REPO = "iamlinxuhan/NCM-Studio"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 SUMS_ASSET = "SHA256SUMS"
+#: ``SHA256SUMS`` 的 Ed25519 分离签名（原始 64 字节）。
+SIG_ASSET = "SHA256SUMS.sig"
+
+#: 更新链的信任根：32 字节 Ed25519 公钥的 base64。
+#:
+#: 私钥只保存在发布者本机的 ``~/.config/ncm-studio-release/signing-key.pem``，
+#: 既不进仓库也不进 CI。轮换公钥只能随一次新版本一起发出 —— 旧版本仍认旧公钥，
+#: 所以第一次换钥的版本必须用旧私钥签名。见 ``scripts/release_sign.py``。
+PUBLIC_KEY_B64 = "97/Xf71U9lq6pW1nO7tGrK/+EqysI9WSNTPpTQRzb7o="
 
 #: 三个平台在 Release 里的资产名（与 .github/workflows/build.yaml 对应）
 ASSETS = {
@@ -179,8 +193,14 @@ class Release:
 
 
 def _opener(proxy: str = ""):
-    """空串走系统代理，``direct`` 强制直连，其它值当作代理地址。"""
-    proxy = (proxy or "").strip()
+    """空串走系统代理，``direct`` 强制直连，其它值当作代理地址。
+
+    代理串先过 :func:`ncmgui.netutil.normalize_proxy`：裸 ``host:port`` 补
+    ``http://``，``socks5`` 之类明确拒绝，而不是等请求时报一个含糊的错误。
+    """
+    from .netutil import normalize_proxy
+
+    proxy = normalize_proxy(proxy)
     if proxy == "direct":
         return urllib.request.build_opener(urllib.request.ProxyHandler({}))
     if proxy:
@@ -201,7 +221,11 @@ def _headers() -> dict[str, str]:
 def _read(url: str, proxy: str = "", timeout: float = 10.0) -> bytes:
     request = urllib.request.Request(url, headers=_headers())
     try:
-        with _opener(proxy).open(request, timeout=timeout) as response:
+        opener = _opener(proxy)
+    except ValueError as exc:
+        raise UpdateError(f"代理设置无效：{exc}") from exc
+    try:
+        with opener.open(request, timeout=timeout) as response:
             return response.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 403:
@@ -266,15 +290,70 @@ def parse_checksums(text: str) -> dict[str, str]:
     return found
 
 
-def fetch_checksums(release: Release, proxy: str = "", timeout: float = 10.0) -> dict[str, str]:
-    """下载并解析这个 Release 的 ``SHA256SUMS``。没有就抛错 —— 不校验不安装。"""
-    asset = release.asset(SUMS_ASSET)
-    if asset is None:
+def verify_signature(
+    data: bytes,
+    signature: bytes,
+    public_key_b64: str = PUBLIC_KEY_B64,
+) -> None:
+    """验证 ``data`` 的 Ed25519 分离签名；任何问题都抛 :class:`UpdateError`。
+
+    默认用本模块内置的公钥。验签失败必须拒绝安装：``SHA256SUMS`` 与安装包
+    来自同一个 Release，谁都能一起替换，只有签名把两者绑到发布者的离线私钥上。
+    """
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError as exc:
         raise UpdateError(
-            f"这个 Release 没有 {SUMS_ASSET}，无法校验下载内容，已拒绝自动安装。"
+            "缺少 cryptography 依赖，无法验证更新签名，已拒绝自动安装。"
+        ) from exc
+
+    key_text = (public_key_b64 or "").strip()
+    if not key_text:
+        raise UpdateError(
+            "程序里没有内置更新公钥，无法验证下载来源，已拒绝自动安装。"
             "请到 Release 页面手动下载。"
         )
-    payload = _read(asset.url, proxy, timeout)
+    try:
+        raw_key = base64.b64decode(key_text, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise UpdateError("内置更新公钥格式不对，已拒绝自动安装。") from exc
+    if len(raw_key) != 32:
+        raise UpdateError("内置更新公钥长度不对，已拒绝自动安装。")
+    if len(signature) != 64:
+        raise UpdateError("更新签名的长度不对，已拒绝自动安装。")
+
+    try:
+        Ed25519PublicKey.from_public_bytes(raw_key).verify(signature, data)
+    except InvalidSignature as exc:
+        raise UpdateError(
+            "更新签名校验失败，下载内容可能被篡改，已拒绝自动安装。"
+            "请到 Release 页面手动下载。"
+        ) from exc
+
+
+def fetch_checksums(release: Release, proxy: str = "", timeout: float = 10.0) -> dict[str, str]:
+    """下载、验签并解析这个 Release 的 ``SHA256SUMS``。
+
+    缺校验和、缺签名、签名不符都抛 :class:`UpdateError` —— 不验签不安装。
+    """
+    sums_asset = release.asset(SUMS_ASSET)
+    sig_asset = release.asset(SIG_ASSET)
+    missing = [
+        name
+        for name, item in ((SUMS_ASSET, sums_asset), (SIG_ASSET, sig_asset))
+        if item is None
+    ]
+    if missing:
+        raise UpdateError(
+            f"这个 Release 没有 {' / '.join(missing)}，无法验证下载来源，"
+            "已拒绝自动安装。请到 Release 页面手动下载。"
+        )
+
+    payload = _read(sums_asset.url, proxy, timeout)
+    signature = _read(sig_asset.url, proxy, timeout)
+    verify_signature(payload, signature)
+
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -313,7 +392,11 @@ def download(
     dest.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers=_headers())
     try:
-        with _opener(proxy).open(request, timeout=timeout) as response:
+        opener = _opener(proxy)
+    except ValueError as exc:
+        raise UpdateError(f"代理设置无效：{exc}") from exc
+    try:
+        with opener.open(request, timeout=timeout) as response:
             total = int(response.headers.get("Content-Length") or -1)
             done = 0
             with dest.open("wb") as handle:
@@ -479,6 +562,11 @@ def _schedule_windows_replace(new: Path, target: Path) -> None:
             close_fds=True,
         )
     except OSError as exc:
+        # 脚本没跑起来就不会自删，留着会在临时目录里越积越多
+        try:
+            script.unlink()
+        except OSError:
+            pass
         raise UpdateError(f"启动更新脚本失败：{exc}") from exc
 
 
@@ -551,6 +639,57 @@ def _selftest() -> int:
           checksums.get("a.AppImage"),
           "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
     check("二进制模式星号被去掉", "b.exe" in checksums, True)
+
+    # ---- Ed25519 签名（现场生成测试密钥，不联网、不碰真实私钥）
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except ImportError:
+        failures.append("缺少 cryptography，更新验签不可用")
+    else:
+        def public_b64(private: object) -> str:
+            raw = private.public_key().public_bytes(  # type: ignore[attr-defined]
+                serialization.Encoding.Raw, serialization.PublicFormat.Raw
+            )
+            return base64.b64encode(raw).decode("ascii")
+
+        private = Ed25519PrivateKey.generate()
+        key = public_b64(private)
+        payload = b"0123  file\n"
+        signature = private.sign(payload)
+
+        def rejects(name: str, call) -> None:
+            try:
+                call()
+            except UpdateError:
+                check(name, True, True)
+            else:
+                check(name, False, True)
+
+        try:
+            verify_signature(payload, signature, key)
+        except UpdateError as exc:
+            failures.append(f"正确签名应通过：{exc}")
+
+        rejects("篡改内容必须失败",
+                lambda: verify_signature(payload + b"x", signature, key))
+        flipped = bytes([signature[0] ^ 0xFF]) + signature[1:]
+        rejects("篡改签名必须失败",
+                lambda: verify_signature(payload, flipped, key))
+        rejects("换公钥必须失败",
+                lambda: verify_signature(payload, signature,
+                                         public_b64(Ed25519PrivateKey.generate())))
+        rejects("签名长度不对必须失败",
+                lambda: verify_signature(payload, signature[:32], key))
+        rejects("空公钥必须失败", lambda: verify_signature(payload, signature, ""))
+        rejects("非法 base64 公钥必须失败",
+                lambda: verify_signature(payload, signature, "不是base64"))
+
+        # 缺 .sig 的 Release 必须在联网之前就被拒绝
+        no_sig = Release(tag="v1.0.0", assets=(
+            Asset(SUMS_ASSET, "https://example.invalid/SHA256SUMS"),
+        ))
+        rejects("缺少签名文件必须失败", lambda: fetch_checksums(no_sig))
 
     # ---- 下载与替换（本地文件 URL，不联网）
     with tempfile.TemporaryDirectory(prefix="ncmgui-updater-") as tmp:
