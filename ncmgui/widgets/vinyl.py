@@ -16,6 +16,7 @@ import math
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QElapsedTimer,
     QPointF,
     QPropertyAnimation,
     QRectF,
@@ -37,10 +38,13 @@ from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 from .. import theme
 
-#: 每帧转多少度。20 帧/秒 × 1.2° ≈ 24°/秒，约 15 秒一圈 —— 比真唱片慢，
-#: 但足够看出在转，又不会让画面显得躁。
-DEGREES_PER_FRAME = 1.2
-FRAME_MS = 50
+#: 转速：24°/秒，约 15 秒一圈 —— 比真唱片慢，但足够看出在转，
+#: 又不会让画面显得躁。
+DEGREES_PER_SECOND = 24.0
+#: 125 帧/秒。原来用 20 帧时，最大化后圆标半径接近 400px，每帧转 1.2°
+#: 意味着边缘一次要跨 6～8 个像素，看起来就是一顿一顿的。100Hz 是流畅
+#: 的底线，这里留一点余量；盘面已经缓存、每帧只重绘圆标，成本付得起。
+FRAME_MS = 8
 
 
 class VinylWidget(QWidget):
@@ -67,11 +71,25 @@ class VinylWidget(QWidget):
 
         self._timer = QTimer(self)
         self._timer.setInterval(FRAME_MS)
+        # 默认的 CoarseTimer 允许 ±5% 的漂移，帧间距会忽长忽短；
+        # 旋转要的是稳定节奏，用精确定时器
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._rotate)
+        # 角度按真实流逝时间推进：某一帧被系统拖慢时，下一帧补回来，
+        # 转速不会跟着事件循环抖动
+        self._clock = QElapsedTimer()
 
         self._arm_anim = QPropertyAnimation(self, b"armProgress", self)
         self._arm_anim.setDuration(450)
         self._arm_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        # 最大化/还原时窗口会连续收到一串 resize 事件，而盘面位图在全屏
+        # 尺寸下重建一次要三四十毫秒。拖动过程中先拿旧图拉伸顶着，等尺寸
+        # 稳定下来再重建，避免窗口动画里每次 resize 都掉一帧
+        self._resize_settle = QTimer(self)
+        self._resize_settle.setSingleShot(True)
+        self._resize_settle.setInterval(120)
+        self._resize_settle.timeout.connect(self._rebuild_caches)
 
     # ------------------------------------------------------------ 对外接口
 
@@ -101,15 +119,25 @@ class VinylWidget(QWidget):
         super().hideEvent(event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
+        # 先不丢缓存：_disc_pixmap / _scaled_art 在尺寸未稳定时会直接返回
+        # 旧位图，由 paintEvent 拉伸到新矩形
+        self._resize_settle.start()
+        super().resizeEvent(event)
+
+    def _rebuild_caches(self) -> None:
         self._disc_cache = None
         self._disc_cache_key = None
         self._cover_cache = None
         self._cover_cache_key = None
-        super().resizeEvent(event)
+        self.update()
 
     def _sync_timer(self) -> None:
         if self._playing and self.isVisible():
-            self._timer.start()
+            if not self._timer.isActive():
+                # 停在暂停/切页面的那段时间不能算进角度里，否则恢复时
+                # 唱片会突然跳一大截
+                self._clock.start()
+                self._timer.start()
         else:
             self._timer.stop()
 
@@ -141,9 +169,15 @@ class VinylWidget(QWidget):
         self._arm_anim.start()
 
     def _rotate(self) -> None:
-        self._angle = (self._angle + DEGREES_PER_FRAME) % 360.0
+        elapsed = self._clock.restart()
+        if elapsed <= 0:
+            return
+        # 拖窗口、系统卡顿时单帧可能拖到几百毫秒；上限按 200ms 算，
+        # 恢复后接着正常速度转，而不是猛地跳过去一大段
+        elapsed = min(elapsed, 200)
+        self._angle = (self._angle + DEGREES_PER_SECOND * elapsed / 1000.0) % 360.0
         # 只有封面在转，盘面和唱臂都没动。只失效圆标那一块，别让整个
-        # 控件（全屏时可能上千像素宽）每 50ms 重绘一次
+        # 控件（全屏时可能上千像素宽）每帧重绘一次
         self.update(self._label_rect().toAlignedRect())
 
     # ------------------------------------------------------------ 绘制
@@ -180,7 +214,11 @@ class VinylWidget(QWidget):
     def _disc_pixmap(self, center: QPointF, radius: float) -> QPixmap:
         dpr = self.devicePixelRatioF()
         key = (float(self.width()), float(self.height()), dpr)
-        if self._disc_cache is not None and self._disc_cache_key == key:
+        # 尺寸还在变（窗口正在被拖动/最大化动画中）就先用旧位图顶着，
+        # paintEvent 会把它拉伸到当前尺寸；重建留到 _resize_settle 触发后
+        if self._disc_cache is not None and (
+            self._disc_cache_key == key or self._resize_settle.isActive()
+        ):
             return self._disc_cache
 
         rect = self._disc_rect(center, radius)
@@ -208,6 +246,10 @@ class VinylWidget(QWidget):
         dpr = self.devicePixelRatioF()
         size = max(1, round(label_radius * 2 * dpr))
         key = (self._art.cacheKey(), size)
+        if self._cover_cache is not None and (
+            self._cover_cache_key == key or self._resize_settle.isActive()
+        ):
+            return self._cover_cache
         if self._cover_cache is None or self._cover_cache_key != key:
             scaled = self._art.scaled(
                 size,
@@ -233,10 +275,9 @@ class VinylWidget(QWidget):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
             disc = self._disc_pixmap(center, radius)
-            dpr = disc.devicePixelRatio()
-            logical = QRectF(0.0, 0.0, disc.width() / dpr, disc.height() / dpr)
-            logical.moveTopLeft(self._disc_rect(center, radius).topLeft())
-            painter.drawPixmap(logical, disc, QRectF(disc.rect()))
+            # 尺寸刚变、缓存还没重建时，这里会把旧位图拉伸到当前盘面矩形；
+            # 尺寸一致时目标矩形恰好等于位图逻辑大小，仍是 1:1 blit
+            painter.drawPixmap(self._disc_rect(center, radius), disc, QRectF(disc.rect()))
 
             self._paint_label(painter, center, radius)
             self._paint_arm(painter, center, radius)
@@ -304,13 +345,13 @@ class VinylWidget(QWidget):
         if self._art is not None:
             scaled = self._scaled_art(label_radius)
             if scaled is not None:
-                dpr = scaled.devicePixelRatio()
-                width = scaled.width() / dpr
-                height = scaled.height() / dpr
+                # 目标尺寸始终取当前圆标大小：尺寸刚变、缓存还是旧的大小时，
+                # 由这里拉伸一下，等 _resize_settle 之后再按新尺寸重采样
+                size = label_radius * 2
                 painter.translate(cx, cy)
                 painter.rotate(self._angle)
                 painter.drawPixmap(
-                    QRectF(-width / 2, -height / 2, width, height),
+                    QRectF(-size / 2, -size / 2, size, size),
                     scaled,
                     QRectF(scaled.rect()),
                 )
