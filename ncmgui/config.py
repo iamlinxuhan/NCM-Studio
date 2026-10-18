@@ -241,6 +241,8 @@ def _defaults() -> dict[str, Any]:
             "local_dir": "",
             # 播放页里黑胶 : 歌词的宽度比例（[0.367, 0.633]），空表示用默认
             "split": [],
+            # 分栏比例的存储版本；旧版本可能存下布局自动压缩的结果
+            "split_rev": 0,
         },
         # 界面外观。theme 取值 dark / light，由侧边栏的「主题」键切换
         "ui": {"theme": "dark"},

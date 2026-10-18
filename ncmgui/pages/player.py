@@ -26,6 +26,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QColor, QFont, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -53,6 +54,10 @@ from .base import BasePage
 
 #: 用户自己滚动歌词后，暂停自动跟随多久（秒）
 FOLLOW_PAUSE = 3.0
+
+#: 分栏比例的存储版本。低于这个版本的 ``player.split`` 可能是布局约束
+#: 自动压缩出来的，不是用户拖的，启动时丢弃一次（见 ``_restore_split``）
+SPLIT_REV = 2
 
 
 def _level_text(value: str) -> str:
@@ -245,6 +250,10 @@ class PlayerPage(BasePage):
         self.title_label.setWordWrap(True)
         self.artist_label = QLabel("")
         self.artist_label.setObjectName("PlayerArtist")
+        # 合作曲的歌手名单可能很长（五六个名字用逗号串起来）。不换行的话，
+        # QLabel 的最小宽度会按整行文字算，把中间的歌词列撑到几百像素，
+        # QSplitter 只好把左边黑胶压到最小宽度，唱片被裁掉半个
+        self.artist_label.setWordWrap(True)
         center_layout.addWidget(self.title_label)
         center_layout.addWidget(self.artist_label)
         center_layout.addSpacing(6)
@@ -690,7 +699,17 @@ class PlayerPage(BasePage):
         self.splitter.setStretchFactor(0, first)
         self.splitter.setStretchFactor(1, max(1, 1000 - first))
 
-    def _on_split_moved(self, *_args) -> None:
+    def _on_split_moved(self, _pos: int = 0, index: int = -1) -> None:
+        """只有用户真的动了分隔条才记住比例。
+
+        QSplitter 在布局约束下自动压缩某一栏时也会发 splitterMoved，和用户
+        拖动走的是同一个信号。长歌手名把歌词列撑宽、黑胶被挤到最小宽度的
+        那次布局，就这样被当成用户选择写进了配置。
+        """
+        handle = self.splitter.handle(index) if index >= 0 else None
+        dragging = bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+        if not dragging and not (handle is not None and handle.hasFocus()):
+            return
         self._split_dirty = True
         self._split_timer.start()
 
@@ -704,12 +723,24 @@ class PlayerPage(BasePage):
         self._split_dirty = False
         self._apply_stretch(ratios[0])
         self.cfg.set("player.split", ratios)
+        self.cfg.set("player.split_rev", SPLIT_REV)
         self.cfg.save()
 
     def _restore_split(self) -> None:
         """按上次保存的比例摆放黑胶与歌词；没有记录就保持默认。"""
         if self._split_applied:
             return
+        try:
+            revision = int(self.cfg.get("player.split_rev", 0) or 0)
+        except (TypeError, ValueError):
+            revision = 0
+        if revision < SPLIT_REV:
+            # 2.3.3 及更早：长歌手名把歌词列的最小宽度撑大，QSplitter 自动
+            # 压小黑色唱片，又把压缩后的比例当成用户拖动存了下来。这个值
+            # 不是用户选的，升级后丢弃一次；之后只有在真正拖动时才写。
+            self.cfg.set("player.split", [])
+            self.cfg.set("player.split_rev", SPLIT_REV)
+            self.cfg.save()
         if not self.cfg.get("player.split"):
             self._split_applied = True
             return

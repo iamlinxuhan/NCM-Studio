@@ -296,6 +296,37 @@ def _self_test(window: MainWindow) -> int:
     except Exception as exc:  # noqa: BLE001 - 自检要报告而不是崩掉
         problems.append(f"歌词换行渲染自检失败：{exc!r}")
 
+    # 分栏比例只该记住用户真正拖过的位置。用户撞见过长歌手名把歌词列撑宽、
+    # 黑胶被布局压到最小宽度，QSplitter 为那次自动压缩发出的 splitterMoved
+    # 被当成拖动结果存进了配置，下次启动黑胶就一直是窄的；换行反而被挤没了
+    page = getattr(window, "player_page", None)
+    if page is None:
+        problems.append("主窗口没有播放页，分栏比例自检无法进行")
+    else:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_cfg = Config(Path(temp_dir) / "config.json")
+            temp_cfg.set("player.split", [0.3044, 0.6956])
+            temp_cfg.set("player.split_rev", 0)
+            original_cfg = page.cfg
+            original_applied = page._split_applied
+            original_dirty = page._split_dirty
+            try:
+                page.cfg = temp_cfg
+                page._split_applied = False
+                page._restore_split()
+                if temp_cfg.get("player.split"):
+                    problems.append("旧版本被布局压出来的分栏比例没有被丢弃")
+                # 没有按住左键：布局自己压缩时发出的 splitterMoved 不算拖动
+                page._split_dirty = False
+                page._on_split_moved(0, 1)
+                if page._split_dirty:
+                    problems.append("布局自动压缩被当成了用户拖动分栏")
+            finally:
+                page._split_timer.stop()
+                page.cfg = original_cfg
+                page._split_applied = original_applied
+                page._split_dirty = original_dirty
+
     # 右上角的音质必须写**实际**播放的音质。用户撞见过「标签写着极高 320 kbps、
     # 实际播的是无损文件」：本地文件按文件格式显示，流媒体按直链接口返回的
     # 档位（可能降级）显示，请求档位只在取链结果回来之前兜底
