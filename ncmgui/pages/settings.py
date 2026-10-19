@@ -141,6 +141,19 @@ class SettingsPage(BasePage):
         self.mpv_detected.setWordWrap(True)
         card.add_widget(self.mpv_detected)
 
+        self.allow_trial = card.add_switch(
+            "允许播放会员歌曲的试听片段",
+            bool(self.cfg.get("player.allow_trial", False)),
+            hint="关闭时遇到只有 30 秒试听的歌曲会直接提示，不会误当成完整版播放。",
+        )
+
+        self.close_to_tray = card.add_switch(
+            "关闭主窗口时最小化到托盘",
+            bool(self.cfg.get("ui.close_to_tray", False)),
+            hint="系统托盘不可用（部分 Wayland 会话）时该选项不会生效，"
+            "以免窗口藏起来后找不回来。",
+        )
+
         detect = ghost_button("重新探测")
         detect.clicked.connect(self._detect_mpv)
         card.add_row_of(detect)
@@ -272,6 +285,7 @@ class SettingsPage(BasePage):
         self.save_config()
         self.cfg.save()
         self.window.reload_binary()
+        self.window.reload_api()
         self._detect()
         self.toast("设置已保存，并已重新探测 ncmctl。")
 
@@ -280,9 +294,11 @@ class SettingsPage(BasePage):
         self.home.set_path("")
         self.config_file.set_path("")
         self.debug.setChecked(False)
+        self.allow_trial.setChecked(False)
         self.save_config()
         self.cfg.save()
         self.window.reload_binary()
+        self.window.reload_api()
         self._detect()
         self.toast("已恢复默认设置。")
 
@@ -768,6 +784,8 @@ class SettingsPage(BasePage):
     def save_config(self) -> None:
         self.cfg.set("ncmctl_path", self.binary_path.path())
         self.cfg.set("player.mpv_path", self.mpv_path.path())
+        self.cfg.set("player.allow_trial", self.allow_trial.isChecked())
+        self.cfg.set("ui.close_to_tray", self.close_to_tray.isChecked())
         self.cfg.set("home", self.home.path())
         self.cfg.set("config_file", self.config_file.path())
         self.cfg.set("debug", self.debug.isChecked())

@@ -180,6 +180,108 @@ def rounded(pixmap: QPixmap, size: int, radius: float | None = None) -> QPixmap:
     return canvas
 
 
+class ImageStore(QObject):
+    """按字符串键缓存网络图片（歌单/专辑/歌手封面）。
+
+    与 :class:`CoverStore` 分开：后者的键是歌曲 ID，已经和播放页、底部条绑定，
+    语义不能动。这里给发现页、搜索页的封面卡片用，键可以是
+    ``playlist:123`` 这样的字符串。
+
+    ``imageReady(key, pixmap)`` 在主线程发出。调用方必须自己比对 key ——
+    卡片被复用后，旧图片可能晚到。
+    """
+
+    imageReady = pyqtSignal(str, QPixmap)
+
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        size: int = 360,
+        capacity: int = 64,
+        fetcher: Callable[[str], bytes] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._size = int(size)
+        self._capacity = max(1, int(capacity))
+        self._fetcher = fetcher or fetch
+        self._cache: OrderedDict[str, QPixmap] = OrderedDict()
+        self._pending: set[str] = set()
+        self._failed: set[str] = set()
+        self._lock = threading.Lock()
+        self._tasks: set[BackgroundTask] = set()
+
+    def get(self, key: str) -> QPixmap | None:
+        pixmap = self._cache.get(str(key))
+        if pixmap is not None:
+            self._cache.move_to_end(str(key))
+        return pixmap
+
+    def put(self, key: str, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
+        key = str(key)
+        self._cache[key] = pixmap
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._capacity:
+            self._cache.popitem(last=False)
+        self._emit(key, pixmap)
+
+    def clear(self) -> None:
+        self._cache.clear()
+        with self._lock:
+            self._pending.clear()
+            self._failed.clear()
+
+    def request(self, key: str, url: str) -> QPixmap | None:
+        """确保图片正在下载。已缓存时立即返回，否则返回 ``None``。"""
+        key = str(key)
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        url = upgrade_url(str(url or ""), self._size)
+        if not url:
+            return None
+        with self._lock:
+            if key in self._pending or key in self._failed:
+                return None
+            self._pending.add(key)
+
+        task = BackgroundTask(lambda: self._fetcher(url), parent=self)
+        self._tasks.add(task)
+
+        def done(data: object) -> None:
+            self._finish(key)
+            self._tasks.discard(task)
+            image = QPixmap()
+            if isinstance(data, (bytes, bytearray)) and image.loadFromData(bytes(data)):
+                self.put(key, image)
+            else:
+                with self._lock:
+                    self._failed.add(key)
+
+        def failed(_message: str) -> None:
+            self._finish(key)
+            self._tasks.discard(task)
+            with self._lock:
+                self._failed.add(key)
+
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
+        return None
+
+    def _finish(self, key: str) -> None:
+        with self._lock:
+            self._pending.discard(key)
+
+    def _emit(self, key: str, pixmap: QPixmap) -> None:
+        try:
+            self.imageReady.emit(str(key), pixmap)
+        except RuntimeError:
+            pass
+
+
 class CoverStore(QObject):
     """按歌曲 ID 缓存封面，后台下载，晚到的旧结果直接丢掉。
 

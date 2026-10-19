@@ -28,7 +28,7 @@ from typing import Callable, Iterable, Sequence
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from . import localmusic, player
+from . import dsp, localmusic, player
 from .resolver import Resolver, Song
 from .workers import BackgroundTask
 
@@ -97,6 +97,20 @@ class PlaybackController(QObject):
     queueChanged = pyqtSignal()
     errorRaised = pyqtSignal(str)
     playerExited = pyqtSignal(int)
+    #: 一首歌开始装载；统计与「最近播放」用
+    trackStarted = pyqtSignal(object)          # Song
+    #: 一首歌自然播完（不包括手动切歌）
+    trackEnded = pyqtSignal(object)            # Song
+    #: 音频工具状态变化。没有运行的播放器时只更新状态，下次装载时生效。
+    speedChanged = pyqtSignal(float)
+    pitchChanged = pyqtSignal(float)
+    equalizerChanged = pyqtSignal()
+    abLoopChanged = pyqtSignal(object, object)  # (a, b) 秒；未设置为 None
+    audioInfoChanged = pyqtSignal()
+    audioDevicesChanged = pyqtSignal()
+    #: (剩余秒数, 是否「播完当前曲」)；倒计时取消后剩余为 0
+    sleepTimerChanged = pyqtSignal(int, bool)
+    sleepTimerFinished = pyqtSignal(str)
 
     #: mpv 事件从读线程发回来，走队列连接
     _playerEvent = pyqtSignal(str, object)
@@ -135,9 +149,54 @@ class PlaybackController(QObject):
         self._mode = normalize_mode(cfg.get("player.mode", DEFAULT_MODE))
         self._history: list[int] = []
 
+        # ---- 音频工具 -------------------------------------------------
+        try:
+            self._speed = max(0.5, min(2.0, float(cfg.get("player.speed", 1.0))))
+        except (TypeError, ValueError):
+            self._speed = 1.0
+        try:
+            self._pitch = max(-12.0, min(12.0, float(cfg.get("player.pitch", 0.0))))
+        except (TypeError, ValueError):
+            self._pitch = 0.0
+        equalizer = cfg.get("player.equalizer", {})
+        if not isinstance(equalizer, dict):
+            equalizer = {}
+        self._eq_enabled = bool(equalizer.get("enabled", False))
+        self._eq_gains = dsp.normalize_gains(equalizer.get("gains", ()))
+        try:
+            self._eq_preamp = max(-12.0, min(12.0, float(equalizer.get("preamp", 0.0))))
+        except (TypeError, ValueError):
+            self._eq_preamp = 0.0
+        self._loudness = bool(cfg.get("player.loudness", False))
+        self._audio_device = str(cfg.get("player.audio_device", "") or "")
+        raw_volumes = cfg.get("player.device_volumes", {})
+        self._device_volumes: dict[str, int] = {}
+        if isinstance(raw_volumes, dict):
+            for name, value in raw_volumes.items():
+                try:
+                    self._device_volumes[str(name)] = player.clamp_volume(value)
+                except (TypeError, ValueError):
+                    continue
+        self._capabilities: dsp.Capabilities | None = None
+        self._capabilities_binary = ""
+        self._audio_info: dict[str, object] = {}
+        self._audio_devices: tuple[tuple[str, str], ...] = ()
+        self._ab_a: float | None = None
+        self._ab_b: float | None = None
+
+        # ---- 定时关闭 -------------------------------------------------
+        self._sleep_deadline: float | None = None
+        self._sleep_after_track = False
+        self._sleep_timer = QTimer(self)
+        self._sleep_timer.setInterval(1000)
+        self._sleep_timer.timeout.connect(self._sleep_tick)
+
         self._player: player.MpvPlayer | None = None
         self._cache = player.UrlCache()
         self._local_provider: Callable[[Song], Path | None] | None = None
+        #: 流媒体取链：Song(source=subsonic/jellyfin) -> StreamSource。
+        #: 返回的对象只需有 url/level/headers 三个属性，播放层不依赖具体适配器
+        self._stream_provider: Callable[[Song], object] | None = None
 
         self._play_token = 0
         self._wanted: tuple[int, Song, str] | None = None
@@ -164,6 +223,15 @@ class PlaybackController(QObject):
         self._ticker.setInterval(250)
         self._ticker.timeout.connect(self._tick)
         self._ticker.start()
+
+        #: 队列写配置的防抖。拖拽排序会连着发很多次 queueChanged
+        self._queue_timer = QTimer(self)
+        self._queue_timer.setSingleShot(True)
+        self._queue_timer.setInterval(800)
+        self._queue_timer.timeout.connect(self._persist_queue)
+        self.queueChanged.connect(self._schedule_persist)
+        self.trackChanged.connect(self._schedule_persist)
+        self._restore_queue()
 
     # ------------------------------------------------------------ 只读状态
 
@@ -217,11 +285,83 @@ class PlaybackController(QObject):
     def player_running(self) -> bool:
         return self._player is not None and self._player.running
 
+    @property
+    def speed(self) -> float:
+        return self._speed
+
+    @property
+    def pitch(self) -> float:
+        return self._pitch
+
+    @property
+    def equalizer_enabled(self) -> bool:
+        return self._eq_enabled
+
+    @property
+    def equalizer_gains(self) -> tuple[float, ...]:
+        return self._eq_gains
+
+    @property
+    def equalizer_preamp(self) -> float:
+        return self._eq_preamp
+
+    @property
+    def loudness(self) -> bool:
+        return self._loudness
+
+    @property
+    def audio_device(self) -> str:
+        return self._audio_device
+
+    @property
+    def audio_devices(self) -> tuple[tuple[str, str], ...]:
+        return self._audio_devices
+
+    @property
+    def audio_info(self) -> dict[str, object]:
+        return dict(self._audio_info)
+
+    @property
+    def ab_loop(self) -> tuple[float | None, float | None]:
+        return self._ab_a, self._ab_b
+
+    @property
+    def sleep_remaining(self) -> int:
+        if self._sleep_after_track:
+            return 0
+        if self._sleep_deadline is None:
+            return 0
+        return max(0, int(round(self._sleep_deadline - time.monotonic())))
+
+    @property
+    def sleep_after_track(self) -> bool:
+        return self._sleep_after_track
+
+    @property
+    def mpv_binary(self) -> str:
+        return player.find_mpv(self.cfg.get("player.mpv_path", "")) or ""
+
+    def capabilities(self, *, refresh: bool = False) -> dsp.Capabilities:
+        """当前 mpv 的能力矩阵。结果按可执行文件路径缓存。"""
+        binary = self.mpv_binary
+        if (
+            refresh
+            or self._capabilities is None
+            or self._capabilities_binary != binary
+        ):
+            self._capabilities = dsp.probe(binary)
+            self._capabilities_binary = binary
+        return self._capabilities
+
     # ------------------------------------------------------------ 装配
 
     def set_local_provider(self, provider: Callable[[Song], Path | None] | None) -> None:
         """红心页注入「这首歌下载过没有」。本地文件直接播路径，不取直链。"""
         self._local_provider = provider
+
+    def set_stream_provider(self, provider: Callable[[Song], object] | None) -> None:
+        """注入流媒体取链（Subsonic/Jellyfin）。取链在后台线程执行。"""
+        self._stream_provider = provider
 
     # ------------------------------------------------------------ 队列
 
@@ -274,6 +414,125 @@ class PlaybackController(QObject):
         self.positionChanged.emit(0.0, 0.0)
         self._emit_track()
         self.stateChanged.emit(self._state)
+
+    # ------------------------------------------------------------ 队列编辑
+
+    def insert_next(self, songs: Song | Sequence[Song]) -> int:
+        """把歌插到当前曲目后面（没有当前曲目时插到最前面）。
+
+        返回实际插入的条数。正在播放的歌不会被打断。
+        """
+        items = [songs] if isinstance(songs, Song) else list(songs)
+        items = [song for song in items if song is not None]
+        if not items:
+            return 0
+        position = 0 if self._index is None else self._index + 1
+        self._queue[position:position] = items
+        self.queueChanged.emit()
+        return len(items)
+
+    def append(self, songs: Song | Sequence[Song]) -> int:
+        """追加到队尾。"""
+        items = [songs] if isinstance(songs, Song) else list(songs)
+        items = [song for song in items if song is not None]
+        if not items:
+            return 0
+        self._queue.extend(items)
+        if self._index is None and self._current is not None:
+            self._index = self._index_of(self._current.id)
+        self.queueChanged.emit()
+        return len(items)
+
+    def remove_at(self, index: int) -> Song | None:
+        """移除第 ``index`` 首。返回被移除的歌，越界返回 ``None``。"""
+        if not (0 <= index < len(self._queue)):
+            return None
+        removed = self._queue.pop(index)
+        if self._index is None:
+            pass
+        elif index < self._index:
+            self._index -= 1
+        elif index == self._index:
+            # 移掉正在播的歌：停下，但队列保留。索引落在原位置的下一首上
+            was_current = self._current is not None and self._current.id == removed.id
+            self._index = index if index < len(self._queue) else (
+                len(self._queue) - 1 if self._queue else None
+            )
+            if was_current:
+                self._hard_stop()
+                self._current = None
+                self._state = STATE_IDLE
+                self._paused = True
+                self._position = 0.0
+                self._duration = 0.0
+                self._anchor_pos = 0.0
+                self._anchor_at = time.monotonic()
+                self.positionChanged.emit(0.0, 0.0)
+                self._emit_track()
+                self.stateChanged.emit(self._state)
+        if not self._queue:
+            self._index = None
+        self.queueChanged.emit()
+        return removed
+
+    def remove_songs(self, song_ids: Iterable[int]) -> int:
+        """按歌曲 ID 批量移除（保留第一次出现的匹配）。返回移除条数。"""
+        wanted = {int(song_id) for song_id in song_ids}
+        if not wanted:
+            return 0
+        keep = [song for song in self._queue if song.id not in wanted]
+        removed = len(self._queue) - len(keep)
+        if not removed:
+            return 0
+        current = self._current
+        self._queue = keep
+        if current is None:
+            self._index = None
+        else:
+            found = self._index_of(current.id)
+            if found is None:
+                self._hard_stop()
+                self._current = None
+                self._index = None
+                self._state = STATE_IDLE
+                self._paused = True
+                self._position = 0.0
+                self._duration = 0.0
+                self.positionChanged.emit(0.0, 0.0)
+                self._emit_track()
+                self.stateChanged.emit(self._state)
+            else:
+                self._index = found
+        self.queueChanged.emit()
+        return removed
+
+    def move(self, source: int, target: int) -> bool:
+        """把第 ``source`` 首移到 ``target``（目标索引按移动后的列表算）。"""
+        if not (0 <= source < len(self._queue)):
+            return False
+        target = max(0, min(int(target), len(self._queue) - 1))
+        if source == target:
+            return False
+        song = self._queue.pop(source)
+        self._queue.insert(target, song)
+        if self._index == source:
+            self._index = target
+        elif source < self._index <= target:
+            self._index -= 1
+        elif target <= self._index < source:
+            self._index += 1
+        self.queueChanged.emit()
+        return True
+
+    def shuffle_remaining(self) -> None:
+        """随机打乱当前曲目之后的顺序；当前曲目原位不动。"""
+        start = 0 if self._index is None else self._index + 1
+        tail = self._queue[start:]
+        if len(tail) < 2:
+            return
+        random.shuffle(tail)
+        self._queue[start:] = tail
+        self.queueChanged.emit()
 
     def play_at(self, index: int, *, remember: bool = True) -> None:
         """播放队列里的第 ``index`` 首。"""
@@ -404,6 +663,8 @@ class PlaybackController(QObject):
 
     def set_volume(self, value: int) -> None:
         self._volume = player.clamp_volume(value, self._volume)
+        if self._audio_device:
+            self._device_volumes[self._audio_device] = int(self._volume)
         if self._player is not None and self.player_running:
             try:
                 self._player.set_volume(self._volume)
@@ -428,6 +689,179 @@ class PlaybackController(QObject):
         order = [mode for _label, mode in MODES]
         self.set_mode(order[(order.index(self._mode) + 1) % len(order)])
 
+    # ------------------------------------------------------------ 音频工具
+
+    def _apply_property(self, name: str, value: object) -> None:
+        if self._player is None or not self.player_running:
+            return
+        try:
+            self._player.set_property(name, value)
+        except player.PlayerError as exc:
+            self.errorRaised.emit(str(exc))
+
+    def _apply_audio_filters(self) -> None:
+        if self._player is None or not self.player_running:
+            return
+        caps = self.capabilities()
+        chain = dsp.build_audio_filters(
+            equalizer=self._eq_enabled and caps.equalizer,
+            gains=self._eq_gains,
+            preamp=self._eq_preamp,
+            loudness=self._loudness and caps.loudnorm,
+            semitones=self._pitch if caps.rubberband else 0.0,
+        )
+        self._apply_property("af", chain)
+
+    def _apply_player_settings(self, mpv: player.MpvPlayer) -> None:
+        """新播放器起来后把倍速、滤镜、输出设备补上。"""
+        caps = self.capabilities()
+        try:
+            if caps.speed:
+                mpv.set_property("speed", self._speed)
+            if caps.pitch_correction:
+                mpv.set_property("audio-pitch-correction", True)
+            chain = dsp.build_audio_filters(
+                equalizer=self._eq_enabled and caps.equalizer,
+                gains=self._eq_gains,
+                preamp=self._eq_preamp,
+                loudness=self._loudness and caps.loudnorm,
+                semitones=self._pitch if caps.rubberband else 0.0,
+            )
+            if chain:
+                mpv.set_property("af", chain)
+            if self._audio_device:
+                mpv.set_property("audio-device", self._audio_device)
+        except player.PlayerError:
+            # 某个滤镜不可用不应打断播放；对话框里会显示能力说明
+            pass
+
+    def set_speed(self, value: float) -> None:
+        try:
+            value = max(0.5, min(2.0, round(float(value), 2)))
+        except (TypeError, ValueError):
+            return
+        if abs(value - self._speed) < 0.001:
+            return
+        self._speed = value
+        self._apply_property("speed", value)
+        self.speedChanged.emit(value)
+
+    def set_pitch(self, semitones: float) -> None:
+        try:
+            value = max(-12.0, min(12.0, round(float(semitones), 1)))
+        except (TypeError, ValueError):
+            return
+        if abs(value - self._pitch) < 0.001:
+            return
+        self._pitch = value
+        self._apply_audio_filters()
+        self.pitchChanged.emit(value)
+
+    def set_equalizer(
+        self,
+        *,
+        enabled: bool | None = None,
+        gains=None,
+        preamp: float | None = None,
+    ) -> None:
+        if enabled is not None:
+            self._eq_enabled = bool(enabled)
+        if gains is not None:
+            self._eq_gains = dsp.normalize_gains(gains)
+        if preamp is not None:
+            try:
+                self._eq_preamp = max(-12.0, min(12.0, float(preamp)))
+            except (TypeError, ValueError):
+                pass
+        self._apply_audio_filters()
+        self.equalizerChanged.emit()
+
+    def set_loudness(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._loudness:
+            return
+        self._loudness = enabled
+        self._apply_audio_filters()
+        self.equalizerChanged.emit()
+
+    def set_audio_device(self, name: str) -> None:
+        name = str(name or "")
+        # 记住当前设备的音量，再切到新设备并按它自己的记忆恢复
+        self._device_volumes[self._audio_device or "auto"] = int(self._volume)
+        self._audio_device = name
+        self._apply_property("audio-device", name or "auto")
+        remembered = self._device_volumes.get(name or "auto")
+        if remembered is not None:
+            self.set_volume(remembered)
+        self.audioInfoChanged.emit()
+
+    def set_ab_a(self, seconds: float | None) -> None:
+        self._ab_a = None if seconds is None else max(0.0, float(seconds))
+        self._apply_ab_loop()
+
+    def set_ab_b(self, seconds: float | None) -> None:
+        self._ab_b = None if seconds is None else max(0.0, float(seconds))
+        self._apply_ab_loop()
+
+    def clear_ab_loop(self) -> None:
+        self._ab_a = None
+        self._ab_b = None
+        self._apply_ab_loop()
+
+    def _apply_ab_loop(self) -> None:
+        if self._player is not None and self.player_running:
+            try:
+                self._player.set_property(
+                    "ab-loop-a", self._ab_a if self._ab_a is not None else "no"
+                )
+                self._player.set_property(
+                    "ab-loop-b", self._ab_b if self._ab_b is not None else "no"
+                )
+            except player.PlayerError as exc:
+                self.errorRaised.emit(str(exc))
+        self.abLoopChanged.emit(self._ab_a, self._ab_b)
+
+    # ------------------------------------------------------------ 定时关闭
+
+    def start_sleep(self, minutes: int) -> None:
+        try:
+            minutes = int(minutes)
+        except (TypeError, ValueError):
+            return
+        if minutes <= 0:
+            return
+        self._sleep_after_track = False
+        self._sleep_deadline = time.monotonic() + minutes * 60
+        self._sleep_timer.start()
+        self.sleepTimerChanged.emit(minutes * 60, False)
+
+    def sleep_after_current_track(self) -> None:
+        self._sleep_after_track = True
+        self._sleep_deadline = None
+        self._sleep_timer.stop()
+        self.sleepTimerChanged.emit(0, True)
+
+    def cancel_sleep(self) -> None:
+        was_active = self._sleep_deadline is not None or self._sleep_after_track
+        self._sleep_deadline = None
+        self._sleep_after_track = False
+        self._sleep_timer.stop()
+        if was_active:
+            self.sleepTimerChanged.emit(0, False)
+
+    def _sleep_tick(self) -> None:
+        if self._sleep_deadline is None:
+            self._sleep_timer.stop()
+            return
+        remaining = self.sleep_remaining
+        if remaining > 0:
+            self.sleepTimerChanged.emit(remaining, False)
+            return
+        self.cancel_sleep()
+        if not self._paused:
+            self.toggle()
+        self.sleepTimerFinished.emit("定时关闭：已暂停播放")
+
     def stop(self) -> None:
         """停下当前曲目，保留队列与当前歌曲信息。"""
         self._hard_stop()
@@ -447,11 +881,130 @@ class PlaybackController(QObject):
             self._player.stop()
             self._player = None
         self._ticker.stop()
+        self._sleep_timer.stop()
 
     def save_config(self) -> None:
         self.cfg.set("player.volume", int(self._volume))
         self.cfg.set("player.level", self._level)
         self.cfg.set("player.mode", self._mode)
+        self.cfg.set("player.speed", float(self._speed))
+        self.cfg.set("player.pitch", float(self._pitch))
+        self.cfg.set("player.equalizer", {
+            "enabled": bool(self._eq_enabled),
+            "gains": list(self._eq_gains),
+            "preamp": float(self._eq_preamp),
+        })
+        self.cfg.set("player.loudness", bool(self._loudness))
+        self.cfg.set("player.audio_device", self._audio_device)
+        # 只保留最近 30 个设备的音量记忆
+        items = list(self._device_volumes.items())[-30:]
+        self.cfg.set("player.device_volumes", dict(items))
+        self._persist_queue()
+
+    # ------------------------------------------------------------ 队列持久化
+
+    @staticmethod
+    def _song_to_dict(song: Song) -> dict:
+        return {
+            "id": int(song.id),
+            "name": song.name,
+            "artists": list(song.artists),
+            "fee": int(song.fee),
+            "album": song.album,
+            "duration": int(song.duration),
+            "pic_url": song.pic_url,
+            "path": song.path,
+            "quality": song.quality,
+            "source": song.source,
+            "stream_id": song.stream_id,
+        }
+
+    @staticmethod
+    def _song_from_dict(data: object) -> Song | None:
+        if not isinstance(data, dict):
+            return None
+        try:
+            song_id = int(data.get("id") or 0)
+        except (TypeError, ValueError):
+            return None
+        name = str(data.get("name") or "")
+        if not song_id or not name:
+            return None
+        raw_artists = data.get("artists")
+        artists = tuple(
+            str(artist) for artist in raw_artists
+            if artist
+        ) if isinstance(raw_artists, list) else ()
+        try:
+            fee = int(data.get("fee") or 0)
+            duration = int(data.get("duration") or 0)
+        except (TypeError, ValueError):
+            fee, duration = 0, 0
+        return Song(
+            id=song_id,
+            name=name,
+            artists=artists,
+            fee=fee,
+            album=str(data.get("album") or ""),
+            duration=duration,
+            pic_url=str(data.get("pic_url") or ""),
+            path=str(data.get("path") or ""),
+            quality=str(data.get("quality") or ""),
+            source=str(data.get("source") or ""),
+            stream_id=str(data.get("stream_id") or ""),
+        )
+
+    def _restore_queue(self) -> None:
+        """恢复上次的队列，但**不自动播放**。
+
+        只保存歌曲标识和进度，不保存已经解析出来的播放地址 —— 直链有
+        ``expi``，下次启动时多半已经过期。
+        """
+        try:
+            raw = self.cfg.get("player.queue", [])
+        except Exception:  # noqa: BLE001 - 配置坏了也不能影响启动
+            raw = []
+        songs = [self._song_from_dict(item) for item in raw] if isinstance(raw, list) else []
+        songs = [song for song in songs if song is not None]
+        if not songs:
+            return
+        self._queue = songs
+        try:
+            index = int(self.cfg.get("player.queue_index", -1))
+        except (TypeError, ValueError):
+            index = -1
+        if not (0 <= index < len(songs)):
+            index = 0
+        self._index = index
+        self._current = songs[index]
+        self._duration = self._current.duration / 1000 if self._current.duration else 0.0
+        try:
+            position = float(self.cfg.get("player.position", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            position = 0.0
+        if self._duration > 0:
+            position = min(max(0.0, position), self._duration)
+        self._position = position
+        self._anchor_pos = position
+        self._anchor_at = time.monotonic()
+        self._paused = True
+        self._state = STATE_IDLE
+
+    def _schedule_persist(self) -> None:
+        if self._shutting_down:
+            return
+        self._queue_timer.start()
+
+    def _persist_queue(self) -> None:
+        # 队列可能上千首，但只是几万个字符；写入由 Config 自己节流/原子替换
+        self.cfg.set("player.queue", [self._song_to_dict(song) for song in self._queue])
+        self.cfg.set("player.queue_index", -1 if self._index is None else int(self._index))
+        self.cfg.set("player.position", float(self._position))
+        try:
+            self.cfg.save()
+        except OSError:
+            # 配置目录只读/磁盘满时不能影响播放；下次正常退出还会再写一次
+            pass
 
     # ------------------------------------------------------------ 起播
 
@@ -460,6 +1013,12 @@ class PlaybackController(QObject):
         # 顶掉（本地文件这条路以前不会推进 token）
         self._play_token += 1
         self._wanted = None
+
+        # A-B 循环与音频信息都只对当前文件有意义
+        if self._ab_a is not None or self._ab_b is not None:
+            self.clear_ab_loop()
+        self._audio_info = {}
+        self.audioInfoChanged.emit()
 
         self._current = song
         # 换歌就先忘掉上一首的实际音质；本地分支马上填回来，流媒体等取链结果
@@ -475,6 +1034,7 @@ class PlaybackController(QObject):
         self._pending_seek = None
         self.positionChanged.emit(0.0, self._duration)
         self._emit_track()
+        self.trackStarted.emit(song)
         self._set_state(STATE_LOADING)
 
         if player.find_mpv(self.cfg.get("player.mpv_path", "")) is None:
@@ -497,6 +1057,10 @@ class PlaybackController(QObject):
             # 音质跟播放设置里的流媒体档位没有关系
             self._set_quality(localmusic.describe_quality(local))
             self._load(str(local))
+            return
+
+        if song.source and song.source != "local":
+            self._start_stream(song)
             return
 
         cached = self._cache.get((song.id, self._level))
@@ -552,13 +1116,58 @@ class PlaybackController(QObject):
         self._cache.put((song.id, level), source)
         self._load(source.url, source=source)
 
-    def _load(self, target: str, source=None) -> None:
+    def _start_stream(self, song: Song) -> None:
+        """流媒体歌曲：后台向服务器换一个带认证的播放地址。"""
+        provider = self._stream_provider
+        if provider is None:
+            self._fail("未配置流媒体服务器，无法播放这首歌")
+            return
+        token = self._play_token
+
+        def work():
+            return provider(song)
+
+        task = BackgroundTask(work, parent=self)
+        self._fetch_task = task
+        task.done.connect(lambda source, t=token: self._on_stream_source(t, source, ""))
+        task.failed.connect(
+            lambda message, t=token: self._on_stream_source(t, None, message)
+        )
+        task.start()
+
+    def _on_stream_source(self, token: int, source, error: str) -> None:
+        if token != self._play_token:
+            return  # 用户已经点了别的歌；别把新任务的引用也清掉
+        self._fetch_task = None
+        if source is None:
+            name = self._current.name if self._current else ""
+            self._fail(f"《{name}》无法播放：{error}")
+            return
+        url = str(getattr(source, "url", "") or "")
+        if not url:
+            self._fail("流媒体服务器没有返回播放地址")
+            return
+        headers = getattr(source, "headers", ()) or ()
+        self._load(url, source=source, headers=headers)
+
+    def _load(self, target: str, source=None, headers=()) -> None:
         if source is not None:
             # 接口会在非会员请求高音质时悄悄退回一档，这里记下的才是实际档位
             self._set_quality(getattr(source, "level", "") or "")
+        if (
+            source is not None
+            and getattr(source, "trial", False)
+            and not self.cfg.get("player.allow_trial", False)
+        ):
+            name = self._current.name if self._current else ""
+            self._fail(
+                f"《{name}》只提供试听片段，完整版需要会员。"
+                "可在「设置 → 播放器」里允许试听播放。"
+            )
+            return
         try:
             mpv = self._ensure_player()
-            mpv.load(target)
+            mpv.load(target, headers=headers)
         except player.PlayerError as exc:
             self._fail(str(exc))
             return
@@ -604,6 +1213,7 @@ class PlaybackController(QObject):
         holder.append(mpv)
         mpv.start()
         self._player = mpv
+        self._apply_player_settings(mpv)
         return mpv
 
     def _local_path(self, song: Song) -> Path | None:
@@ -695,6 +1305,11 @@ class PlaybackController(QObject):
                 except (TypeError, ValueError):
                     pass
                 self.volumeChanged.emit(self._volume)
+            elif name in (
+                "audio-codec-name", "audio-params", "audio-bitrate",
+                "current-ao", "audio-device", "audio-device-list",
+            ):
+                self._on_audio_property(name, value)
             return
 
         if kind == "end-file":
@@ -717,8 +1332,51 @@ class PlaybackController(QObject):
         if kind == "shutdown":
             self._set_state(STATE_IDLE)
 
+    def _on_audio_property(self, name: str, value) -> None:
+        if name == "audio-device-list":
+            devices: list[tuple[str, str]] = []
+            if isinstance(value, list):
+                for item in value:
+                    if not isinstance(item, dict):
+                        continue
+                    device = str(item.get("name") or "")
+                    if device and all(device != row[0] for row in devices):
+                        devices.append((device, str(item.get("description") or "")))
+            new_devices = tuple(devices)
+            if new_devices and new_devices != self._audio_devices:
+                self._audio_devices = new_devices
+                self.audioDevicesChanged.emit()
+            return
+
+        if name == "audio-params":
+            info = value if isinstance(value, dict) else {}
+            self._audio_info["samplerate"] = info.get("samplerate")
+            self._audio_info["channels"] = info.get("channel-count")
+            self._audio_info["format"] = info.get("format")
+            self._audio_info["channel_layout"] = info.get("channel-layout")
+        elif value is not None:
+            key = {
+                "audio-codec-name": "codec",
+                "audio-bitrate": "bitrate",
+                "current-ao": "ao",
+                "audio-device": "device",
+            }.get(name, name)
+            self._audio_info[key] = value
+        self.audioInfoChanged.emit()
+
     def _on_eof(self) -> None:
         if self._shutting_down or self._awaiting_load:
+            return
+        if self._current is not None:
+            self.trackEnded.emit(self._current)
+        if self._sleep_after_track:
+            self._sleep_after_track = False
+            self._sleep_deadline = None
+            self._sleep_timer.stop()
+            self._hard_stop()
+            self._set_state(STATE_IDLE)
+            self.sleepTimerChanged.emit(0, False)
+            self.sleepTimerFinished.emit("定时关闭：当前歌曲已播完")
             return
         if self._mode == MODE_ONE:
             self.play_at(self._index if self._index is not None else 0)

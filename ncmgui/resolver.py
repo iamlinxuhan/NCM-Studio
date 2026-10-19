@@ -170,6 +170,12 @@ class Song:
     #: 本地文件的音质描述，如「无损 44.1kHz/16bit」「极高 320 kbps」。
     #: 流媒体歌曲为空串 —— 那边的音质由播放时选的档位决定，不是文件属性
     quality: str = ""
+    #: 歌曲来源。空串表示网易云；``local`` 表示本地文件；流媒体服务器填
+    #: ``subsonic`` / ``jellyfin`` 等。3.0 之前保存的队列没有这个字段，
+    #: 反序列化时按空串处理，仍然是网易云。
+    source: str = ""
+    #: 流媒体服务器里的原始 ID（字符串）。网易云与本地文件为空
+    stream_id: str = ""
 
     @property
     def base(self) -> str:
@@ -196,6 +202,19 @@ class Song:
         if not self.fee:
             return ""
         return _FEE_LABELS.get(self.fee, "VIP")
+
+    @property
+    def fee_tag(self) -> str:
+        """列表里显示的短标记，与 SPlayer 一致：``VIP`` / ``EP``。
+
+        ``fee=8`` 是「低音质免费」，完整高音质才需要会员，不适合在歌名后面
+        占位置；下载页仍用更详细的 :attr:`fee_label`。
+        """
+        if self.fee == 1:
+            return "VIP"
+        if self.fee == 4:
+            return "EP"
+        return ""
 
     @property
     def is_paid(self) -> bool:
@@ -397,6 +416,73 @@ _URL_ERRORS = {
     -110: "当前账号或网络无权播放（可能登录失效或受地区限制）",
     301: "登录已失效，请重新登录",
 }
+
+
+def parse_player_url(payload: dict) -> AudioSource:
+    """把 ``SongPlayerV1`` 的响应翻译成播放地址。
+
+    这个接口返回的是 ``data: [ {...} ]`` 数组（与下载接口的 ``data: {...}``
+    不同）。失败码同样藏在元素自己的 ``code`` 里，顶层仍是 200。
+
+    ``freeTrialInfo`` 即使是完整歌曲也可能出现，但只有 ``end > start`` 才
+    真的是试听片段；不能只看字段是否存在。
+    """
+    items = payload.get("data")
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        raise SongUrlError(0, "接口没有返回播放地址（可能已下架或没有版权）")
+
+    data = items[0]
+    raw_code = data.get("code")
+    if raw_code is None:
+        raw_code = payload.get("code")
+    try:
+        code = int(raw_code or 0)
+    except (TypeError, ValueError):
+        code = 0
+
+    if code != 200:
+        message = _URL_ERRORS.get(code) or str(
+            data.get("message") or f"接口返回 code={code}"
+        )
+        raise SongUrlError(code, message)
+
+    url = str(data.get("url") or "").strip()
+    if not url:
+        # 没有地址时 ``fee`` 能区分「要会员」和「没版权」；SPlayer 也是这样
+        # 分类的（fee=1 单曲付费、fee=4 付费专辑）。给出可操作的提示，
+        # 比笼统的「可能已下架」有用。
+        raw_fee = data.get("fee")
+        try:
+            fee = int(raw_fee or 0)
+        except (TypeError, ValueError):
+            fee = 0
+        if fee in (1, 4):
+            raise SongUrlError(
+                -105,
+                "需要 VIP 会员或购买后才能播放这首歌"
+                if fee == 1 else "需要先购买这张专辑才能播放",
+            )
+        raise SongUrlError(code, "接口没有返回播放地址（可能已下架或没有版权）")
+
+    try:
+        expi = int(data.get("expi") or 600)
+    except (TypeError, ValueError):
+        expi = 600
+
+    info = data.get("freeTrialInfo")
+    trial = False
+    if isinstance(info, dict):
+        try:
+            trial = int(info.get("end") or 0) > int(info.get("start") or 0)
+        except (TypeError, ValueError):
+            trial = False
+
+    return AudioSource(
+        url=url,
+        level=str(data.get("level") or ""),
+        expi=expi,
+        trial=trial,
+    )
 
 
 def parse_song_url(payload: dict) -> AudioSource:
@@ -635,11 +721,14 @@ class Resolver:
         ``level`` 取值与下载页一致：standard / higher / exhigh / lossless / hires。
         非会员请求高音质时，接口通常退回一个能给的档位（``AudioSource.level``
         是**实际**拿到的），拿不到就是 :class:`SongUrlError`。
+
+        用 ``SongPlayerV1`` 而不是 ``SongDownloadUrlV1``：后者是下载接口，
+        播放时调用会消耗每日下载额度，语义也不对。下载页仍然走下载接口。
         """
         payload = self._curl(
-            "SongDownloadUrlV1", {"id": str(song_id), "level": level}
+            "SongPlayerV1", {"ids": [int(song_id)], "level": level}
         )
-        return parse_song_url(payload)
+        return parse_player_url(payload)
 
     # ------------------------------------------------------------- 目标展开
 
@@ -689,7 +778,9 @@ class Resolver:
                     "private_cloud": "true",
                     "work_type": 1,
                     "order": "hot",
-                    "offset": page,
+                    # offset 是「跳过多少首」，不是页码。以前直接传 page，
+                    # 第 2 页起仍在取第一页，歌手作品一多就死循环/重复。
+                    "offset": (page - 1) * page_size,
                     "limit": page_size,
                 },
             )
@@ -997,6 +1088,9 @@ def _selftest() -> int:
     check("free 无标记", free.fee_label, "")
     check("free.marked 原样", free.marked, "甲 - 免费歌")
     check("fee=1 → VIP", vip.fee_label, "VIP")
+    check("fee=1 列表短标记", vip.fee_tag, "VIP")
+    check("fee=4 列表短标记", album.fee_tag, "EP")
+    check("fee=8 列表不占标记", low.fee_tag, "")
     check("fee=4 → 付费专辑", album.fee_label, "付费专辑")
     check("fee=8 → VIP音质", low.fee_label, "VIP音质")
     check("未知非零 fee 兜底为 VIP", Song(5, "x", fee=99).fee_label, "VIP")
@@ -1115,21 +1209,70 @@ def _selftest() -> int:
     else:
         failures.append("data 不是对象时应当抛 SongUrlError")
 
-    # ---- song_url 的请求形状：id 是字符串，level 原样传
+    # ---- song_url 的请求形状：ids 是数组，level 原样传
     class _FakeResolver(Resolver):
         def __init__(self) -> None:  # 跳过父类的 ncmctl 依赖
             self.calls: list[tuple[str, dict]] = []
 
         def _curl(self, method: str, data: dict) -> dict:
             self.calls.append((method, data))
-            return {"code": 200, "data": {"code": 200, "url": "u", "level": "standard"}}
+            return {
+                "code": 200,
+                "data": [{"code": 200, "url": "u", "level": "standard", "expi": 1200}],
+            }
 
     fake = _FakeResolver()
     result = fake.song_url(123, "lossless")
-    check("song_url 调用的方法", fake.calls[0][0], "SongDownloadUrlV1")
-    check("song_url 的 id 是字符串", fake.calls[0][1]["id"], "123")
+    check("song_url 调用的方法", fake.calls[0][0], "SongPlayerV1")
+    check("song_url 的 ids 是整数数组", fake.calls[0][1]["ids"], [123])
     check("song_url 透传音质", fake.calls[0][1]["level"], "lossless")
     check("song_url 返回 URL", result.url, "u")
+    check("song_url 返回过期时间", result.expi, 1200)
+
+    # ---- 播放地址解析：数组空/元素失败/试听判定
+    for name, payload in (
+        ("data 不是数组", {"code": 200, "data": {}}),
+        ("data 为空数组", {"code": 200, "data": []}),
+        ("元素不是对象", {"code": 200, "data": ["x"]}),
+    ):
+        try:
+            parse_player_url(payload)
+        except SongUrlError:
+            pass
+        else:
+            failures.append(f"{name} 时应当抛 SongUrlError")
+    try:
+        parse_player_url({"code": 200, "data": [{"code": 404, "url": ""}]})
+    except SongUrlError as exc:
+        check("播放地址失败码翻译", exc.code, 404)
+    else:
+        failures.append("元素 code=404 时应当抛 SongUrlError")
+    # 没有 URL 时 fee 决定提示文案：1=会员单曲，4=付费专辑
+    for fee, needle in ((1, "VIP"), (4, "专辑")):
+        try:
+            parse_player_url(
+                {"code": 200, "data": [{"code": 200, "url": "", "fee": fee}]}
+            )
+        except SongUrlError as exc:
+            check(f"无地址 fee={fee} 提示", needle in str(exc), True)
+        else:
+            failures.append(f"无地址 fee={fee} 时应当抛 SongUrlError")
+    check(
+        "freeTrialInfo 的 0..0 不算试听",
+        parse_player_url(
+            {"code": 200, "data": [{"code": 200, "url": "u",
+                                    "freeTrialInfo": {"start": 0, "end": 0}}]}
+        ).trial,
+        False,
+    )
+    check(
+        "freeTrialInfo 有区间才算试听",
+        parse_player_url(
+            {"code": 200, "data": [{"code": 200, "url": "u",
+                                    "freeTrialInfo": {"start": 0, "end": 30000}}]}
+        ).trial,
+        True,
+    )
 
     # ---- 歌词：LyricV1 优先，拿不到逐字数据时回退旧 Lyric
     class _FakeLyric(Resolver):

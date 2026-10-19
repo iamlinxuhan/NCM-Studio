@@ -10,12 +10,14 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -24,21 +26,36 @@ from PyQt6.QtWidgets import (
 )
 
 from . import APP_NAME, VERSION, ncmctl, theme
+from .actions import SongActions
+from .api import ApiClient, ApiError, AuthRequired
 from .config import Config, cleanup_private_tmp
-from .images import CoverStore
+from .history_recorder import HistoryRecorder
+from .images import CoverStore, ImageStore, fetch as fetch_image
+from .desktop.lyrics_window import DesktopLyricsWindow
+from .desktop.tray import TrayIcon
+from .library import LibraryDB
+from .lyrics_service import LyricsService
 from .mpris import MprisService
 from .pages.account import AccountPage
 from .pages.cloud import CloudPage
+from .pages.detail import DetailHost
+from .pages.discover import DiscoverPage
 from .pages.download import DownloadPage
+from .pages.favorites import FavoritesPage
+from .pages.history import HistoryPage
 from .pages.liked import LikedPage
 from .pages.local import LocalPage
 from .pages.ncm import NcmPage
 from .pages.player import PlayerPage
 from .pages.proxy import ProxyPage
+from .pages.search import SearchPage
 from .pages.settings import SettingsPage
+from .pages.stats import StatsPage
+from .pages.streaming import StreamingPage
 from .pages.tasks import TasksPage
 from .pages.tools import ToolsPage
 from .playback import PlaybackController
+from .streaming import StreamingRegistry
 from .widgets.card import Chip
 from .widgets.console import ConsolePanel, classify
 from .widgets.playbackbar import PlaybackBar
@@ -48,11 +65,17 @@ from .workers import BackgroundTask
 #: (键, 图标, 名称, 页面类)
 NAV_ITEMS = (
     ("account", "◈", "账号", AccountPage),
+    ("discover", "✦", "发现", DiscoverPage),
+    ("search", "⌕", "搜索", SearchPage),
     ("liked", "♡", "我喜欢的音乐", LikedPage),
-    ("local", "♪", "本地音乐", LocalPage),
+    ("favorites", "★", "收藏", FavoritesPage),
+    ("local", "♪", "本地曲库", LocalPage),
+    ("history", "⟲", "播放历史", HistoryPage),
+    ("stats", "▤", "听歌统计", StatsPage),
     ("download", "▼", "下载", DownloadPage),
     ("ncm", "◇", "NCM 解码", NcmPage),
     ("cloud", "☁", "云盘上传", CloudPage),
+    ("streaming", "◉", "流媒体", StreamingPage),
     ("tasks", "◑", "账号任务", TasksPage),
     ("proxy", "⇄", "监控代理", ProxyPage),
     ("tools", "▧", "调试工具", ToolsPage),
@@ -71,17 +94,41 @@ class MainWindow(QMainWindow):
         self.cfg = cfg
         self.binary = ncmctl.find_binary(cfg.get("ncmctl_path", ""))
         self._logged_in = ncmctl.is_logged_in(cfg.get("home", ""))
+        #: cookie.json 的 (mtime, size)；变化说明刚登录/登出，触发在线校验
+        self._cookie_stamp = self._cookie_signature()
+        self._login_task: BackgroundTask | None = None
+        #: 从播放页返回时回到的控件（可能是详情页，不是导航页）
+        self._player_return_widget: QWidget | None = None
         #: 截图/自检时置真，切页面不触发联网加载
         self.defer_page_loads = False
+        #: 托盘「退出」会置真，绕过「关闭到托盘」的拦截
+        self._force_quit = False
 
+        # 本地曲库要在建页之前打开：本地页在 build() 里直接查询它
+        self.library = LibraryDB(
+            str(self.cfg.get("library.db") or "").strip() or None
+        )
         # 播放器与封面缓存要在建页之前就位：各页面在 build() 里直接订阅它们
         self.covers = CoverStore(self)
+        self.image_store = ImageStore(
+            self,
+            fetcher=lambda url: fetch_image(url, self._api_proxy()),
+        )
+        self.client = ApiClient(cfg.get("home", ""), proxy=self._api_proxy())
         self.playback = PlaybackController(
             cfg,
             binary=lambda: self.binary,
             opts=self.global_opts,
             parent=self,
         )
+        #: 自建流媒体服务器（Subsonic/Jellyfin）的配置与取链
+        self.streaming = StreamingRegistry(cfg, parent=self)
+        self.playback.set_stream_provider(self.streaming.resolve)
+        #: 歌词在播放页与桌面歌词窗之间共享，避免同一首歌请求两次
+        self.lyrics = LyricsService(self, parent=self)
+        self.actions = SongActions(self)
+        #: 播放满 5 秒后写一条本地播放历史；统计页直接读同一张表
+        self.history = HistoryRecorder(self.library, self.playback, parent=self)
         #: 蓝牙耳机/系统媒体键走 MPRIS；真正 start() 由 main.py 决定，
         #: 自检与截图不往会话总线上注册服务
         self.mpris = MprisService(self.playback, self, parent=self)
@@ -100,8 +147,18 @@ class MainWindow(QMainWindow):
         self._restore_window_size()
 
         self._build_ui()
+
+        # 桌面歌词与托盘在页面建好之后创建：托盘菜单要能调播放控制与歌词窗
+        self.desktop_lyrics = DesktopLyricsWindow(self)
+        self.desktop_lyrics.closed.connect(self._on_desktop_lyrics_closed)
+        self.tray = TrayIcon(self)
+        self.tray_available = self.tray.start()
+        QTimer.singleShot(0, self._restore_desktop_lyrics)
+
         self._refresh_login_ui()
         self._poll_login()
+        # 启动阶段不联网；等窗口立起来之后再校验一次登录态
+        QTimer.singleShot(1800, self._probe_account)
 
     # ==================================================================== 构建
 
@@ -196,6 +253,14 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {}
 
+        # 导航项多了以后，小窗口装不下所有按钮；放进滚动区，品牌区和底部
+        # 信息保持固定
+        nav_widget = QWidget()
+        nav_widget.setObjectName("NavList")
+        nav_layout = QVBoxLayout(nav_widget)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
+
         for index, (key, glyph, label, page_cls) in enumerate(NAV_ITEMS):
             button = QPushButton(f"  {theme.safe_glyph(glyph, '·')}   {label}")
             button.setObjectName("Nav")
@@ -206,24 +271,39 @@ class MainWindow(QMainWindow):
             self._nav_group.addButton(button)
             self._nav_buttons[key] = button
             self._nav_index[key] = index
-            layout.addWidget(button)
+            nav_layout.addWidget(button)
 
             page = page_cls(self)
             self.pages[key] = page
             self.stack.addWidget(page)
 
+        nav_layout.addStretch(1)
+        nav_scroll = QScrollArea()
+        nav_scroll.setObjectName("NavScroll")
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        nav_scroll.setWidget(nav_widget)
+        layout.addWidget(nav_scroll, 1)
+
         # 播放页覆盖内容区但不是导航项：放在所有导航页之后，_nav_index 不变
         self.player_page = PlayerPage(self)
         self.stack.addWidget(self.player_page)
+
+        # 详情页也是一个非导航栈；歌单/专辑/歌手都在这里打开
+        self.detail_host = DetailHost(self)
+        self.detail_host.emptied.connect(
+            lambda: self.show_page(self._last_page_key or "account")
+        )
+        self.stack.addWidget(self.detail_host)
 
         if "account" in self._nav_buttons:
             self._nav_buttons["account"].setChecked(True)
         self.playback.set_local_provider(self.pages["liked"].local_path)
         self.playback.errorRaised.connect(self._on_playback_error)
         self.playback.playerExited.connect(self._on_player_exited)
+        self.playback.sleepTimerFinished.connect(self.toast)
         self.player_page.backRequested.connect(self.return_from_player)
-
-        layout.addStretch(1)
 
         # 底部信息
         footer = QWidget()
@@ -383,6 +463,9 @@ class MainWindow(QMainWindow):
         index = self._nav_index.get(key)
         if index is None:
             return
+        # 从详情页切到导航页：整叠详情作废
+        if self.stack.currentWidget() is self.detail_host:
+            self.detail_host.clear()
         self._last_page_key = key
         self.stack.setCurrentIndex(index)
         self._nav_buttons[key].setChecked(True)
@@ -394,6 +477,21 @@ class MainWindow(QMainWindow):
                 hook()
             except RuntimeError:
                 pass
+
+    def open_detail(self, kind: str, item_id: int) -> None:
+        """打开歌单/专辑/歌手详情。所有列表页都走这个入口。"""
+        current = self.stack.currentWidget()
+        for key, page in self.pages.items():
+            if page is current:
+                self._last_page_key = key
+                break
+        # 详情不是导航项，侧栏任何按钮都不该保持选中
+        self._nav_group.setExclusive(False)
+        for button in self._nav_buttons.values():
+            button.setChecked(False)
+        self._nav_group.setExclusive(True)
+        self.stack.setCurrentWidget(self.detail_host)
+        self.detail_host.open(kind, int(item_id))
 
     def toggle_queue_panel(self) -> None:
         """播放条的播放列表按钮：展开队列，再点一次收起。
@@ -409,6 +507,8 @@ class MainWindow(QMainWindow):
     def open_player_page(self, queue: bool | None = None) -> None:
         """切到播放页；``queue`` 为真时顺带展开播放队列。"""
         current = self.stack.currentWidget()
+        if current is not self.player_page:
+            self._player_return_widget = current
         for key, page in self.pages.items():
             if page is current:
                 self._last_page_key = key
@@ -431,17 +531,118 @@ class MainWindow(QMainWindow):
                 pass
 
     def return_from_player(self) -> None:
+        widget = self._player_return_widget
+        if (widget is not None and widget is not self.player_page
+                and self.stack.indexOf(widget) >= 0):
+            self.stack.setCurrentWidget(widget)
+            if widget is self.detail_host:
+                self._nav_group.setExclusive(False)
+                for button in self._nav_buttons.values():
+                    button.setChecked(False)
+                self._nav_group.setExclusive(True)
+                self.detail_host.on_show()
+                return
+            for key, page in self.pages.items():
+                if page is widget:
+                    self._nav_buttons[key].setChecked(True)
+                    self._last_page_key = key
+                    hook = getattr(page, "on_show", None)
+                    if callable(hook) and not self.defer_page_loads:
+                        try:
+                            hook()
+                        except RuntimeError:
+                            pass
+                    return
         self.show_page(self._last_page_key or "account")
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        if (
-            event.key() == Qt.Key.Key_Escape
-            and self.stack.currentWidget() is self.player_page
-        ):
+        key = event.key()
+        modifiers = event.modifiers()
+        if key == Qt.Key.Key_Escape and self.stack.currentWidget() is self.player_page:
             self.return_from_player()
             event.accept()
             return
+
+        # 应用内快捷键。用 keyPressEvent 而不是全局 QShortcut：输入框拿到
+        # 空格/字母时应该正常输入，事件根本不冒泡到这里。
+        if modifiers == Qt.KeyboardModifier.NoModifier and key == Qt.Key.Key_Space:
+            self.playback.toggle()
+            event.accept()
+            return
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            if key == Qt.Key.Key_Left:
+                self.playback.previous()
+            elif key == Qt.Key.Key_Right:
+                self.playback.next()
+            elif key == Qt.Key.Key_Up:
+                self.playback.set_volume(self.playback.volume + 5)
+            elif key == Qt.Key.Key_Down:
+                self.playback.set_volume(self.playback.volume - 5)
+            elif key == Qt.Key.Key_F:
+                self.show_page("search")
+                page = self.pages.get("search")
+                focus = getattr(page, "focus_search", None)
+                if callable(focus):
+                    focus()
+            elif key == Qt.Key.Key_Comma:
+                self.show_page("settings")
+            elif key == Qt.Key.Key_L:
+                self.toggle_desktop_lyrics()
+            else:
+                super().keyPressEvent(event)
+                return
+            event.accept()
+            return
+        if (
+            modifiers == Qt.KeyboardModifier.NoModifier
+            and self.stack.currentWidget() is self.player_page
+            and key in (Qt.Key.Key_Left, Qt.Key.Key_Right)
+        ):
+            delta = -5.0 if key == Qt.Key.Key_Left else 5.0
+            self.playback.seek(max(0.0, self.playback.position + delta))
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    # ------------------------------------------------------------ 桌面集成
+
+    def show_normal(self) -> None:
+        """从托盘/通知回到主窗口。"""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def quit_from_tray(self) -> None:
+        """托盘「退出」：绕过关闭到托盘的拦截，走完整的退出清理。"""
+        self._force_quit = True
+        self.close()
+
+    def toggle_desktop_lyrics(self, force: bool | None = None) -> None:
+        if not hasattr(self, "desktop_lyrics"):
+            return
+        if force is True:
+            self.desktop_lyrics.open_lyrics()
+        elif force is False:
+            self.desktop_lyrics.hide_lyrics()
+        else:
+            self.desktop_lyrics.toggle()
+        try:
+            self.tray.sync_lyrics(self.desktop_lyrics.isVisible())
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _restore_desktop_lyrics(self) -> None:
+        """上次退出时开着就恢复；自检/截图不弹额外的窗口。"""
+        if self.defer_page_loads:
+            return
+        if self.cfg.get("player.desktop_lyrics.enabled", False):
+            self.desktop_lyrics.open_lyrics()
+
+    def _on_desktop_lyrics_closed(self) -> None:
+        try:
+            self.tray.sync_lyrics(False)
+        except (AttributeError, RuntimeError):
+            pass
 
     def _on_playback_error(self, message: str) -> None:
         self.toast(f"播放失败：{message}")
@@ -629,9 +830,33 @@ class MainWindow(QMainWindow):
     def is_logged_in(self) -> bool:
         return self._logged_in
 
-    def refresh_login(self) -> None:
-        """重新探测登录状态，变化时通知各页面。"""
-        current = ncmctl.is_logged_in(self.cfg.get("home", ""))
+    def require_login_silent(self, action: str = "该操作") -> bool:
+        """和页面基类的 ``require_login`` 一样，但不需要页面实例。"""
+        if self._logged_in:
+            return True
+        QMessageBox.warning(
+            self,
+            "需要登录",
+            f"{action}需要登录网易云账号。<br><br>"
+            "请先到左侧「账号」页完成登录（推荐扫码，最简单）。",
+        )
+        return False
+
+    def _api_proxy(self) -> str:
+        """接口请求跟随「下载代理」设置；direct 表示直连。"""
+        try:
+            return str(self.cfg.get("update.proxy", "") or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _cookie_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = ncmctl.cookie_path(self.cfg.get("home", "")).stat()
+            return (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+
+    def _set_logged_in(self, current: bool) -> None:
         if current == self._logged_in:
             return
         self._logged_in = current
@@ -640,11 +865,62 @@ class MainWindow(QMainWindow):
             # 登出后红心歌单没了，正在播的队列也不该继续
             self.playback.stop()
             self.playback.clear_queue()
+            self.actions.clear_liked()
         self.loginChanged.emit(current)
-        for page in self.pages.values():
+        for page in (*self.pages.values(), self.detail_host):
             hook = getattr(page, "on_login_changed", None)
             if callable(hook):
                 hook(current)
+        if current:
+            self.actions.ensure_liked()
+
+    def refresh_login(self) -> None:
+        """文件层面探测登录状态；Cookie 变化时再做一次在线校验。
+
+        启动后不立即联网。登录成功（cookie.json 被 ncmctl 写入）或用户
+        手动删掉凭据时，文件签名会变化，这里据此触发。
+        """
+        signature = self._cookie_signature()
+        exists = signature is not None
+        changed = signature != self._cookie_stamp
+        self._cookie_stamp = signature
+
+        if not exists:
+            self._set_logged_in(False)
+            return
+        if not self._logged_in:
+            # 先乐观显示已登录，在线校验失败会再改回来
+            self._set_logged_in(True)
+        if changed and not self.defer_page_loads:
+            self._probe_account()
+
+    def _probe_account(self) -> None:
+        """在线校验登录态。网络故障时保持现状，避免误判为登出。"""
+        if self._login_task is not None and self._login_task.is_running:
+            return
+        if not ncmctl.is_logged_in(self.cfg.get("home", "")):
+            return
+        task = BackgroundTask(lambda: self.client.refresh_account(), parent=self)
+        self._login_task = task
+
+        def done(profile) -> None:
+            if self.defer_page_loads:
+                return
+            valid = isinstance(profile, dict) and bool(profile.get("userId"))
+            if valid:
+                self._set_logged_in(True)
+            else:
+                self._set_logged_in(False)
+
+        def failed(message: str) -> None:
+            # 断网、代理错误、接口超时都不等于登录失效；保留 Cookie 状态，
+            # 页面需要登录时再给出具体错误
+            if isinstance(message, str) and message:
+                pass
+
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
 
     def _refresh_login_ui(self) -> None:
         if self._logged_in:
@@ -674,6 +950,13 @@ class MainWindow(QMainWindow):
     def toast(self, message: str, kind: str = "info") -> None:
         self.status_message.setText(message)
         QTimer.singleShot(5000, lambda: self.status_message.setText(""))
+
+    def reload_api(self) -> None:
+        """设置里改了状态目录或代理后，重建接口客户端。"""
+        self.client = ApiClient(self.cfg.get("home", ""), proxy=self._api_proxy())
+        self._cookie_stamp = self._cookie_signature()
+        if not self.defer_page_loads:
+            self._probe_account()
 
     def reload_binary(self) -> None:
         """配置里改了 ncmctl 路径后重新探测。"""
@@ -769,6 +1052,22 @@ class MainWindow(QMainWindow):
         return box.exec() == QMessageBox.StandardButton.Ok
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        # 「关闭到托盘」只在托盘真的可用时生效；否则窗口藏起来就找不回来
+        if (
+            not getattr(self, "_force_quit", False)
+            and getattr(self, "tray_available", False)
+            and bool(self.cfg.get("ui.close_to_tray", False))
+        ):
+            event.ignore()
+            self.hide()
+            try:
+                self.tray.showMessage(
+                    APP_NAME, "已最小化到托盘，点托盘图标可以回来。"
+                )
+            except (AttributeError, RuntimeError):
+                pass
+            return
+
         if not self._wait_critical_tasks():
             event.ignore()
             return
@@ -800,12 +1099,29 @@ class MainWindow(QMainWindow):
         # 先收掉后台进程（播放器），再写配置 —— 播放器退出时会改音量之外的
         # 状态，配置采集必须排在其后。任一页面清理失败都不能阻断退出。
         try:
+            # 先把当前这次播放补写成完整记录，再停播放器
+            self.history.shutdown()
+        except Exception:  # noqa: BLE001 - 统计失败不能挡住退出
+            pass
+        try:
             self.mpris.shutdown()
         except Exception:  # noqa: BLE001 - D-Bus 不可用不能挡住退出
             pass
         try:
             self.playback.shutdown()
         except Exception:  # noqa: BLE001 - 退出流程不能被播放器拖垮
+            pass
+        try:
+            self.desktop_lyrics.shutdown()
+        except Exception:  # noqa: BLE001 - 桌面歌词保存失败不该挡住退出
+            pass
+        try:
+            self.lyrics.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.tray.shutdown()
+        except Exception:  # noqa: BLE001
             pass
         for page in self.pages.values():
             hook = getattr(page, "shutdown", None)
@@ -822,4 +1138,8 @@ class MainWindow(QMainWindow):
             pass
         self._save_window_size()
         self.save_all_config()
+        try:
+            self.library.close()
+        except Exception:  # noqa: BLE001 - 曲库关闭失败不该挡住退出
+            pass
         super().closeEvent(event)

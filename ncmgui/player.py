@@ -71,6 +71,10 @@ _VOLUME_MAX = 100
 #: ``end-file`` 的 reason 取值（见 mpv 的 input.rst）。
 END_REASONS = ("eof", "stop", "quit", "error", "redirect", "unknown")
 
+#: 网易云 CDN 对 Referer 敏感。流媒体歌曲会临时替换成服务器需要的头，
+#: 切回网易云时再恢复这一条。
+DEFAULT_HTTP_HEADERS = "Referer: https://music.163.com/"
+
 
 class PlayerError(RuntimeError):
     """播放器起不来或中途出错。"""
@@ -479,7 +483,7 @@ def mpv_argv(
         "--network-timeout=20",
         "--audio-client-name=ncm-studio",
         # 网易云 CDN 对 Referer 敏感。Cookie 不放这里 —— 命令行在进程列表里可见
-        "--http-header-fields=Referer: https://music.163.com/",
+        f"--http-header-fields={DEFAULT_HTTP_HEADERS}",
         f"--volume={clamp_volume(volume)}",
         f"--input-ipc-server={endpoint.value}",
     ]
@@ -713,7 +717,13 @@ class MpvPlayer:
         self._connect(timeout)
 
         # 订阅需要的属性。id 固定，页面按 name 分发，不依赖 id
-        for prop_id, name in ((1, "time-pos"), (2, "duration"), (3, "pause"), (4, "volume")):
+        for prop_id, name in (
+            (1, "time-pos"), (2, "duration"), (3, "pause"), (4, "volume"),
+            # 音频信息窗与输出设备选择用；mpv 不支持时只是收不到事件
+            (5, "audio-codec-name"), (6, "audio-params"),
+            (7, "audio-bitrate"), (8, "current-ao"),
+            (9, "audio-device"), (10, "audio-device-list"),
+        ):
             self._send(encode_command(["observe_property", prop_id, name]))
 
         self._start_reader()
@@ -934,8 +944,22 @@ class MpvPlayer:
     def set_property(self, name: str, value: object, request_id: int | None = None) -> None:
         self.command("set_property", name, value, request_id=request_id)
 
-    def load(self, target: str) -> None:
-        """加载并播放一个 URL 或本地文件。"""
+    def load(
+        self,
+        target: str,
+        headers: Sequence[tuple[str, str]] | None = None,
+    ) -> None:
+        """加载并播放一个 URL 或本地文件。
+
+        ``headers`` 非空时替换 mpv 的 HTTP 请求头（流媒体服务器可能需要
+        Authorization）；传空/``None`` 时恢复网易云默认的 Referer。
+        每次装载都显式设置，避免上一首的认证头残留在下一首上。
+        """
+        if headers:
+            value = ", ".join(f"{key}: {value}" for key, value in headers)
+        else:
+            value = DEFAULT_HTTP_HEADERS
+        self.set_property("http-header-fields", value)
         self.command("loadfile", target, "replace")
         # 上一首可能是暂停状态；用户点歌就是要听，所以这里显式解除暂停
         self.set_property("pause", False)

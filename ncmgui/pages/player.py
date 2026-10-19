@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import Sequence
 
 from PyQt6.QtCore import (
@@ -31,6 +30,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListView,
+    QMenu,
     QScrollArea,
     QSplitter,
     QVBoxLayout,
@@ -38,6 +38,8 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import images, lyrics, ncmctl, theme
+from ..dialogs.playback import PlaybackToolsDialog
+from ..lyrics_service import song_key
 from ..playback import (
     STATE_ERROR,
     STATE_IDLE,
@@ -45,11 +47,10 @@ from ..playback import (
     STATE_PAUSED,
     STATE_PLAYING,
 )
-from ..resolver import Resolver, Song
+from ..resolver import Song
 from ..widgets.card import Card, ghost_button
 from ..widgets.lyricline import LyricLineWidget
 from ..widgets.vinyl import VinylWidget
-from ..workers import BackgroundTask
 from .base import BasePage
 
 #: 用户自己滚动歌词后，暂停自动跟随多久（秒）
@@ -147,6 +148,59 @@ class QueueModel(QAbstractListModel):
             return song.display
         return None
 
+    def flags(self, index: QModelIndex):
+        base = super().flags(index)
+        if index.isValid():
+            return base | Qt.ItemFlag.ItemIsDragEnabled
+        return base | Qt.ItemFlag.ItemIsDropEnabled
+
+
+class QueueListView(QListView):
+    """支持拖拽排序与右键菜单的队列视图。
+
+    自己处理 ``dropEvent``：Qt 的内部拖放默认要求模型实现 mime 编解码，
+    而这里只需要「把第 N 首挪到第 M 位」，直接按落点算目标索引更简单。
+    """
+
+    reorderRequested = pyqtSignal(int, int)
+    contextRequested = pyqtSignal(int, object)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context)
+
+    def _on_context(self, pos) -> None:
+        index = self.indexAt(pos)
+        self.contextRequested.emit(index.row(), self.viewport().mapToGlobal(pos))
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        source = self.currentIndex().row()
+        point = event.position().toPoint()
+        index = self.indexAt(point)
+        if index.isValid():
+            target = index.row()
+            rect = self.visualRect(index)
+            if point.y() > rect.center().y():
+                target += 1
+        else:
+            target = self.model().rowCount()
+        if source < 0:
+            event.ignore()
+            return
+        # 拖到原位之后时，移除源项会让后面的索引整体前移一位
+        if target > source:
+            target -= 1
+        target = max(0, min(target, self.model().rowCount() - 1))
+        event.acceptProposedAction()
+        if target != source:
+            self.reorderRequested.emit(source, target)
+
 
 class PlayerPage(BasePage):
     """内容区的播放页（不是导航页）。"""
@@ -165,10 +219,9 @@ class PlayerPage(BasePage):
     def build(self) -> None:
         self.playback = self.window.playback
         self.covers = self.window.covers
+        self.lyrics_service = self.window.lyrics
 
         self._current_song: Song | None = None
-        self._lyric_generation = 0
-        self._lyric_task: BackgroundTask | None = None
         self._lyric_lines: list[lyrics.TimedLine] = []
         self._lyric_rows: list[tuple[LyricLineWidget, QLabel | None]] = []
         self._current_line = -1
@@ -214,6 +267,10 @@ class PlayerPage(BasePage):
         # 音质放在顶部：进度与时间由底部常驻播放条统一负责，播放页不再重复一套
         self.level_label = QLabel("")
         self.level_label.setObjectName("Hint")
+        self.lyric_btn = ghost_button("歌词", compact=True)
+        self.lyric_btn.clicked.connect(self.open_lyric_menu)
+        self.tools_btn = ghost_button("音频工具", compact=True)
+        self.tools_btn.clicked.connect(self.open_tools)
         self.queue_btn = ghost_button("播放队列", compact=True)
         self.queue_btn.setCheckable(True)
         self.queue_btn.clicked.connect(self.toggle_queue)
@@ -222,6 +279,8 @@ class PlayerPage(BasePage):
         top.addWidget(self.state_label)
         top.addSpacing(8)
         top.addWidget(self.level_label)
+        top.addWidget(self.lyric_btn)
+        top.addWidget(self.tools_btn)
         top.addWidget(self.queue_btn)
         self.content.addLayout(top)
 
@@ -294,13 +353,15 @@ class PlayerPage(BasePage):
         self.queue_card.add(queue_head)
 
         self.queue_model = QueueModel(self)
-        self.queue_view = QListView()
+        self.queue_view = QueueListView()
         self.queue_view.setObjectName("QueueList")
         self.queue_view.setModel(self.queue_model)
         self.queue_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.queue_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.queue_view.setUniformItemSizes(True)
         self.queue_view.clicked.connect(self._on_queue_clicked)
+        self.queue_view.reorderRequested.connect(self._on_queue_reordered)
+        self.queue_view.contextRequested.connect(self._show_queue_menu)
         self.queue_card.add(self.queue_view, 1)
         self.queue_card.setVisible(False)
         self.splitter.addWidget(self.queue_card)
@@ -323,6 +384,8 @@ class PlayerPage(BasePage):
         self.playback.qualityChanged.connect(self._refresh_meta)
         self.playback.modeChanged.connect(lambda _mode: self._refresh_meta())
         self.covers.coverReady.connect(self._on_cover)
+        self.lyrics_service.lyricsChanged.connect(self._on_lyrics_changed)
+        self.lyrics_service.offsetChanged.connect(self._on_lyric_offset_changed)
 
     def theme_changed(self) -> None:
         """占位封面是构造时画好的 pixmap，换主题后得重画。"""
@@ -343,6 +406,8 @@ class PlayerPage(BasePage):
             self.artist_label.setText("")
             self.vinyl.set_art(self._placeholder)
             self._clear_lyrics("点一首歌，这里会显示歌词。")
+            if not self._demo_mode:
+                self.lyrics_service.request(None)
             self._refresh_meta()
             return
 
@@ -396,9 +461,10 @@ class PlayerPage(BasePage):
         except (TypeError, ValueError):
             return
         # mpv 的位置事件是离散的；记下锚点，定时器在两次事件之间插值，
-        # 幕布才不会一顿一顿地跳。
-        self._position_anchor = (value, time.monotonic())
-        self._update_current_line(value)
+        # 幕布才不会一顿一顿地跳。锚点用歌词时间轴（已扣掉用户偏移）。
+        display = self.lyrics_service.display_position(value)
+        self._position_anchor = (display, time.monotonic())
+        self._update_current_line(display)
         self._update_word_timer()
 
     def _tick_words(self) -> None:
@@ -426,66 +492,26 @@ class PlayerPage(BasePage):
         now = time.monotonic()
         if self._position_anchor is None or now - self._position_anchor[1] > 0.5:
             position = getattr(self.playback, "position", 0.0) or 0.0
-            self._position_anchor = (float(position), now)
+            self._position_anchor = (
+                self.lyrics_service.display_position(position), now
+            )
         if not self._word_timer.isActive():
             self._word_timer.start()
 
     # ---------------------------------------------------------------- 歌词
 
     def _load_lyrics(self, song: Song) -> None:
-        self._lyric_generation += 1
-        generation = self._lyric_generation
-        self._lyric_lines = []
-        self._lyric_rows = []
-        self._current_line = -1
-        self._clear_lyrics("正在加载歌词…")
+        """歌词请求交给窗口级服务，桌面歌词窗复用同一份结果。"""
+        self.lyrics_service.request(song)
 
-        local = str(getattr(song, "path", "") or "")
-        if local:
-            # .ttml > .lrc > 内嵌；parse_any 会自己区分 TTML / LRC，
-            # 本地和在线走同一套解析与渲染
-            _format, text = lyrics.read_local_lyrics(Path(local))
-            self._apply_payload(text, generation)
+    def _on_lyrics_changed(self, song, parsed, placeholder: str) -> None:
+        # 服务只跟随当前曲目；迟到的结果按歌曲标识丢弃
+        if song_key(song) != song_key(self._current_song):
             return
-
-        if self.window.defer_page_loads:
-            self._clear_lyrics("播放时显示歌词")
-            return
-        if not self.window.binary:
-            self._clear_lyrics("找不到 ncmctl，无法获取歌词。")
-            return
-
-        binary = self.window.binary
-        opts = self.opts()
-        song_id = int(song.id)
-
-        def work():
-            resolver = Resolver(binary, opts=opts, timeout="15s")
-            return resolver.lyric(song_id)
-
-        task = BackgroundTask(work, parent=self)
-        self._lyric_task = task
-        task.done.connect(lambda payload: self._apply_payload(payload, generation))
-        task.failed.connect(lambda _message: self._lyric_failed(generation))
-        task.start()
-
-    def _apply_payload(self, payload, generation: int) -> None:
-        if generation != self._lyric_generation:
-            return
-        try:
-            parsed = lyrics.parse_any(payload)
-        except lyrics.LyricsError:
-            self._clear_lyrics("歌词解析失败")
-            return
-        if not parsed.lines:
-            self._clear_lyrics("暂无歌词")
+        if parsed is None or not parsed.lines:
+            self._clear_lyrics(placeholder or "暂无歌词")
             return
         self._build_lyrics(parsed.lines)
-
-    def _lyric_failed(self, generation: int) -> None:
-        if generation != self._lyric_generation:
-            return
-        self._clear_lyrics("歌词获取失败")
 
     def _clear_lyrics(self, placeholder: str = "") -> None:
         self._word_timer.stop()
@@ -539,7 +565,16 @@ class PlayerPage(BasePage):
                 )
             self._lyric_rows.append((original, translation_label))
 
-        self._update_current_line(self.playback.position)
+        self._update_current_line(
+            self.lyrics_service.display_position(self.playback.position)
+        )
+
+    def _on_lyric_offset_changed(self, _milliseconds: int) -> None:
+        """偏移改了以后立刻按新时间轴重排当前行，不用等下一次播放事件。"""
+        self._position_anchor = None
+        position = self.lyrics_service.display_position(self.playback.position)
+        self._update_current_line(position)
+        self._update_word_timer()
 
     def _update_current_line(self, position: float | None) -> None:
         if not self._lyric_lines:
@@ -639,6 +674,97 @@ class PlayerPage(BasePage):
     def _on_queue_clicked(self, index: QModelIndex) -> None:
         if index.isValid():
             self.playback.play_at(index.row())
+
+    def _on_queue_reordered(self, source: int, target: int) -> None:
+        self.playback.move(source, target)
+
+    def _show_queue_menu(self, row: int, global_pos) -> None:
+        song = self.queue_model.song_at(row)
+        if song is None:
+            return
+        menu = QMenu(self)
+        play_action = menu.addAction("立即播放")
+        menu.addSeparator()
+        up_action = menu.addAction("上移")
+        down_action = menu.addAction("下移")
+        remove_action = menu.addAction("从队列中移除")
+        up_action.setEnabled(row > 0)
+        down_action.setEnabled(row < self.queue_model.rowCount() - 1)
+        menu.addSeparator()
+        shuffle_action = menu.addAction("随机打乱剩余队列")
+        clear_action = menu.addAction("清空队列")
+        chosen = menu.exec(global_pos)
+        if chosen is play_action:
+            self.playback.play_at(row)
+        elif chosen is up_action:
+            self.playback.move(row, row - 1)
+        elif chosen is down_action:
+            self.playback.move(row, row + 1)
+        elif chosen is remove_action:
+            self.playback.remove_at(row)
+        elif chosen is shuffle_action:
+            self.playback.shuffle_remaining()
+        elif chosen is clear_action:
+            self.playback.clear_queue()
+
+    def open_tools(self) -> None:
+        """打开音频工具窗；已经开着就提到前面。"""
+        dialog = getattr(self, "_tools_dialog", None)
+        if dialog is None:
+            self._tools_dialog = PlaybackToolsDialog(self.window, self)
+            dialog = self._tools_dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    # ---------------------------------------------------------------- 歌词菜单
+
+    def open_lyric_menu(self) -> None:
+        menu = QMenu(self)
+        copy_action = menu.addAction("复制歌词")
+        menu.addSeparator()
+        offset = self.lyrics_service.offset_ms
+        earlier = menu.addAction("歌词提前 0.5 秒")
+        later = menu.addAction("歌词延后 0.5 秒")
+        reset = menu.addAction("偏移归零")
+        reset.setEnabled(offset != 0)
+        menu.addSeparator()
+        desktop = menu.addAction("桌面歌词…")
+        desktop.setCheckable(True)
+        window = getattr(self.window, "desktop_lyrics", None)
+        desktop.setChecked(bool(window is not None and window.isVisible()))
+
+        chosen = menu.exec(self.lyric_btn.mapToGlobal(self.lyric_btn.rect().bottomLeft()))
+        if chosen is copy_action:
+            self._copy_lyrics()
+        elif chosen is earlier:
+            self.lyrics_service.nudge_offset(-500)
+            self.toast(f"歌词偏移 {self.lyrics_service.offset_ms / 1000:+.1f} 秒")
+        elif chosen is later:
+            self.lyrics_service.nudge_offset(500)
+            self.toast(f"歌词偏移 {self.lyrics_service.offset_ms / 1000:+.1f} 秒")
+        elif chosen is reset:
+            self.lyrics_service.set_offset(0)
+            self.toast("歌词偏移已归零")
+        elif chosen is desktop:
+            hook = getattr(self.window, "toggle_desktop_lyrics", None)
+            if callable(hook):
+                hook()
+            else:
+                self.toast("当前环境不支持桌面歌词")
+
+    def _copy_lyrics(self) -> None:
+        lines = self.lyrics_service.lines
+        if not lines:
+            self.toast("当前没有可复制的歌词")
+            return
+        parts = []
+        for line in lines:
+            parts.append(line.text)
+            if line.translation:
+                parts.append(line.translation)
+        QApplication.clipboard().setText("\n".join(parts))
+        self.toast(f"已复制 {len(lines)} 行歌词")
 
     @property
     def queue_visible(self) -> bool:

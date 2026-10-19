@@ -8,13 +8,17 @@
 在此之上还补了播放页、歌词、本地曲库和队列，日常听歌可以完全留在界面里。
 侧边栏可以在深色 / 亮色主题之间切换，选择会记进配置文件，下次启动保持原样。
 
-![我喜欢的音乐](docs/screenshots/02-liked.png)
+![发现页](docs/screenshots/02-discover.png)
 
-![本地音乐](docs/screenshots/03-local.png)
+![搜索页](docs/screenshots/03-search.png)
+
+![本地曲库](docs/screenshots/06-local.png)
 
 ![播放页：黑胶唱片与歌词](docs/screenshots/11-player.png)
 
-![下载页](docs/screenshots/04-download.png)
+![流媒体服务器](docs/screenshots/12-streaming.png)
+
+![下载页](docs/screenshots/09-download.png)
 
 ## 功能覆盖
 
@@ -23,11 +27,17 @@ ncmctl 的全部子命令都在界面里有对应入口：
 | 页面 | 对应命令 | 说明 |
 | --- | --- | --- |
 | 账号 | `login qrcode` / `phone` / `cookie` / `cookiecloud`、`logout` | 四种登录方式；扫码登录会在界面里显示二维码 |
-| 我喜欢的音乐 | `SongDownloadUrlV1` + 随包 mpv | 红心歌单列表，点一首即流播；播放页、歌词、队列、四种播放顺序 |
-| 本地音乐 | 随包 mpv | 扫描下载目录或任意文件夹，点一首就播；默认 `~/音乐/NCM-Studio`，可自行选择 |
-| 下载 | `download` | 歌曲 ID、专辑 / 歌手 / 歌单链接；选音质、并发数、输出目录；**内置查重**与**歌词 / 封面下载**，可一键搬空「我喜欢的音乐」 |
+| 发现 | 网易云 `/api/*` | 每日推荐、推荐歌单、新碟、推荐歌手；卡片点进去就是详情 |
+| 搜索 | 网易云 `/api/*` | 歌曲 / 专辑 / 歌手 / 歌单四类结果，带搜索建议与历史；公开内容未登录也能搜 |
+| 我喜欢的音乐 | `SongPlayerV1` + 随包 mpv | 红心歌单列表，点一首即流播；播放页、歌词、队列、四种播放顺序 |
+| 收藏 | 网易云 `/api/*` | 收藏的歌单 / 专辑 / 歌手三个 Tab，点进去看详情，可直接取消收藏 |
+| 本地曲库 | 随包 mpv | 扫描下载目录或任意文件夹；歌曲 / 文件夹 / 本地歌手 / 本地专辑四个 Tab，支持本地歌单 |
+| 播放历史 | 本地 SQLite | 最近 500 次播放，可搜索、清空、整段重播；重复播放更新同一条 |
+| 听歌统计 | 本地 SQLite | 90 天热力图、24 小时分布、常听歌曲 / 专辑 / 歌手、音质构成 |
+| 下载 | `download` | 歌曲 ID、专辑 / 歌手 / 歌单链接；选音质、并发数、输出目录；**任务队列**、失败重试、历史记录、内置查重与歌词 / 封面下载 |
 | NCM 解码 | `ncm` | 把 `.ncm` 还原成 `.mp3` / `.flac`，纯本地操作 |
-| 云盘上传 | `cloud` | 上传单曲或整个文件夹，可按体积和正则过滤 |
+| 云盘上传 | `cloud` | 云盘列表、容量、播放与删除；上传单曲或整个文件夹，可按体积和正则过滤 |
+| 流媒体 | Subsonic / Jellyfin API | 连接自建的 Navidrome、Airsonic、Gonic、Jellyfin、Emby；歌曲 / 专辑 / 歌手 / 歌单浏览与播放 |
 | 账号任务 | `sign` / `scrobble` / `partner` / `task` | 单个任务立即执行，或挂成 cron 定时服务 |
 | 监控代理 | `proxy` | 本机 HTTP(S) 抓包代理 |
 | 调试工具 | `crypto encrypt` / `decrypt`、`curl` | 载荷加解密、直接调用导出的 Go API 方法 |
@@ -329,9 +339,28 @@ mpv 自己不实现 MPRIS，随包 mpv 又用 `--no-config --load-scripts=no` �
 Windows 与 macOS 的媒体控制分别走 SMTC / Now Playing，目前还没有接入；
 这两个平台上的耳机按键暂时不会控制本程序。
 
+### 流媒体服务器
+
+侧边栏的**「流媒体」**页可以直接连自建音乐服务器，不需要网易云账号：
+
+- 支持 **Subsonic 系**（Navidrome、Airsonic、Gonic、LMS、OpenSubsonic）与
+  **Jellyfin / Emby**；「添加」里填地址、用户名和密码即可，Jellyfin 也可以只填
+  API Key；
+- 连接成功后的歌曲 / 专辑 / 歌手 / 歌单四个 Tab 都能双击播放；专辑、歌单再点
+  进去看曲目，支持「播放全部」和「加入队列」；
+- Subsonic 的认证是 `token = md5(密码 + 随机盐)`，密码不会出现在 URL 里；
+  Jellyfin 用 API Key / AccessToken，同样只放在本机配置和播放地址的查询参数里；
+- 服务器地址、密码、Token 保存在 `config.json`（POSIX 下 `0600`），日志、控制台
+  与截图都不会输出这些字段；
+- 播放时由主播放器统一取链，和网易云歌曲共用队列、歌词偏移、倍速、均衡器与
+  定时关闭；流媒体歌曲的历史记录会保存 `服务器ID:曲目ID`，下次可以从历史直接重播。
+
+> 内网服务器通常不走系统代理；流媒体请求固定直连，封面下载仍沿用「设置 → 更新」
+> 里的代理配置。
+
 ### 播放本地音乐
 
-侧边栏的**「本地音乐」**页不用登录、也不联网：
+侧边栏的**「本地曲库」**页不用登录、也不联网：
 
 - 目录默认是程序的下载目录（`~/音乐/NCM-Studio`），也可以在页面顶部的路径控件里
   换成任意文件夹；选择会记在 `player.local_dir`，下次打开直接落在这里；
@@ -355,8 +384,9 @@ Windows 与 macOS 的媒体控制分别走 SMTC / Now Playing，目前还没有�
   「设置 → 播放器」里指定路径）。
 - **已下载的优先播本地文件。** 列表里的 `本地` 列有 `✓` 时说明输出目录里已经有这首，
   点击后直接播文件，既省一次接口调用，也不受直链过期影响。
-- **直链是临时的。** 播放地址由 `SongDownloadUrlV1` 现取，约 20 分钟失效；界面只
-  缓存到过期前 60 秒，所以不存在「用到过期地址」的路径。
+- **直链是临时的。** 播放地址由 `SongPlayerV1` 现取（不是会消耗下载额度的
+  `SongDownloadUrlV1`），约 20 分钟失效；界面只缓存到过期前 60 秒，所以不存在
+  「用到过期地址」的路径。
 - **播不了会明说。** 无版权、需要会员、该音质拿不到，都会在界面上给出具体原因；
   播放出错时**不会**自动跳到下一首 —— 否则一张 VIP 歌单会在你离开座位时被静默跳完。
 - **封面只在内存里缓存**（最多 24 张），重启后重新下载；不落盘，省掉一套缓存目录
@@ -586,17 +616,25 @@ ncmgui/
   netutil.py           代理串校验与规范化（不依赖 Qt）
   player.py            播放器：定位 mpv、JSON IPC 收发、事件解析、直链缓存（不依赖 Qt）
   playback.py          全局播放控制：队列、四种播放顺序、进度外推与竞态保护
+  dsp.py               音频工具：mpv 能力探测、倍速/变调/EQ/响度/设备
   mpris.py             Linux MPRIS 服务：蓝牙耳机与系统媒体键（dbus-next）
   images.py            封面下载、放大、占位图与内存 LRU 缓存
   localmusic.py        本地音乐：文件名拆分、目录扫描（不依赖 Qt）
+  lyrics_service.py    歌词获取/解析/缓存与全局偏移，播放页和桌面歌词共用
+  download_manager.py  下载任务队列、失败重试与历史（JSON，0600）
   updater.py           GitHub Release 检查、校验与自我替换（不依赖 Qt）
   runner.py            subprocess + pty 封装，流式输出为信号（POSIX / Windows 双后端）
   workers.py           后台任务（守护线程），用于不阻塞界面的解析
   config.py            配置持久化
   theme.py             调色板、全局 QSS、霓虹辉光
   window.py            侧边栏 + 页面栈 + 底部播放条 + 作业控制台
-  widgets/             Card、FormCard、ConsolePanel、PlaybackBar、Vinyl
-  pages/               十个导航页 + 播放页（player.py，不是导航项）
+  api/                 网易云 /api：Cookie 只读复用、请求限流、模型归一化、写操作
+  library/             SQLite 曲库、扫描、本地歌单、播放历史与统计
+  streaming/           Subsonic 系与 Jellyfin/Emby 适配器、服务器配置与取链
+  desktop/             桌面歌词窗与系统托盘
+  dialogs/             播放工具、评论、加入歌单
+  widgets/             Card、FormCard、ConsolePanel、PlaybackBar、Vinyl、歌曲表格/封面网格/分页
+  pages/               十六个导航页 + 播放页（player.py，不是导航项）+ 详情宿主
 ```
 
 几条设计约定：
@@ -616,10 +654,15 @@ ncmgui/
 它的许可证与 README 会随产物一起分发（打包后在 `ncmgui/assets/ncmctl/` 下），
 这是分发第三方二进制应尽的义务，不是可有可无的点缀。
 
-本项目以 GPL-2.0 发布，见 [LICENSE](LICENSE)。
+本项目以 **AGPL-3.0** 发布，见 [LICENSE](LICENSE)。3.0.0 起由 GPL-2.0 升级；
+如果你分发修改后的版本，需要按 AGPL 第 13 条向网络用户提供对应源码。
+
+功能设计参考了 [SPlayer-Next](https://github.com/SPlayer-Dev/SPlayer-Next) 的公开行为与
+网易云接口用法，但代码按 Python/Qt 架构重新实现，不包含其源文件。SPlayer-Next 以
+AGPL-3.0 发布，与本项目兼容。
 
 「写入音频标签」这一种歌词模式用到 [mutagen](https://mutagen.readthedocs.io/)，它同样以
-GPL-2.0-or-later 发布，向后兼容。默认的「独立 .lrc 文件」不需要它。
+GPL-2.0-or-later 发布，可升级到 GPL-3.0 并与 AGPL-3.0 组合。默认的「独立 .lrc 文件」不需要它。
 
 流媒体播放用到的 [mpv](https://mpv.io/) 以 GPLv2+ 发布，它链接的 FFmpeg 等库各有
 自己的许可。Linux / Windows 的产物里随包分发 mpv，其来源、版本与版权文件放在

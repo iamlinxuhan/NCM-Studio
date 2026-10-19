@@ -238,14 +238,62 @@ def _defaults() -> dict[str, Any]:
             "level": "exhigh",
             "volume": 70,
             "mode": "loop",
+            # 会员歌曲只返回 30 秒试听片段。默认与 SPlayer 一样拒绝播放，
+            # 避免用户以为听到了完整版；允许后仍会在播放页提示「试听」。
+            "allow_trial": False,
             "local_dir": "",
             # 播放页里黑胶 : 歌词的宽度比例（[0.367, 0.633]），空表示用默认
             "split": [],
             # 分栏比例的存储版本；旧版本可能存下布局自动压缩的结果
             "split_rev": 0,
+            # 上次的播放队列（只存歌曲标识，不存会过期的直链）。启动后恢复
+            # 队列和进度，但不自动出声
+            "queue": [],
+            "queue_index": -1,
+            "position": 0.0,
+            # 音频工具：倍速、变调（半音）、均衡器、响度归一化、输出设备。
+            # 具体能否生效由 mpv 能力探测决定，不支持的控件会隐藏。
+            "speed": 1.0,
+            "pitch": 0.0,
+            "equalizer": {
+                "enabled": False,
+                "gains": [0.0] * 10,
+                "preamp": 0.0,
+            },
+            "loudness": False,
+            "audio_device": "",
+            "device_volumes": {},
+            # 歌词偏移（毫秒）。正值让歌词晚出现
+            "lyric_offset": 0,
+            # 桌面歌词窗。locked 时鼠标事件穿透/不可拖动；位置 -1 表示居中
+            "desktop_lyrics": {
+                "enabled": False,
+                "locked": False,
+                "x": -1,
+                "y": -1,
+                "width": 760,
+                "height": 130,
+                "font_size": 26,
+                "translation": True,
+                "opaque": False,
+            },
+        },
+        # 自建流媒体服务器（Subsonic 系 / Jellyfin / Emby）。密码与
+        # AccessToken 只存在这个 0600 文件里，不写日志。
+        "streaming": {
+            "servers": [],
+            "last_server": "",
+        },
+        # 本地曲库。dirs 为空时自动落到 player.local_dir / 下载目录；
+        # db 留空表示 config_dir()/library.db。sort 取值见 library.queries.SORTS
+        "library": {
+            "dirs": [],
+            "db": "",
+            "sort": "name",
+            "descending": False,
         },
         # 界面外观。theme 取值 dark / light，由侧边栏的「主题」键切换
-        "ui": {"theme": "dark"},
+        "ui": {"theme": "dark", "close_to_tray": False},
         # 主窗口大小。用户缩放过后记在这里，下次启动照着打开
         "window": {"width": 1180, "height": 780, "maximized": False},
         # 自动更新。git_proxy 为空走系统代理，direct 表示直连

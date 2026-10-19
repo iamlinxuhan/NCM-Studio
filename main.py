@@ -67,9 +67,12 @@ def _self_test(window: MainWindow) -> int:
         "account",
         "liked",
         "local",
+        "history",
+        "stats",
         "download",
         "ncm",
         "cloud",
+        "streaming",
         "tasks",
         "proxy",
         "tools",
@@ -118,24 +121,127 @@ def _self_test(window: MainWindow) -> int:
         if getattr(liked, "_player", None) is not None:
             problems.append("自检时不该启动播放器")
 
-    # 本地音乐页不联网，表格列数与默认目录都是纯逻辑
+    # 本地曲库页不联网，表格列数与目录配置都是纯逻辑
     local_page = window.pages.get("local")
     if local_page is not None:
         model = getattr(local_page, "model", None)
         if model is None:
-            problems.append("本地音乐页没有表格模型")
-        elif model.columnCount() != 5:
-            problems.append(f"本地音乐表格应为 5 列，实际 {model.columnCount()} 列")
+            problems.append("本地曲库页没有歌曲表格模型")
+        elif model.columnCount() != 6:
+            problems.append(f"本地曲库表格应为 6 列，实际 {model.columnCount()} 列")
         else:
             headers = [
                 model.headerData(i, Qt.Orientation.Horizontal)
                 for i in range(model.columnCount())
             ]
-            if headers != ["#", "歌名", "歌手", "专辑", "音乐质量"]:
-                problems.append(f"本地音乐表头不对：{headers}")
-        picker = getattr(local_page, "path_picker", None)
-        if picker is None or not picker.path():
-            problems.append("本地音乐页没有默认目录")
+            if headers != ["#", "歌名", "歌手", "专辑", "时长", "音质"]:
+                problems.append(f"本地曲库表头不对：{headers}")
+        dirs = getattr(local_page, "_dirs", None)
+        if not dirs:
+            problems.append("本地曲库页没有默认目录")
+        if getattr(local_page, "_scan_task", None) is not None:
+            problems.append("自检时不该启动扫描")
+        if window.library.query_one("SELECT COUNT(*) AS n FROM tracks") is None:
+            problems.append("本地曲库数据库不可用")
+
+    # 播放历史与统计都只读本地记录，自检时可以直接加载
+    history_page = window.pages.get("history")
+    if history_page is not None:
+        table = getattr(history_page, "table", None)
+        if table is None:
+            problems.append("播放历史页没有表格")
+        elif table.columnCount() != 7:
+            problems.append(f"播放历史表格应为 7 列，实际 {table.columnCount()} 列")
+        else:
+            headers = [table.horizontalHeaderItem(i).text() for i in range(7)]
+            if headers != ["时间", "歌名", "歌手", "专辑", "时长", "来源", "状态"]:
+                problems.append(f"播放历史表头不对：{headers}")
+        history_page.on_show()
+
+    stats_page = window.pages.get("stats")
+    if stats_page is not None:
+        stats_page.on_show()
+        data = getattr(stats_page, "_data", None)
+        if data is None or len(getattr(data, "days", ())) != 90:
+            problems.append("听歌统计没有生成 90 天窗口")
+        if not getattr(stats_page, "_rank_tables", None):
+            problems.append("听歌统计缺少排行表格")
+
+    # 播放工具窗：能力探测与控件范围都不能依赖真实播放
+    from ncmgui.dialogs.playback import PlaybackToolsDialog
+
+    try:
+        tools = PlaybackToolsDialog(window)
+        if tools.tabs.count() != 3:
+            problems.append(f"播放工具窗应有 3 个标签页，实际 {tools.tabs.count()}")
+        if (tools.speed_slider.minimum(), tools.speed_slider.maximum()) != (50, 200):
+            problems.append(
+                "倍速滑杆范围应为 50–200，实际 "
+                f"{tools.speed_slider.minimum()}–{tools.speed_slider.maximum()}"
+            )
+        if len(tools.eq_sliders) != 10:
+            problems.append(f"均衡器应有 10 段，实际 {len(tools.eq_sliders)}")
+        tools._sync_speed(1.25)
+        if tools.speed_value.text() != "1.25×":
+            problems.append(f"倍速标签不对：{tools.speed_value.text()}")
+        tools._sync_ab(3.0, 5.0)
+        if "00:03" not in tools.ab_label.text() or "00:05" not in tools.ab_label.text():
+            problems.append(f"A-B 标签不对：{tools.ab_label.text()}")
+        tools._sync_sleep(90, False)
+        if "01:30" not in tools.sleep_label.text():
+            problems.append(f"定时关闭倒计时不对：{tools.sleep_label.text()}")
+        tools.close()
+    except Exception as exc:  # noqa: BLE001 - 自检只收集问题，不在这里中断
+        problems.append(f"播放工具窗构造失败：{exc}")
+
+    queue_view = getattr(getattr(window, "player_page", None), "queue_view", None)
+    if queue_view is None:
+        problems.append("播放页没有队列视图")
+    elif not queue_view.dragEnabled() or not queue_view.acceptDrops():
+        problems.append("队列视图没有启用拖拽排序")
+
+    # 流媒体：配置为空时页面也要能打开（只是禁用列表），适配器与歌曲映射
+    # 是纯逻辑，不需要真的连服务器
+    streaming_page = window.pages.get("streaming")
+    registry = getattr(window, "streaming", None)
+    if streaming_page is None or registry is None:
+        problems.append("缺少流媒体页面或注册表")
+    else:
+        from ncmgui.streaming.registry import song_id_for, split_stream_id
+
+        if streaming_page.tabs.count() != 4:
+            problems.append("流媒体页应当有歌曲/专辑/歌手/歌单四个 Tab")
+        demo_id = song_id_for("demo", "t1")
+        if demo_id >= 0 or demo_id != song_id_for("demo", "t1"):
+            problems.append("流媒体歌曲 ID 应当稳定且为负")
+        if split_stream_id("demo:t1") != ("demo", "t1"):
+            problems.append("流媒体歌曲标识拆分不正确")
+
+    # 桌面歌词窗：置顶/透明这些窗口标志无法在离屏环境验证，但至少确认
+    # 绘制路径、翻译与时间轴定位不抛异常
+    desktop = getattr(window, "desktop_lyrics", None)
+    if desktop is None:
+        problems.append("主窗口没有桌面歌词窗")
+    else:
+        demo = [
+            TimedLine(start=0.0, end=2.0, text="桌面歌词第一句"),
+            TimedLine(start=2.0, end=4.0, text="桌面歌词第二句"),
+        ]
+        desktop.set_demo(demo, 2.5)
+        if desktop.current_line() is None or desktop.current_line().text != "桌面歌词第二句":
+            problems.append("桌面歌词没有按位置定位当前行")
+        if desktop.grab().isNull():
+            problems.append("桌面歌词窗渲染失败")
+        desktop.hide()
+
+    # 歌词服务与播放页共用同一份偏移：正偏移必须让歌词晚出现
+    service = getattr(window, "lyrics", None)
+    if service is None:
+        problems.append("主窗口没有歌词服务")
+    elif abs(service.display_position(10.0) - 10.0) > 0.001:
+        problems.append("默认歌词偏移不该改变播放位置")
+    elif not hasattr(window, "toggle_desktop_lyrics"):
+        problems.append("主窗口没有桌面歌词开关")
 
     # 播放页不是导航页：它在栈里，但启动时不该是当前页，也不该拉起 mpv
     if getattr(window, "player_page", None) is None:
@@ -539,6 +645,97 @@ def _demo_songs():
     ]
 
 
+def _demo_history():
+    """截图用的播放历史，时间相对当前时刻，展示本地/在线两种来源。"""
+    from datetime import datetime, timedelta
+
+    from ncmgui.library import HistoryEntry
+
+    now = datetime.now()
+    entries = []
+    for index, song in enumerate(_demo_songs()):
+        started = now - timedelta(hours=index * 9 + 1)
+        entries.append(HistoryEntry(
+            id=9000 - index,
+            track_id=song.id if index % 4 else None,
+            title=song.name,
+            artists=song.artists,
+            album=song.album,
+            path="" if index % 4 else f"/music/demo/{song.name}.flac",
+            source="online" if index % 4 else "local",
+            quality=song.quality,
+            started_at=int(started.timestamp()),
+            listened_ms=song.duration - (index * 13000),
+            duration_ms=song.duration,
+            completed=index % 3 != 2,
+        ))
+    return entries
+
+
+def _demo_stats():
+    """截图用的 90 天统计，形状稳定、不依赖真实播放记录。"""
+    from datetime import date, timedelta
+
+    from ncmgui.library import DayEntry, RankEntry, SliceEntry, StatsData
+
+    today = date.today()
+    days = []
+    total_ms = 0
+    total_plays = 0
+    active = 0
+    for offset in range(89, -1, -1):
+        day = today - timedelta(days=offset)
+        plays = (offset * 5 + day.weekday()) % 9
+        if offset % 11 == 0:
+            plays = 0
+        if day.weekday() >= 5:
+            plays = min(9, plays + 2)
+        listened = plays * 210_000
+        days.append(DayEntry(day=day, plays=plays, listened_ms=listened))
+        total_plays += plays
+        total_ms += listened
+        active += 1 if plays else 0
+
+    hours = tuple(
+        2 + ((hour * 7) % 13) + (14 if hour in (8, 12, 21) else 0)
+        for hour in range(24)
+    )
+
+    songs = tuple(
+        RankEntry(song.name, ", ".join(song.artists), 38 - index * 5,
+                  35 * 60_000 - index * 150_000)
+        for index, song in enumerate(_demo_songs()[:5])
+    )
+    albums = tuple(
+        RankEntry(song.album, ", ".join(song.artists), 30 - index * 4,
+                  30 * 60_000 - index * 100_000)
+        for index, song in enumerate(_demo_songs()[:5])
+    )
+    artists = tuple(
+        RankEntry(song.artists[0], "", 46 - index * 6, 50 * 60_000 - index * 200_000)
+        for index, song in enumerate(_demo_songs()[:5])
+    )
+    qualities = (
+        SliceEntry("无损", 164),
+        SliceEntry("极高 320 kbps", 121),
+        SliceEntry("较高 192 kbps", 48),
+        SliceEntry("标准 128 kbps", 17),
+    )
+    return StatsData(
+        days=tuple(days),
+        hours=hours,
+        songs=songs,
+        albums=albums,
+        artists=artists,
+        qualities=qualities,
+        total_plays=total_plays,
+        total_listened_ms=total_ms,
+        active_days=active,
+        current_streak=5,
+        longest_streak=12,
+    )
+
+
 def _demo_lyrics() -> list[TimedLine]:
     """截图用的歌词。当前句带逐字时间，好让幕布正好停在「以」字中间。"""
     items = [
@@ -595,6 +792,37 @@ def _screenshot(window: MainWindow, target: str) -> int:
     local = window.pages.get("local")
     if local is not None:
         local.set_demo(_demo_songs(), str(default_music_dir()))
+    history = window.pages.get("history")
+    if history is not None:
+        history.set_demo(_demo_history())
+    stats = window.pages.get("stats")
+    if stats is not None:
+        stats.set_demo(_demo_stats())
+    streaming = window.pages.get("streaming")
+    if streaming is not None:
+        from dataclasses import replace
+
+        from ncmgui.streaming import StreamAlbum, StreamArtist, StreamPlaylist
+
+        demo_songs = [
+            replace(song, source="subsonic", stream_id=f"demo:{index}")
+            for index, song in enumerate(_demo_songs()[:8])
+        ]
+        streaming.set_demo(
+            "家里的 Navidrome",
+            demo_songs,
+            [
+                StreamAlbum("a1", "夜航", ("陈婧霏",), 2024),
+                StreamAlbum("a2", "平凡的一天", ("毛不易",), 2018),
+                StreamAlbum("a3", "冀西南林路行", ("万能青年旅店",), 2020),
+            ],
+            [StreamArtist("r1", "陈婧霏"), StreamArtist("r2", "毛不易"),
+             StreamArtist("r3", "万能青年旅店")],
+            [
+                StreamPlaylist("p1", "夜晚开车", "me", 24),
+                StreamPlaylist("p2", "最近常听", "me", 18),
+            ],
+        )
     for index, (key, _glyph, _label, _cls) in enumerate(NAV_ITEMS):
         window.show_page(key)
         # 让布局与样式表完成一轮计算，否则抓到的可能是空白

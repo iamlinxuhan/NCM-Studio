@@ -13,13 +13,26 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from datetime import datetime
+from typing import Callable, Sequence
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMessageBox
+from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QTableWidget,
+    QTableWidgetItem,
+)
 
 from .. import covers, images, lyrics, ncmctl
 from ..config import default_music_dir
+from ..download_manager import (
+    STATUS_QUEUED,
+    STATUS_RUNNING,
+    DownloadManager,
+)
 from ..resolver import PLAYLIST_URL, FeeTagger, Plan, Resolver, Song
 from ..widgets.card import Card, accent_button, ghost_button
 from ..widgets.console import ConsoleView, classify
@@ -90,6 +103,15 @@ class DownloadPage(BasePage):
         #: 正在跑的歌词 / 封面任务，仅用于避免重复启动
         self._lyric_task = None
         self._cover_task = None
+        #: 一次只跑一个下载任务；其余在 DownloadManager 里排队
+        self._active_runner = None
+        self._active_record_id = ""
+        self._last_download_error = ""
+        self._shutting_down = False
+        #: 排队任务的封面/歌词上下文（只在本次进程内有效）
+        self._pending_context: dict[str, tuple[list[Song] | None, list[str] | None]] = {}
+        # DownloadPage 还未完成 QWidget 初始化，不能把 self 当 QObject 父对象
+        self.downloads = DownloadManager()
         super().__init__(window)
 
     # -------------------------------------------------------------------- 构建
@@ -100,6 +122,7 @@ class DownloadPage(BasePage):
         self._build_options()
         self._build_report()
         self._build_actions()
+        self._build_jobs()
         self._sync_buttons()
 
     def _build_targets(self) -> None:
@@ -237,7 +260,132 @@ class DownloadPage(BasePage):
         actions.add_row_of(clear_button, open_button)
         self.content.addWidget(actions)
 
+    def _build_jobs(self) -> None:
+        card = Card(
+            "下载任务",
+            "同一时间只跑一个下载任务，其余排队。失败的任务可以重试；"
+            "重试使用原命令行参数，不再跑查重与歌词/封面后处理。",
+        )
+        self.jobs_table = QTableWidget(0, 4)
+        self.jobs_table.setHorizontalHeaderLabels(("任务", "状态", "开始时间", "说明"))
+        self.jobs_table.verticalHeader().setVisible(False)
+        self.jobs_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.jobs_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.jobs_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.jobs_table.setShowGrid(False)
+        self.jobs_table.verticalHeader().setDefaultSectionSize(28)
+        self.jobs_table.horizontalHeader().setStretchLastSection(True)
+        self.jobs_table.setColumnWidth(0, 230)
+        self.jobs_table.setColumnWidth(1, 70)
+        self.jobs_table.setColumnWidth(2, 128)
+        self.jobs_table.setFixedHeight(210)
+        self.jobs_table.doubleClicked.connect(lambda _index: self._retry_selected())
+        card.add(self.jobs_table)
+
+        row = QHBoxLayout()
+        retry = ghost_button("重试选中", compact=True)
+        retry.clicked.connect(self._retry_selected)
+        cancel = ghost_button("取消选中", compact=True)
+        cancel.clicked.connect(self._cancel_selected)
+        clear = ghost_button("清除已完成", compact=True)
+        clear.clicked.connect(self._clear_finished_jobs)
+        row.addWidget(retry)
+        row.addWidget(cancel)
+        row.addWidget(clear)
+        row.addStretch(1)
+        card.add(row)
+        self.content.addWidget(card)
+
+        self.downloads.changed.connect(self._refresh_jobs)
+        self._refresh_jobs()
+
+    def _refresh_jobs(self) -> None:
+        records = self.downloads.records[:30]
+        self.jobs_table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            stamp = record.started_at or record.created_at
+            try:
+                when = datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M:%S")
+            except (OSError, OverflowError, ValueError):
+                when = "—"
+            message = record.message
+            if record.status == STATUS_QUEUED:
+                message = message or "等待当前任务结束"
+            elif record.status == STATUS_RUNNING:
+                message = message or "正在下载…"
+            values = (record.title, record.status_label, when, message)
+            for column, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setToolTip(text)
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, record.id)
+                self.jobs_table.setItem(row, column, item)
+
+    def _selected_job(self):
+        rows = {index.row() for index in self.jobs_table.selectedIndexes()}
+        if len(rows) != 1:
+            return None
+        row = next(iter(rows))
+        item = self.jobs_table.item(row, 0)
+        if item is None:
+            return None
+        return self.downloads.get(str(item.data(Qt.ItemDataRole.UserRole) or ""))
+
+    def _retry_selected(self) -> None:
+        record = self._selected_job()
+        if record is None:
+            self.toast("请先选择一个下载任务")
+            return
+        if not record.retryable:
+            self.toast("只有失败或已取消的任务可以重试")
+            return
+        requeued = self.downloads.retry(record.id)
+        if requeued is None:
+            return
+        if self._active_record_id:
+            self.toast("已重新排队，当前任务结束后开始")
+            return
+        self._launch_record(requeued)
+
+    def _cancel_selected(self) -> None:
+        record = self._selected_job()
+        if record is None:
+            self.toast("请先选择一个下载任务")
+            return
+        if record.status == STATUS_RUNNING:
+            runner = self._active_runner
+            if runner is not None:
+                runner.stop()
+            self.downloads.cancel(record.id, "已手动取消")
+            self._last_download_error = "已手动取消"
+        elif record.status == STATUS_QUEUED:
+            self.downloads.cancel(record.id, "已手动取消")
+            self._pending_context.pop(record.id, None)
+        else:
+            self.toast("这个任务已经结束")
+
+    def _clear_finished_jobs(self) -> None:
+        count = self.downloads.clear_finished()
+        self.toast(f"已清除 {count} 条记录" if count else "没有可清除的记录")
+
     # ------------------------------------------------------------------ 交互
+
+    def add_targets(self, targets: Sequence[str]) -> None:
+        """从别的页面（搜索结果、歌单详情）追加下载目标。"""
+        existing = ncmctl.parse_targets(self.targets.toPlainText())
+        merged = list(existing)
+        seen = set(existing)
+        for target in targets:
+            target = str(target or "").strip()
+            if target and target not in seen:
+                seen.add(target)
+                merged.append(target)
+        if merged:
+            self.targets.setPlainText("\n".join(merged))
 
     def _on_targets_changed(self) -> None:
         count = len(ncmctl.parse_targets(self.targets.toPlainText()))
@@ -537,13 +685,80 @@ class DownloadPage(BasePage):
             strict=self.strict.isChecked(),
             opts=self.opts(),
         )
-        self.submit(
-            title,
-            argv,
+        record = self.downloads.add(
+            title, argv, targets=targets, output=self._output_dir()
+        )
+        self._pending_context[record.id] = (list(songs) if songs else None, intro)
+        if self._active_record_id:
+            self.toast(f"已排队：{title}（当前任务结束后开始）")
+            return
+        self._launch_record(record)
+
+    def _launch_record(self, record) -> None:
+        """真正启动一条任务记录。只由本页在主线程调用。"""
+        from ..download_manager import STATUS_CANCELLED
+
+        if record is None:
+            return
+        if record.status == STATUS_CANCELLED:
+            return
+        songs, intro = self._pending_context.pop(record.id, (None, None))
+        if not self.downloads.start(record.id):
+            return
+        self._active_record_id = record.id
+        self._last_download_error = ""
+
+        post = self._post_hook(songs)
+
+        def on_finish(panel, code: int) -> None:
+            # 用面板的 jobFinished 而不是 runner.finished：窗口提交作业时会在
+            # 返回 runner 之前就 start()，启动失败的情况下 finished 可能已经
+            # 发过了，晚连接的槽收不到。
+            try:
+                if post is not None:
+                    post(panel, code)
+            finally:
+                self._on_download_finished(record.id, code)
+
+        runner = self.submit(
+            record.title,
+            record.argv,
             intro=intro,
             tagger=FeeTagger(songs) if songs else None,
-            on_finish=self._post_hook(songs),
+            on_finish=on_finish,
         )
+        if runner is None:
+            self._active_record_id = ""
+            self.downloads.cancel(record.id, "未能启动")
+            return
+        self._active_runner = runner
+        runner.failed.connect(
+            lambda message: setattr(self, "_last_download_error", str(message))
+        )
+
+    def _on_download_finished(self, record_id: str, code: int) -> None:
+        from ..download_manager import STATUS_CANCELLED, STATUS_RUNNING
+
+        record = self.downloads.get(record_id)
+        if record is not None and record.status == STATUS_RUNNING:
+            self.downloads.finish(
+                record_id, code, self._last_download_error or ""
+            )
+        self._last_download_error = ""
+        if self._active_record_id == record_id:
+            self._active_record_id = ""
+            self._active_runner = None
+        if self._shutting_down:
+            return
+        pending = self.downloads.next_queued()
+        if pending is not None:
+            QTimer.singleShot(0, lambda: self._launch_record(pending))
+
+    def shutdown(self) -> None:
+        self._shutting_down = True
+        runner = self._active_runner
+        if runner is not None and runner.is_running:
+            runner.stop(grace_ms=600)
 
     def _post_hook(self, songs: list[Song] | None):
         """造一个「下载结束后补封面和歌词」的回调；都不需要时返回 ``None``。"""

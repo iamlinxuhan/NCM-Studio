@@ -43,14 +43,32 @@ REQUIRE_MPV = os.environ.get("NCMGUI_BUNDLE_MPV") == "1"
 
 datas: list = []
 binaries: list = []
-hiddenimports: list = []
+
+# ncmgui.library 与 ncmgui.streaming 的包入口按需导入子模块（用
+# importlib.import_module 拼接名字），PyInstaller 的静态分析看不到这些目标。
+# 不列出来的话，打包版会在打开本地曲库或流媒体页时 ImportError。
+hiddenimports: list = [
+    "ncmgui.library.db",
+    "ncmgui.library.history",
+    "ncmgui.library.playlists",
+    "ncmgui.library.queries",
+    "ncmgui.library.scan",
+    "ncmgui.library.stats",
+    "ncmgui.streaming.base",
+    "ncmgui.streaming.jellyfin",
+    "ncmgui.streaming.registry",
+    "ncmgui.streaming.subsonic",
+]
 
 # Windows 上 pywinpty 除了 Python 扩展之外还带几个**非 .pyd 的二进制**：
 # conpty.dll、OpenConsole.exe、winpty.dll、winpty-agent.exe。PyInstaller 的
 # 常规依赖分析只看得到 .pyd，这几个会全部漏掉——而 ConPTY 后端运行时要按
 # 相对路径找到它们。collect_all 把整个包连同这些文件一起收进来。
 if sys.platform == "win32":
-    datas, binaries, hiddenimports = collect_all("winpty")
+    winpty_datas, winpty_binaries, winpty_hidden = collect_all("winpty")
+    datas.extend(winpty_datas)
+    binaries.extend(winpty_binaries)
+    hiddenimports.extend(winpty_hidden)
 
 # ── 图标 ────────────────────────────────────────────────────────────────────
 # 放进包里的这份供 Qt 窗口图标使用（ncmgui/resources.py 按相对位置找它）。

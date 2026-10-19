@@ -113,6 +113,15 @@ jobs:
           python -m ncmgui.fsutil
           # 代理串规范化
           python -m ncmgui.netutil
+          # 流媒体：Subsonic token、Jellyfin 字段归一化、服务器配置往返
+          python -m ncmgui.streaming.subsonic
+          python -m ncmgui.streaming.jellyfin
+          python -m ncmgui.streaming.registry
+          # 下载队列状态机、歌词偏移与共享缓存
+          python -m ncmgui.download_manager
+          python -m ncmgui.lyrics_service
+          # mpv 能力探测（没有 mpv 时只验证降级路径）
+          python -m ncmgui.dsp
 
       - name: 打包
         env:

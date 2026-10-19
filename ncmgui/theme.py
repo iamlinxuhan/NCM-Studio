@@ -320,6 +320,15 @@ QPushButton#Nav {
     font-size: 13px;
 }
 
+QScrollArea#NavScroll, QWidget#NavList {
+    background: transparent;
+    border: none;
+}
+
+QScrollArea#NavScroll > QWidget > QWidget {
+    background: transparent;
+}
+
 QPushButton#Nav:hover {
     background: $PANEL_ALT;
     color: $TEXT;
@@ -363,6 +372,43 @@ QLabel#CardTitle {
 QLabel#CardSubtitle {
     color: $TEXT_DIM;
     font-size: 12px;
+}
+
+/* 听歌统计的数字卡片 */
+
+QLabel#StatValue {
+    color: $CYAN;
+    font-size: 23px;
+    font-weight: 700;
+}
+
+QLabel#StatCaption {
+    color: $TEXT_DIM;
+    font-size: 12px;
+}
+
+/* 发现页/搜索页的封面卡片 */
+
+QFrame#CoverCard {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+}
+
+QFrame#CoverCard:hover {
+    background: $PANEL;
+    border-color: $BORDER_HI;
+}
+
+QLabel#CoverTitle {
+    color: $TEXT;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#CoverSubtitle {
+    color: $TEXT_DIM;
+    font-size: 11px;
 }
 
 /* 二维码占位框。原来是一条内联样式，换主题时不会跟着变，收进 QSS 统一管理 */

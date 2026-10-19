@@ -1,3 +1,7 @@
+# 功能迁移时参考的 SPlayer-Next 克隆。只读参考，绝不入库、绝不推送；
+# 迁移完成后删除（见 README「许可」）。
+/SPlayer-Next/
+
 # 虚拟环境
 .venv/
 venv/
