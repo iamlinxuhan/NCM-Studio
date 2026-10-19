@@ -63,10 +63,7 @@ SPLIT_REV = 2
 
 def _level_text(value: str) -> str:
     """档位值 → 界面文案；已经是人话（本地文件描述）就原样返回。"""
-    for name, level in ncmctl.DOWNLOAD_LEVELS:
-        if level == value:
-            return name
-    return value
+    return ncmctl.level_label(value)
 
 
 def quality_text(actual: str, song: Song | None, requested: str) -> str:

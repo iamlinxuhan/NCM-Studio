@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Iterable
 
+from ..ncmctl import level_label
 from .db import LibraryDB
 from .queries import split_artists
 
@@ -156,7 +157,8 @@ def collect(
         artist_names = split_artists(str(row["artists"] or ""))
         artist_text = ", ".join(artist_names) or "未知歌手"
         album = str(row["album"] or "").strip() or "未知专辑"
-        quality = str(row["quality"] or "").strip() or "未知音质"
+        # 历史里可能存的是档位键（老记录/其他入口写入），显示前统一翻成人话
+        quality = level_label(str(row["quality"] or "").strip()) or "未知音质"
 
         total_plays += 1
         total_ms += listened_ms
@@ -290,6 +292,8 @@ def _selftest() -> int:
         check("音质排序", data.qualities[0].label, "320 kbps")
         check("音质计数", data.qualities[0].count, 2)
         check("时长文本", data.songs[0].duration_text, "6 分 20 秒")
+        # 老记录/其他入口可能存档位键；展示层要翻成人话，不能再冒出一类音质
+        check("档位键翻成人话", level_label("lossless"), "无损 FLAC")
 
         empty = collect(db, 90, now=at(date(2027, 6, 1), 12))
         check("空窗口播放数", empty.total_plays, 0)

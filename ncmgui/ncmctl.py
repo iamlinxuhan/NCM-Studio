@@ -307,6 +307,20 @@ DOWNLOAD_LEVELS: list[tuple[str, str]] = [
     ("Hi-Res 高解析", "hires"),
 ]
 
+
+def level_label(value: str) -> str:
+    """把 ``--level`` 的档位值翻成人话，其他描述原样返回。
+
+    界面、播放历史、统计都会碰到同一个值：本地文件已经是
+    「无损 44.1kHz/16bit」这样的描述，在线歌曲则是 ``lossless`` 这样的键。
+    统一在这里转换，免得三处各写一份映射、发版后各显示各的。
+    """
+    for name, level in DOWNLOAD_LEVELS:
+        if level == value:
+            return name
+    return value
+
+
 #: curl 的 API 包装器包名
 CURL_KINDS: list[tuple[str, str]] = [
     ("weapi（网页端）", "weapi"),

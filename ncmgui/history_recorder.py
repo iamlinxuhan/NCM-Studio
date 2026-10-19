@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import replace
 from typing import Callable
 
 from PyQt6.QtCore import QObject, QTimer
 
 from .library.db import LibraryDB
 from .library.history import record_play, update_play
+from .ncmctl import level_label
 from .playback import STATE_PLAYING, PlaybackController
 from .resolver import Song
 
@@ -147,7 +149,7 @@ class HistoryRecorder(QObject):
         try:
             return record_play(
                 self._db,
-                self._song,
+                self._with_actual_quality(self._song),
                 listened_ms,
                 completed=self._completed,
                 started_at=self._started_at,
@@ -155,6 +157,21 @@ class HistoryRecorder(QObject):
         except sqlite3.Error:
             # 记录失败只丢统计，不能让播放路径报错
             return None
+
+    def _with_actual_quality(self, song: Song) -> Song:
+        """补上播放时实际拿到的音质。
+
+        ``Song.quality`` 对在线歌曲永远是空串 —— 它是文件属性，而在线歌没有
+        文件。实际音质要到取链完成（或命中本地下载文件、读出文件头）之后才
+        由控制器填好，那时 ``trackStarted`` 早就发过了。只读 ``song.quality``
+        的话，在线歌曲在统计里会全部记成「未知音质」。
+        """
+        if song.quality:
+            return song
+        actual = str(getattr(self._playback, "quality", "") or "").strip()
+        if not actual:
+            return song
+        return replace(song, quality=level_label(actual))
 
     def _finalize(self, *, completed: bool) -> None:
         if self._song is None:
@@ -226,6 +243,8 @@ def _selftest() -> int:
             super().__init__()
             self.state = "idle"
             self.paused = False
+            #: 控制器上「实际拿到的音质」，取链/读文件头之后才有值
+            self.quality = ""
 
         def set_state(self, value: str) -> None:
             self.state = value
@@ -268,6 +287,11 @@ def _selftest() -> int:
         fake.start(one)
         clock.advance(3)
         recorder._on_tick()
+        # 在线歌曲解析成功后，实际音质记在控制器上（不是 Song 上）
+        fake.quality = "hires"
+        local = Song(-9, "本地", ("丁",), quality="无损 44.1kHz/16bit")
+        check("本地歌保留文件音质",
+              recorder._with_actual_quality(local).quality, "无损 44.1kHz/16bit")
         fake.start(two)
         rows = db.query("SELECT * FROM play_events")
         check("短播放不记录", len(rows), 0)
@@ -279,6 +303,7 @@ def _selftest() -> int:
         check("满阈值后记录", len(rows), 1)
         first_id = int(rows[0]["id"])
         check("记录歌名", rows[0]["title"], "二")
+        check("在线歌记录实际音质", rows[0]["quality"], "Hi-Res 高解析")
 
         clock.advance(4)
         fake.end(two)

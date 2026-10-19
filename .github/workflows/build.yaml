@@ -117,6 +117,21 @@ jobs:
           python -m ncmgui.streaming.subsonic
           python -m ncmgui.streaming.jellyfin
           python -m ncmgui.streaming.registry
+          # 本地曲库：schema/迁移、播放历史、统计、查询、扫描、本地歌单
+          python -m ncmgui.library.db
+          python -m ncmgui.library.history
+          python -m ncmgui.library.stats
+          python -m ncmgui.library.queries
+          python -m ncmgui.library.scan
+          python -m ncmgui.library.playlists
+          # 播放记录器：5 秒阈值、切歌补写、实际音质落库
+          python -m ncmgui.history_recorder
+          # 网易云接口层：Cookie 解析、weapi 加密、传输重试与脱敏、模型归一化
+          python -m ncmgui.api.cookies
+          python -m ncmgui.api.crypto
+          python -m ncmgui.api.transport
+          python -m ncmgui.api.models
+          python -m ncmgui.api.client
           # 下载队列状态机、歌词偏移与共享缓存
           python -m ncmgui.download_manager
           python -m ncmgui.lyrics_service
