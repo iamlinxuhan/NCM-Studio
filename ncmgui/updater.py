@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -32,7 +33,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from . import VERSION
 
@@ -155,6 +156,151 @@ def current_executable(kind: str | None = None) -> Path | None:
     if getattr(sys, "frozen", False):
         return Path(sys.executable)
     return None
+
+
+#: 文件名里的版本号：``3.0.0`` / ``v3.0.0`` / ``1.2``。前后不能再贴着数字，
+#: 免得把 ``x86_64`` 或 ``2026.10.20.1`` 这类东西切一半。
+_NAME_VERSION_RE = re.compile(r"(?<![\d.])(v?)(\d+\.\d+(?:\.\d+)*)(?![\d.])")
+
+
+def versioned_appimage_name(target: Path | str, version: str) -> Path | None:
+    """把文件名里的版本号换成 ``version``；文件名没有版本号时返回 ``None``。
+
+    只在**文件名已经带版本号**时改名：``NCM-Studio-3.0.0-x86_64.AppImage``
+    更新到 3.0.3 后应当是 ``NCM-Studio-3.0.3-x86_64.AppImage``。像
+    ``ncm-studio-linux-x86_64.AppImage`` 这样的固定名字保持不动 —— 版本号不
+    进路径，桌面启动器就永远不会失效。
+    """
+    target = Path(target)
+    version = (version or "").strip().lstrip("vV")
+    if not version or target.suffix.lower() != ".appimage":
+        return None
+    stem = target.name[: -len(target.suffix)]
+    match = _NAME_VERSION_RE.search(stem)
+    if match is None:
+        return None
+    prefix = "v" if match.group(1) else ""
+    new_stem = stem[: match.start()] + prefix + version + stem[match.end():]
+    if new_stem == stem:
+        return None
+    return target.with_name(new_stem + target.suffix)
+
+
+def _desktop_roots(old: Path, roots: Iterable[Path] | None = None) -> list[Path]:
+    """可能放着启动器条目的目录；去重后返回。"""
+    if roots is not None:
+        candidates = [Path(item) for item in roots]
+    else:
+        home = Path.home()
+        data_home = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+        candidates = [
+            data_home / "applications",
+            config_home / "autostart",
+            home / "Desktop",
+            home / "桌面",
+            Path(old).parent,
+        ]
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def update_desktop_entries(
+    old: Path | str,
+    new: Path | str,
+    *,
+    roots: Iterable[Path] | None = None,
+) -> tuple[Path, ...]:
+    """把指向 ``old`` 的启动器条目改成 ``new``，返回实际改过的文件。
+
+    AppImage 改名后，如果 .desktop 还指着旧路径，菜单项就会变成“无法找到
+    程序”。这里只动 ``Exec=`` / ``TryExec=`` 两行，并且只在路径作为完整
+    字符串出现时替换；写不进去（只读、权限不足）就跳过，绝不让更新失败。
+    """
+    old_text, new_text = str(Path(old)), str(Path(new))
+    if old_text == new_text:
+        return ()
+    updated: list[Path] = []
+    for root in _desktop_roots(Path(old), roots):
+        try:
+            entries = list(root.glob("*.desktop"))
+        except OSError:
+            continue
+        for path in entries:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            lines = text.splitlines(keepends=True)
+            changed = False
+            for index, line in enumerate(lines):
+                if not line.lstrip().lower().startswith(("exec=", "tryexec=")):
+                    continue
+                if old_text not in line:
+                    continue
+                replaced = line.replace(old_text, new_text)
+                if replaced != line:
+                    lines[index] = replaced
+                    changed = True
+            if not changed:
+                continue
+            temp = path.with_name(path.name + ".ncmgui-tmp")
+            try:
+                temp.write_text("".join(lines), encoding="utf-8")
+                os.chmod(temp, path.stat().st_mode & 0o777)
+                os.replace(temp, path)
+            except OSError:
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
+                continue
+            updated.append(path)
+    return tuple(updated)
+
+
+def sync_appimage_name(
+    version: str | None = None,
+    *,
+    target: Path | str | None = None,
+    roots: Iterable[Path] | None = None,
+) -> Path | None:
+    """让正在运行的 AppImage 文件名跟当前版本对齐。
+
+    自动更新是**原地替换内容**，文件名不会自己变；如果用户文件名里带着
+    版本号，更新后就会出现「名字写着 3.0.0、里面其实是 3.0.3」。启动时做
+    一次改名（只在文件名本来就含版本号时），并同步改掉 .desktop 里的路径。
+
+    失败一律静默：改名只是整理文件名，不能影响程序启动。返回新路径，
+    没改则返回 ``None``。
+    """
+    if target is None:
+        if not getattr(sys, "frozen", False):
+            return None
+        value = os.environ.get("APPIMAGE", "").strip()
+        if not value:
+            return None
+        target = value
+    path = Path(target)
+    if not path.is_file():
+        return None
+    final = versioned_appimage_name(path, version or VERSION)
+    if final is None or final == path:
+        return None
+    try:
+        os.replace(path, final)
+    except OSError:
+        return None
+    if os.environ.get("APPIMAGE", "") == str(path):
+        os.environ["APPIMAGE"] = str(final)
+    update_desktop_entries(path, final, roots=roots)
+    return final
 
 
 # --------------------------------------------------------------------------- #
@@ -437,13 +583,24 @@ def verify(path: Path, expected: str) -> None:
 # 安装与重启
 # --------------------------------------------------------------------------- #
 
-def install(new: Path, target: Path, kind: str) -> None:
-    """把已经下载并校验过的 ``new`` 换成 ``target``。
+def install(
+    new: Path,
+    target: Path,
+    kind: str,
+    *,
+    version: str = "",
+    desktop_roots: Iterable[Path] | None = None,
+) -> Path:
+    """把已经下载并校验过的 ``new`` 换成 ``target``，返回新版本所在的路径。
 
     * ``appimage`` / ``macos``：``os.replace`` 是原子的，运行中的文件也能换；
     * ``windows``：运行中的 exe 不能覆盖。这里起一个等待当前进程退出的小脚本，
       由它重试移动文件并启动新版本 —— 调用方随后应立刻退出程序；
     * ``source`` / ``unsupported``：直接拒绝。
+
+    AppImage 的文件名里如果带着版本号，替换后再把它改成新版本号，并同步
+    更新 .desktop 里的 ``Exec`` —— 否则用户会看到一个写着旧版本的名字，
+    或者启动器指向一个已经不存在的路径。文件名不带版本号时保持原样。
     """
     new, target = Path(new), Path(target)
     if not new.is_file():
@@ -451,15 +608,28 @@ def install(new: Path, target: Path, kind: str) -> None:
 
     if kind == "windows":
         _schedule_windows_replace(new, target)
-        return
+        return target
     if kind not in ("appimage", "macos"):
         raise UpdateError("当前运行方式不支持自动替换，请手动下载新版本。")
 
+    final = versioned_appimage_name(target, version) if kind == "appimage" else None
+    if final is None:
+        final = target
     try:
         os.chmod(new, 0o755)
+        # 先原地替换：即使后面的改名失败，旧路径上也已经是新版本，程序还能用
         os.replace(new, target)
+        if final != target:
+            try:
+                os.replace(target, final)
+            except OSError:
+                final = target
     except OSError as exc:
         raise UpdateError(f"替换 {target.name} 失败：{exc}") from exc
+
+    if final != target:
+        update_desktop_entries(target, final, roots=desktop_roots)
+    return final
 
 
 def clean_appimage_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -611,6 +781,30 @@ def _selftest() -> int:
     check("macOS x86 不支持", asset_name("darwin", "x86_64"), "")
     check("不认识的系统", asset_name("plan9", "mips"), "")
 
+    # ---- AppImage 文件名里的版本
+    check(
+        "名称版本替换",
+        versioned_appimage_name(Path("/x/NCM-Studio-3.0.0-x86_64.AppImage"), "v3.0.3"),
+        Path("/x/NCM-Studio-3.0.3-x86_64.AppImage"),
+    )
+    check(
+        "保留版本号后的后缀",
+        versioned_appimage_name(Path("/x/NCM-Studio-3.0.0-x86_64-3.AppImage"), "3.0.3"),
+        Path("/x/NCM-Studio-3.0.3-x86_64-3.AppImage"),
+    )
+    check(
+        "保留 v 前缀",
+        versioned_appimage_name(Path("/x/App-v1.2.AppImage"), "3.0.3"),
+        Path("/x/App-v3.0.3.AppImage"),
+    )
+    check("固定文件名不动",
+          versioned_appimage_name(Path("/x/ncm-studio-linux-x86_64.AppImage"), "3.0.3"),
+          None)
+    check("非 AppImage 不动",
+          versioned_appimage_name(Path("/x/NCM-Studio-3.0.0.exe"), "3.0.3"), None)
+    check("版本没变不动",
+          versioned_appimage_name(Path("/x/NCM-Studio-3.0.3.AppImage"), "3.0.3"), None)
+
     # ---- 安装形态
     check("源码运行", install_kind(system="linux", frozen=False, appimage=""), "source")
     check("Linux 冻结但没有 APPIMAGE",
@@ -719,6 +913,56 @@ def _selftest() -> int:
         install(new, target, "macos")
         check("替换后内容", target.read_bytes(), b"new")
         check("replace 后新文件不在了", new.exists(), False)
+
+        # AppImage：文件名带版本号时改名，并把 .desktop 一起改过来
+        apps = root / "applications"
+        apps.mkdir()
+        old_name = root / "NCM-Studio-3.0.0-x86_64-3.AppImage"
+        old_name.write_bytes(b"old")
+        desktop = apps / "NCM-Studio.desktop"
+        desktop.write_text(
+            "[Desktop Entry]\n"
+            f"Exec={old_name} %U\n"
+            f"TryExec={old_name}\n"
+            "Name=NCM-Studio\n",
+            encoding="utf-8",
+        )
+        new_name = root / "download.new"
+        new_name.write_bytes(b"updated")
+        final = install(new_name, old_name, "appimage", version="v3.0.3",
+                        desktop_roots=[apps])
+        check("AppImage 改名到新版本", final,
+              root / "NCM-Studio-3.0.3-x86_64-3.AppImage")
+        check("旧文件名不再存在", old_name.exists(), False)
+        check("改名后内容正确", final.read_bytes(), b"updated")
+        entries = desktop.read_text(encoding="utf-8")
+        check("desktop Exec 已同步", f"Exec={final} %U" in entries, True)
+        check("desktop TryExec 已同步", f"TryExec={final}" in entries, True)
+        check("desktop 其它内容不动", "Name=NCM-Studio" in entries, True)
+
+        # 固定文件名（版本号不在名字里）保持原样
+        stable = root / "ncm-studio-linux-x86_64.AppImage"
+        stable.write_bytes(b"old")
+        stable_new = root / "stable.new"
+        stable_new.write_bytes(b"updated")
+        check("固定文件名不改名",
+              install(stable_new, stable, "appimage", version="v3.0.3"), stable)
+        check("固定文件名内容更新", stable.read_bytes(), b"updated")
+
+        # 启动时同步：上次更新留下的旧版本号自动对齐
+        sync_apps = root / "sync-applications"
+        sync_apps.mkdir()
+        sync_old = root / "NCM-Studio-3.0.0-x86_64.AppImage"
+        sync_old.write_bytes(b"current")
+        sync_desktop = sync_apps / "NCM-Studio.desktop"
+        sync_desktop.write_text(f"[Desktop Entry]\nExec={sync_old}\n",
+                                encoding="utf-8")
+        renamed = sync_appimage_name("3.0.3", target=sync_old, roots=[sync_apps])
+        check("启动时对齐文件名", renamed,
+              root / "NCM-Studio-3.0.3-x86_64.AppImage")
+        check("启动时旧文件已不在", sync_old.exists(), False)
+        check("启动时 desktop 已同步",
+              f"Exec={renamed}" in sync_desktop.read_text(encoding="utf-8"), True)
 
         try:
             install(new, target, "source")

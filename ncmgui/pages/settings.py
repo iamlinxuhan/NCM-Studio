@@ -634,22 +634,24 @@ class SettingsPage(BasePage):
         self.app_status.setText(f"正在下载… {value}%")
 
     def _on_downloaded(self, new: Path, target: Path, kind: str) -> None:
+        version = self._release.tag if self._release is not None else VERSION
         try:
-            updater.install(new, target, kind)
+            final = updater.install(new, target, kind, version=version)
         except updater.UpdateError as exc:
             self._on_install_failed(str(exc))
             return
 
+        self._target = final
         self.app_progress.setVisible(False)
         self._installing = False
         self._install_files = ()
         self._sync_app_buttons()
         self.app_status.setText("更新已就绪，正在重启…")
         try:
-            updater.restart(kind, target)
+            updater.restart(kind, final)
         except updater.UpdateError as exc:
             QMessageBox.warning(
-                self, "重启失败", f"{exc}<br><br>请手动启动新版本：{target}"
+                self, "重启失败", f"{exc}<br><br>请手动启动新版本：{final}"
             )
             return
         self.window.close()

@@ -407,6 +407,9 @@ Windows 与 macOS 的媒体控制分别走 SMTC / Now Playing，目前还没有�
   公钥固定在程序里。**缺签名或验签失败同样拒绝安装**；
 - 校验通过才替换。AppImage / macOS 用原子 `os.replace` 后重启；Windows 因为运行中的
   exe 不能覆盖，会交给一个等进程退出后重试替换的 PowerShell 小脚本；
+- AppImage 的文件名里如果带版本号（如 `NCM-Studio-3.0.0-x86_64.AppImage`），替换后
+  会改名到新版本，并同步更新 `.desktop` 里指向旧路径的 `Exec` / `TryExec`，避免出现
+  「名字写着 3.0.0、内容是 3.0.3」或菜单项失效。文件名不带版本号则保持不变；
 - 源码运行时不能替换（没有可替换的产物），按钮是灰的，只提示 `git pull`；
 - 下载和检查都可以走「GitHub 代理」，留空用系统代理，填 `direct` 强制直连。
 

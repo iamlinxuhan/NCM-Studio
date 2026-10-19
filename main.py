@@ -37,6 +37,7 @@ from PyQt6.QtGui import (  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QLineEdit  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
+from ncmgui import updater  # noqa: E402
 from ncmgui.config import Config, default_music_dir  # noqa: E402
 from ncmgui.lyrics import TimedLine, Word  # noqa: E402
 from ncmgui.resources import ICON_PATH  # noqa: E402
@@ -979,6 +980,13 @@ def main(argv: list[str] | None = None) -> int:
     # 先读配置再应用主题：启动时就该是用户上次选的那一档，不能先闪一下暗色
     cfg = Config()
     theme.apply_theme(app, cfg.get("ui.theme", "dark"))
+
+    # 自动更新是原地替换内容，文件名不会自己变。用户文件名里如果带着版本号，
+    # 这里把它对齐到当前版本，并同步改掉 .desktop 的 Exec —— 否则会出现
+    # 「名字写着 3.0.0、里面其实是 3.0.3」，或者菜单项指着旧文件名。
+    # 自检/截图模式不碰正在运行的文件。
+    if not self_test and not screenshot_dir:
+        updater.sync_appimage_name()
 
     window = MainWindow(cfg)
     if window.start_maximized:
