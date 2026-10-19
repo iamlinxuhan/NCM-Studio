@@ -172,6 +172,11 @@ class MainWindow(QMainWindow):
         self._poll_login()
         # 启动阶段不联网；等窗口立起来之后再校验一次登录态
         QTimer.singleShot(1800, self._probe_account)
+        # 栈默认停在发现页，但 on_show 只有 show_page 才会触发。不补这一下，
+        # 首次启动的推荐区一直是空的，红心 ID 集合也不会加载（播放条红心
+        # 因此一直显示未喜欢）。延后到事件循环第一拍，截图模式可以先设
+        # defer_page_loads 把网络请求挡掉。
+        QTimer.singleShot(0, self._show_initial_page)
 
     # ==================================================================== 构建
 
@@ -498,6 +503,19 @@ class MainWindow(QMainWindow):
             self.pages[child_key] = child
             self._nav_index[child_key] = self._nav_index[host_key]
             self._tab_hosts[child_key] = page
+
+    def _show_initial_page(self) -> None:
+        """窗口立起来后触发默认页的懒加载。
+
+        页面内容都在 ``on_show`` 里；启动时栈只是「停在」发现页，并没有走
+        :meth:`show_page`。少了这一下，发现页推荐区会空着，``ensure_liked``
+        也不会被调用。
+        """
+        if self.defer_page_loads:
+            return
+        page = self.pages.get("discover")
+        if page is not None and self.stack.currentWidget() is page:
+            self.show_page("discover")
 
     def show_page(self, key: str) -> None:
         index = self._nav_index.get(key)

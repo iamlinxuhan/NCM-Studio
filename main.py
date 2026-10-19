@@ -61,6 +61,10 @@ def _self_test(window: MainWindow) -> int:
     """构建完成后做一遍结构性检查。"""
     from ncmgui.widgets.console import ConsolePanel, ConsoleView
 
+    # 自检只要结构，不该联网。窗口建好后会在事件循环第一拍加载发现页；
+    # 这里先关掉，免得自检里抛出网络相关的后台任务错误。
+    window.defer_page_loads = True
+
     problems: list[str] = []
 
     expected = {
