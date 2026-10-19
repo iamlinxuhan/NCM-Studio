@@ -46,6 +46,9 @@ from ..playback import (
 )
 from .card import ghost_button
 
+#: 已喜欢时红心的颜色；网易云的红色太扎眼，这里用略柔和的玫红
+HEART_COLOR = "#ef476f"
+
 
 class SeekSlider(QSlider):
     """点轨道任意处就跳过去的滑块。
@@ -288,6 +291,60 @@ def _control_pixmap(kind: str, color: QColor | None = None) -> QPixmap:
     return pixmap
 
 
+def _heart_pixmap(filled: bool, color: QColor | None = None) -> QPixmap:
+    """红心图标：喜欢时实心涂红，未喜欢时只画轮廓。"""
+    pixmap = QPixmap(40, 40)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(2.0, 2.0)
+
+        path = QPainterPath(QPointF(10.0, 16.4))
+        path.cubicTo(QPointF(8.6, 15.1), QPointF(3.4, 11.7), QPointF(3.4, 7.7))
+        path.cubicTo(QPointF(3.4, 5.0), QPointF(5.4, 3.3), QPointF(7.5, 3.3))
+        path.cubicTo(QPointF(8.8, 3.3), QPointF(9.7, 4.1), QPointF(10.0, 4.8))
+        path.cubicTo(QPointF(10.3, 4.1), QPointF(11.2, 3.3), QPointF(12.5, 3.3))
+        path.cubicTo(QPointF(14.6, 3.3), QPointF(16.6, 5.0), QPointF(16.6, 7.7))
+        path.cubicTo(QPointF(16.6, 11.7), QPointF(11.4, 15.1), QPointF(10.0, 16.4))
+
+        if filled:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(HEART_COLOR) if color is None else QColor(color))
+            painter.drawPath(path)
+        else:
+            tint = QColor(theme.TEXT) if color is None else QColor(color)
+            painter.setPen(
+                QPen(
+                    tint,
+                    1.7,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+            )
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _heart_icon(liked: bool, enabled: bool = True) -> QIcon:
+    """喜欢/未喜欢、可用/禁用四种组合的图标。"""
+    icon = QIcon()
+    icon.addPixmap(
+        _heart_pixmap(liked and enabled),
+        QIcon.Mode.Normal,
+    )
+    icon.addPixmap(
+        _heart_pixmap(False, _disabled_tint()),
+        QIcon.Mode.Disabled,
+    )
+    return icon
+
+
 def _disabled_tint() -> QColor:
     """禁用图标用的颜色。
 
@@ -520,6 +577,15 @@ class PlaybackBar(QWidget):
         layout.addWidget(self.now_playing)
         layout.addSpacing(2)
 
+        # 红心：喜欢时涂红，未喜欢只有轮廓；本地/流媒体歌曲不支持网易云红心
+        self.like_btn = ghost_button("", compact=True)
+        self.like_btn.setProperty("transport", "flat")
+        self.like_btn.setFixedSize(30, 30)
+        self.like_btn.setIconSize(QSize(21, 21))
+        self.like_btn.setIcon(_heart_icon(False, False))
+        self.like_btn.clicked.connect(self._toggle_like)
+        layout.addWidget(self.like_btn)
+
         # 三个都是扁平的小图标，播放键只比上一首/下一首略大一点
         self.prev_btn = self._transport_button("prev", size=30)
         self.prev_btn.clicked.connect(self.playback.previous)
@@ -598,6 +664,8 @@ class PlaybackBar(QWidget):
         self.playback.volumeChanged.connect(self._on_volume_changed)
         self.playback.modeChanged.connect(self._on_mode_changed)
         self.playback.queueChanged.connect(self._on_queue_changed)
+        self.window.actions.likedChanged.connect(self._sync_like)
+        self.window.loginChanged.connect(lambda _logged_in: self._sync_like())
         if self.covers is not None:
             self.covers.coverReady.connect(self._on_cover_ready)
 
@@ -617,12 +685,14 @@ class PlaybackBar(QWidget):
         self.mode_btn.setIcon(_control_icon(self.playback.mode))
         self.volume_btn.setIcon(QIcon(_speaker_pixmap(self.playback.volume)))
         self.queue_btn.setIcon(_control_icon("queue"))
+        self._sync_like()
 
     # ---------------------------------------------------------------- 状态
 
     def _on_track_changed(self, song) -> None:
         self._song = song
         self.now_playing.set_song(song)
+        self._sync_like()
 
         cached = None
         if song is not None and self.covers is not None:
@@ -636,6 +706,39 @@ class PlaybackBar(QWidget):
             song is not None and self.playback.duration > 0
         )
         self._on_state_changed(self.playback.state)
+
+    @staticmethod
+    def _is_netease_song(song) -> bool:
+        """只有网易云在线歌曲有「红心」；本地与流媒体歌曲没有这个概念。"""
+        if song is None or getattr(song, "source", ""):
+            return False
+        return int(getattr(song, "id", 0)) > 0
+
+    def _sync_like(self) -> None:
+        song = self._song
+        if not self._is_netease_song(song):
+            liked = False
+            enabled = False
+            tip = (
+                "本地与流媒体歌曲不支持网易云红心"
+                if song is not None
+                else "喜欢"
+            )
+        elif not self.window.is_logged_in():
+            liked = False
+            enabled = False
+            tip = "登录网易云后可喜欢"
+        else:
+            liked = self.window.actions.is_liked(song)
+            enabled = True
+            tip = "取消喜欢" if liked else "喜欢"
+        self.like_btn.setEnabled(enabled)
+        self.like_btn.setIcon(_heart_icon(liked, enabled))
+        self.like_btn.setToolTip(tip)
+
+    def _toggle_like(self) -> None:
+        if self._is_netease_song(self._song):
+            self.window.actions.toggle_like(self._song)
 
     def _on_cover_ready(self, song_id: int, pixmap: QPixmap) -> None:
         # 切歌很快时，上一首的封面可能后到
@@ -731,6 +834,7 @@ class PlaybackBar(QWidget):
             )
         self._on_volume_changed(volume)
         self._on_mode_changed(mode)
+        self._sync_like()
         self.prev_btn.setEnabled(True)
         self.next_btn.setEnabled(True)
         self.play_btn.setEnabled(True)
