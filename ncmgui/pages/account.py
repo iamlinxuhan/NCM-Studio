@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from .. import config, ncmctl
 from ..widgets.card import Chip, accent_button, danger_button, ghost_button
+from ..widgets.profilecard import ProfileCard
 from ..widgets.form import FormCard
 from .base import BasePage
 
@@ -61,6 +62,15 @@ class AccountPage(BasePage):
         #: 尚未删除的 Cookie 临时文件。正常路径随作业结束删除；退出或作业
         #: 没能启动时由 shutdown() 兜底。
         self._pending_temp: set[str] = set()
+
+        # 头像 / 昵称 / UID 放在最上面，登录后一眼能看到当前账号，
+        # 不用再点「查询账号信息」去终端里翻 JSON
+        self.profile_card = ProfileCard(self.window, compact=False)
+        self.profile_card.clicked.connect(self._refresh_profile)
+        self.profile_card.set_logged_in(self.window.is_logged_in())
+        self.profile_card.set_profile(self.window.client.profile)
+        self.window.profileChanged.connect(self._on_profile_changed)
+        self.content.addWidget(self.profile_card)
 
         self._build_status_card()
         self._build_qrcode_card()
@@ -127,8 +137,19 @@ class AccountPage(BasePage):
                 "推荐用下面的「扫码登录」，最省事也最安全。"
             )
 
+    def _on_profile_changed(self, profile: dict) -> None:
+        self.profile_card.set_logged_in(self.window.is_logged_in())
+        self.profile_card.set_profile(profile)
+
+    def _refresh_profile(self) -> None:
+        """点账号卡：文件状态立即刷新，在线资料后台再取一次。"""
+        self._refresh_status()
+        self.window.refresh_profile()
+
     def on_login_changed(self, logged_in: bool) -> None:
         self._refresh_status()
+        self.profile_card.set_logged_in(logged_in)
+        self.profile_card.set_profile(self.window.client.profile if logged_in else {})
         if logged_in:
             self._stop_qrcode("登录成功")
             self.qr_status.setText("✅ 登录成功，凭据已保存。")

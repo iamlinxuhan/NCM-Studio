@@ -119,6 +119,27 @@ def _self_test(window: MainWindow) -> int:
             f"当前 {'已登录' if window.is_logged_in() else '未登录'}）"
         )
 
+    # 侧边栏账号卡要能显示头像/昵称；账号页也要有同一份资料卡
+    profile_card = getattr(window, "profile_card", None)
+    if profile_card is None:
+        problems.append("侧边栏没有账号卡")
+    else:
+        if profile_card._logged_in != window.is_logged_in():
+            problems.append("账号卡的登录状态与窗口不一致")
+        if profile_card.avatar.pixmap() is None or profile_card.avatar.pixmap().isNull():
+            problems.append("账号卡没有头像占位图")
+    account_card = getattr(account, "profile_card", None)
+    if account_card is None:
+        problems.append("账号页没有资料卡")
+
+    # 发现页顶部现在是搜索入口与快捷块；搜索页不再占侧边栏
+    discover = window.pages.get("discover")
+    if discover is not None:
+        if not getattr(discover, "quick_search", None):
+            problems.append("发现页没有搜索框")
+        if not getattr(discover, "greeting", None):
+            problems.append("发现页没有问候语")
+
     # 红心歌单页在启动时**不应该**联网、也不应该拉起播放器 —— 用户可能只是想
     # 下载几首歌，没必要为一个没打开过的页面付出 20 秒的接口等待
     liked = window.pages.get("liked")

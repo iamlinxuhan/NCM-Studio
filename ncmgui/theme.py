@@ -351,6 +351,113 @@ QWidget#NavGroup {
     padding: 14px 16px 4px 16px;
 }
 
+/* 侧边栏与账号页的账号卡片 */
+
+QFrame#ProfileCard {
+    background: $PANEL_ALT;
+    border: 1px solid $BORDER;
+    border-radius: 10px;
+}
+
+QFrame#ProfileCard:hover {
+    background: $PANEL_HI;
+    border-color: $BORDER_HI;
+}
+
+QFrame#ProfileCard[compact="false"] {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 $PANEL_HI, stop:1 $PANEL);
+    border-color: $BORDER_HI;
+    border-radius: 12px;
+}
+
+QLabel#ProfileName {
+    color: $TEXT;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#ProfileName[full="true"] {
+    font-size: 21px;
+    letter-spacing: 1px;
+}
+
+QLabel#ProfileMeta {
+    color: $TEXT_DIM;
+    font-size: 11px;
+}
+
+QLabel#ProfileMeta[full="true"] {
+    color: $CYAN_SOFT;
+    font-size: 12px;
+}
+
+QLabel#ProfileExtra {
+    color: $TEXT_MUTE;
+    font-size: 12px;
+}
+
+/* 发现页顶部的问候、搜索胶囊与快捷入口 */
+
+QLabel#Greeting {
+    color: $TEXT;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+QFrame#SearchPill {
+    background: $PANEL;
+    border: 1px solid $BORDER;
+    border-radius: 19px;
+}
+
+QFrame#SearchPill:hover {
+    border-color: $BORDER_HI;
+}
+
+QFrame#SearchPill QLineEdit {
+    background: transparent;
+    border: none;
+    padding: 0px;
+    font-size: 13px;
+    min-height: 22px;
+}
+
+QLabel#SearchGlyph {
+    color: $TEXT_MUTE;
+    font-size: 16px;
+}
+
+QFrame#QuickTile {
+    background: $PANEL;
+    border: 1px solid $BORDER;
+    border-radius: 10px;
+}
+
+QFrame#QuickTile:hover {
+    background: $PANEL_HI;
+    border-color: $BORDER_HI;
+}
+
+QLabel#QuickIcon {
+    background: $CYAN_WASH;
+    color: $CYAN;
+    border-radius: 9px;
+    font-size: 17px;
+    font-weight: 700;
+}
+
+QLabel#QuickTitle {
+    color: $TEXT;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#QuickSub {
+    color: $TEXT_MUTE;
+    font-size: 11px;
+}
+
 /* ------------------------------------------------------------------ 卡片 */
 
 QFrame#Card {
@@ -361,6 +468,8 @@ QFrame#Card {
 
 QFrame#Card[accent="true"] {
     border: 1px solid $BORDER_HI;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 $PANEL_HI, stop:1 $PANEL);
 }
 
 QLabel#CardTitle {

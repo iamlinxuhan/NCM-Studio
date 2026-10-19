@@ -50,9 +50,9 @@ from .pages.settings import SettingsPage
 from .pages.streaming import StreamingPage
 from .playback import PlaybackController
 from .streaming import StreamingRegistry
-from .widgets.card import Chip
 from .widgets.console import ConsolePanel, classify
 from .widgets.playbackbar import PlaybackBar
+from .widgets.profilecard import ProfileCard
 from .widgets.themetoggle import ThemeToggle
 from .workers import BackgroundTask
 
@@ -99,6 +99,8 @@ class MainWindow(QMainWindow):
 
     #: 登录状态发生变化
     loginChanged = pyqtSignal(bool)
+    #: 在线校验拿到的账号资料（昵称、头像、UID）；登出时发空字典
+    profileChanged = pyqtSignal(dict)
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
@@ -217,7 +219,7 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(206)
+        sidebar.setFixedWidth(216)
 
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -236,15 +238,18 @@ class MainWindow(QMainWindow):
         brand_layout.addWidget(name)
         brand_layout.addWidget(sub)
 
-        self.login_chip = Chip("未登录", "off")
+        # 账号卡直接展示头像、昵称与 UID；点一下进账号页。
+        # 比原来只有「已登录」三个字的状态标签更有用，也顺手把侧边栏顶部
+        # 从纯文字变成有层次的区域
+        self.profile_card = ProfileCard(self, compact=True)
+        self.profile_card.clicked.connect(lambda: self.show_page("account"))
+        profile_row = QHBoxLayout()
+        profile_row.setContentsMargins(0, 12, 0, 0)
+        profile_row.addWidget(self.profile_card, 1)
+        brand_layout.addLayout(profile_row)
+
         self.theme_toggle = ThemeToggle()
         self.theme_toggle.clicked.connect(self.toggle_theme)
-        chip_row = QHBoxLayout()
-        chip_row.setContentsMargins(0, 10, 0, 0)
-        chip_row.setSpacing(8)
-        chip_row.addWidget(self.login_chip)
-        chip_row.addStretch(1)
-        brand_layout.addLayout(chip_row)
 
         # 「主题（点击以切换）」比登录状态宽得多，挤在同一行会溢出侧边栏，
         # 所以单独占一行
@@ -363,6 +368,7 @@ class MainWindow(QMainWindow):
     def _refresh_theme_dependents(self) -> None:
         """主题换过之后，把不吃 QSS 的那部分逐个刷新。"""
         self.theme_toggle.refresh()
+        self.profile_card.refresh_theme()
         self._retint_glows()
         self._refresh_console_tab_colors()
         for widget in (self.playback_bar, self.player_page, *self.pages.values()):
@@ -939,6 +945,10 @@ class MainWindow(QMainWindow):
         if changed and not self.defer_page_loads:
             self._probe_account()
 
+    def refresh_profile(self) -> None:
+        """重新读取在线账号资料（头像/昵称/UID）。"""
+        self._probe_account()
+
     def _probe_account(self) -> None:
         """在线校验登录态。网络故障时保持现状，避免误判为登出。"""
         if self._login_task is not None and self._login_task.is_running:
@@ -954,8 +964,11 @@ class MainWindow(QMainWindow):
             valid = isinstance(profile, dict) and bool(profile.get("userId"))
             if valid:
                 self._set_logged_in(True)
+                self._refresh_login_ui()
+                self.profileChanged.emit(dict(profile))
             else:
                 self._set_logged_in(False)
+                self.profileChanged.emit({})
 
         def failed(message: str) -> None:
             # 断网、代理错误、接口超时都不等于登录失效；保留 Cookie 状态，
@@ -968,12 +981,8 @@ class MainWindow(QMainWindow):
         task.start()
 
     def _refresh_login_ui(self) -> None:
-        if self._logged_in:
-            self.login_chip.setText("已登录")
-            self.login_chip.set_state("on")
-        else:
-            self.login_chip.setText("未登录")
-            self.login_chip.set_state("off")
+        self.profile_card.set_logged_in(self._logged_in)
+        self.profile_card.set_profile(self.client.profile)
         self._update_status_right()
 
     def _update_status_right(self) -> None:
@@ -1000,6 +1009,7 @@ class MainWindow(QMainWindow):
         """设置里改了状态目录或代理后，重建接口客户端。"""
         self.client = ApiClient(self.cfg.get("home", ""), proxy=self._api_proxy())
         self._cookie_stamp = self._cookie_signature()
+        self._refresh_login_ui()
         if not self.defer_page_loads:
             self._probe_account()
 

@@ -5,8 +5,17 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
+import time
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..api import ApiError, AuthRequired
 from ..images import placeholder
@@ -15,6 +24,49 @@ from ..widgets.covercard import CoverGrid
 from ..widgets.songtable import SongTableModel, SongTableView
 from ..workers import BackgroundTask
 from .base import BasePage
+
+
+class QuickTile(QFrame):
+    """发现页的快捷入口块：图标 + 标题 + 一行说明。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(
+        self,
+        glyph: str,
+        title: str,
+        subtitle: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("QuickTile")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(64)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 9, 10, 9)
+        layout.setSpacing(9)
+
+        icon = QLabel(glyph)
+        icon.setObjectName("QuickIcon")
+        icon.setFixedSize(34, 34)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(icon)
+
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        name = QLabel(title)
+        name.setObjectName("QuickTitle")
+        note = QLabel(subtitle)
+        note.setObjectName("QuickSub")
+        text.addWidget(name)
+        text.addWidget(note)
+        layout.addLayout(text, 1)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class DiscoverPage(BasePage):
@@ -30,12 +82,15 @@ class DiscoverPage(BasePage):
 
     def build(self) -> None:
         self.actions = self.window.actions
+        self._fm_task = None
         self._build_search_bar()
+        self._build_quick_tiles()
         self._build_hero()
         self._build_daily_table()
         self._build_public()
         self.actions.likedChanged.connect(self._refresh_daily_marker)
         self.window.image_store.imageReady.connect(self._on_image)
+        self.window.profileChanged.connect(self._on_profile_changed)
         self._hero_key = ""
 
     # ---------------------------------------------------------------- 构建
@@ -46,8 +101,21 @@ class DiscoverPage(BasePage):
         回车后内容区整体换成搜索结果；侧边栏的「发现」保持选中，搜索页里
         有「← 发现」可以回来。
         """
-        row = QHBoxLayout()
+        self.greeting = QLabel(self._greeting_text())
+        self.greeting.setObjectName("Greeting")
+        self.content.addWidget(self.greeting)
+
+        pill = QFrame()
+        pill.setObjectName("SearchPill")
+        pill.setMinimumHeight(40)
+        row = QHBoxLayout(pill)
+        row.setContentsMargins(14, 2, 6, 2)
         row.setSpacing(8)
+
+        glyph = QLabel("⌕")
+        glyph.setObjectName("SearchGlyph")
+        row.addWidget(glyph)
+
         self.quick_search = QLineEdit()
         self.quick_search.setPlaceholderText("搜索歌曲、专辑、歌手或歌单")
         self.quick_search.setClearButtonEnabled(True)
@@ -57,7 +125,41 @@ class DiscoverPage(BasePage):
         button = ghost_button("搜索", compact=True)
         button.clicked.connect(self._quick_search)
         row.addWidget(button)
+        self.content.addWidget(pill)
+
+    def _build_quick_tiles(self) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        entries = (
+            ("◈", "每日推荐", "每天 6 点更新", self._open_daily),
+            ("◉", "私人 FM", "为你不停推荐", self._play_fm),
+            ("♡", "我喜欢的音乐", "红心歌单", lambda: self.window.show_page("liked")),
+            ("⟲", "最近播放", "接着上次听", lambda: self.window.show_page("history")),
+        )
+        for glyph, title, subtitle, slot in entries:
+            tile = QuickTile(glyph, title, subtitle)
+            tile.clicked.connect(slot)
+            row.addWidget(tile, 1)
         self.content.addLayout(row)
+
+    def _greeting_text(self) -> str:
+        hour = time.localtime().tm_hour
+        if 5 <= hour < 11:
+            part = "早上好"
+        elif 11 <= hour < 14:
+            part = "中午好"
+        elif 14 <= hour < 18:
+            part = "下午好"
+        else:
+            part = "晚上好"
+        profile = self.window.client.profile
+        name = str(profile.get("nickname") or "").strip()
+        if self.window.is_logged_in() and name:
+            return f"{part}，{name}"
+        return part
+
+    def _on_profile_changed(self, _profile: dict) -> None:
+        self.greeting.setText(self._greeting_text())
 
     def _quick_search(self) -> None:
         text = self.quick_search.text().strip()
@@ -70,8 +172,44 @@ class DiscoverPage(BasePage):
         if callable(focus):
             focus()
 
+    # ------------------------------------------------------------ 快捷入口
+
+    def _open_daily(self) -> None:
+        if not self._daily:
+            message = (
+                "每日推荐还没加载好，稍等一下。"
+                if self.window.is_logged_in()
+                else "登录后才能查看每日推荐。"
+            )
+            self.toast(message)
+            return
+        if not self._daily_table_visible:
+            self._toggle_daily_table()
+
+    def _play_fm(self) -> None:
+        if not self.require_login("私人 FM"):
+            return
+        if self._fm_task is not None and self._fm_task.is_running:
+            return
+        client = self.window.client
+        task = BackgroundTask(lambda: client.personal_fm(), parent=self)
+        self._fm_task = task
+        task.done.connect(self._on_fm_loaded)
+        task.failed.connect(lambda message: self.toast(f"私人 FM 加载失败：{message}"))
+        self.toast("正在加载私人 FM…")
+        task.start()
+
+    def _on_fm_loaded(self, songs) -> None:
+        songs = list(songs or [])
+        if not songs:
+            self.toast("私人 FM 暂时没有返回歌曲。")
+            return
+        self.actions.play_all(songs)
+        self.toast(f"私人 FM：{len(songs)} 首")
+
     def _build_hero(self) -> None:
         card = Card("每日推荐", "每天 6 点更新，按你的口味挑 30 首。")
+        card.setProperty("accent", "true")
         row = QHBoxLayout()
         row.setSpacing(16)
 
@@ -269,6 +407,7 @@ class DiscoverPage(BasePage):
         )
 
     def _sync_login_state(self) -> None:
+        self.greeting.setText(self._greeting_text())
         logged_in = self.window.is_logged_in()
         self.login_button.setVisible(not logged_in)
         self.play_daily_button.setEnabled(bool(self._daily))
@@ -312,5 +451,6 @@ class DiscoverPage(BasePage):
     def on_login_changed(self, logged_in: bool) -> None:
         self._daily = []
         self.daily_model.set_songs([])
+        self.greeting.setText(self._greeting_text())
         self._sync_login_state()
         self._reload()
