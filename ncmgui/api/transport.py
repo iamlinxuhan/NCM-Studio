@@ -109,6 +109,8 @@ class Transport:
         self._pace_lock = threading.Lock()
         self._last_request = 0.0
         self._anticheat_lock = threading.Lock()
+        #: 取 token 的网络请求单独串行，避免并发写操作同时打易盾
+        self._anticheat_fetch_lock = threading.Lock()
         self._anticheat_token = ""
         self._anticheat_at = 0.0
 
@@ -290,25 +292,36 @@ class Transport:
         with self._anticheat_lock:
             if self._anticheat_token and now - self._anticheat_at < ANTICHEAT_TTL:
                 return self._anticheat_token
-        try:
-            request = urllib.request.Request(
-                ANTICHEAT_URL,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Referer": "https://music.163.com/",
-                },
-            )
-            with self._opener().open(request, timeout=min(self.timeout, 8.0)) as response:
-                text = response.read().decode("utf-8", errors="replace")
-            match = _TOKEN_RE.search(text)
-            token = match.group(1) if match else ""
-        except (urllib.error.URLError, TimeoutError, OSError,
-                http.client.HTTPException):
-            token = ""
-        with self._anticheat_lock:
-            self._anticheat_token = token
-            self._anticheat_at = now
-        return token
+        # 未命中时只放一个线程去取，其余等它填好缓存再看一次；否则几个
+        # 并发写请求会同时打易盾，既浪费也更容易被风控。这里不占用
+        # _anticheat_lock 做网络 I/O，读缓存的一方不会被慢请求堵住。
+        with self._anticheat_fetch_lock:
+            with self._anticheat_lock:
+                if (self._anticheat_token
+                        and self._clock() - self._anticheat_at < ANTICHEAT_TTL):
+                    return self._anticheat_token
+            try:
+                request = urllib.request.Request(
+                    ANTICHEAT_URL,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Referer": "https://music.163.com/",
+                    },
+                )
+                with self._opener().open(request, timeout=min(self.timeout, 8.0)) as response:
+                    text = response.read().decode("utf-8", errors="replace")
+                match = _TOKEN_RE.search(text)
+                token = match.group(1) if match else ""
+            except (urllib.error.URLError, TimeoutError, OSError,
+                    http.client.HTTPException):
+                token = ""
+            fetched_at = self._clock()
+            with self._anticheat_lock:
+                self._anticheat_token = token
+                # 记响应到达时刻：TTL 从拿到 token 开始算，慢请求不会
+                # 让缓存提前过期。
+                self._anticheat_at = fetched_at
+            return token
 
 
 # --------------------------------------------------------------------------- #

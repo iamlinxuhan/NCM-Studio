@@ -136,6 +136,8 @@ class MainWindow(QMainWindow):
         )
         #: 自建流媒体服务器（Subsonic/Jellyfin）的配置与取链
         self.streaming = StreamingRegistry(cfg, parent=self)
+        #: 写盘失败时在状态栏提示（保存只由用户操作触发，那时状态栏已建好）
+        self.streaming.saveFailed.connect(self.toast)
         self.playback.set_stream_provider(self.streaming.resolve)
         #: 歌词在播放页与桌面歌词窗之间共享，避免同一首歌请求两次
         self.lyrics = LyricsService(self, parent=self)

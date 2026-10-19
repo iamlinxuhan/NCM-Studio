@@ -158,22 +158,10 @@ _current = "dark"
 #: 所有可随主题变化的 token 名（也是写进模块命名空间的那批名字）
 TOKENS = tuple(DARK)
 
-#: 日志级别对应的颜色
-LEVEL_COLORS: dict[str, str] = {}
-
 
 def _sync_tokens(name: str) -> None:
-    """把某套调色板写进模块命名空间，并刷新派生表。"""
-    values = PALETTES[name]
-    globals().update(values)
-    LEVEL_COLORS.update({
-        "info": values["TEXT"],
-        "dim": values["TEXT_DIM"],
-        "success": values["GREEN"],
-        "warn": values["AMBER"],
-        "error": values["RED"],
-        "accent": values["CYAN"],
-    })
+    """把某套调色板写进模块命名空间。"""
+    globals().update(PALETTES[name])
 
 
 def normalize_theme(name: object) -> str:

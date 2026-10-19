@@ -84,6 +84,8 @@ class ServerDialog(QDialog):
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.token = QLineEdit()
+        # API Key 与密码等权：都只用于本机连接，录入时一并不回显
+        self.token.setEchoMode(QLineEdit.EchoMode.Password)
         self.token.setPlaceholderText("Jellyfin API Key；留空则用用户名密码登录")
 
         form.addRow("类型", self.kind)

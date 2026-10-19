@@ -229,10 +229,14 @@ class SettingsPage(BasePage):
         card.add_row_of(save, reset)
         self.content.addWidget(card)
 
-    def _confirm_debug(self) -> bool:
-        """开启 ``--debug`` 前确认一次；取消则把开关退回去。"""
+    def _confirm_debug(self) -> None:
+        """开启 ``--debug`` 前确认一次；取消则把开关退回去。
+
+        这里没有「继续保存」的语义：取消只是不开启详细日志，其余设置照常
+        保存。所以不返回布尔值，免得调用方误以为需要据此中止保存。
+        """
         if not self.debug.isChecked() or bool(self.cfg.get("debug", False)):
-            return self.debug.isChecked()
+            return
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
@@ -250,8 +254,6 @@ class SettingsPage(BasePage):
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         if box.exec() != QMessageBox.StandardButton.Ok:
             self.debug.setChecked(False)
-            return False
-        return True
 
     def _save(self) -> None:
         # 代理串在这里统一校验并规范化：裸 host:port 补 http://，socks5 直接拒绝

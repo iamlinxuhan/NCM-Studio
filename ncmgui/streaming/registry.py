@@ -53,6 +53,8 @@ def song_id_for(server_id: str, track_id: str) -> int:
 
 class StreamingRegistry(QObject):
     changed = pyqtSignal()
+    #: 写盘失败。界面据此提示，避免用户以为服务器已经保存、重启后才发现丢了
+    saveFailed = pyqtSignal(str)
 
     def __init__(self, cfg, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -89,13 +91,18 @@ class StreamingRegistry(QObject):
                 )
         self._server_list = servers
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """写回配置；``Config.save()`` 失败时返回 False 并发信号。
+
+        内存里的列表仍然可用，本次会话不受影响；但磁盘上没有写入，
+        必须让用户知道，否则重启后服务器会凭空消失。
+        """
         self.cfg.set("streaming.servers", [dict(server) for server in self._server_list])
-        try:
-            self.cfg.save()
-        except OSError:
-            pass
+        ok = self.cfg.save()
+        if not ok:
+            self.saveFailed.emit("流媒体服务器配置写入失败，重启后可能丢失")
         self.changed.emit()
+        return ok
 
     # ------------------------------------------------------------ 查询
 
@@ -119,10 +126,7 @@ class StreamingRegistry(QObject):
 
     def set_last_server(self, server_id: str) -> None:
         self.cfg.set("streaming.last_server", _text(server_id))
-        try:
-            self.cfg.save()
-        except OSError:
-            pass
+        self.save()
 
     # ------------------------------------------------------------ 编辑
 
@@ -353,6 +357,17 @@ def _selftest() -> int:
         )
         check("改名", updated["name"], "改名")
         check("密码不变保留 token", updated["token"], "")
+
+        # 写盘失败必须让界面知道，不能静默吞掉
+        failed: list[str] = []
+        registry.saveFailed.connect(failed.append)
+        original_save = cfg.save
+        cfg.save = lambda: False
+        check("写盘失败返回 False", registry.save(), False)
+        check("写盘失败发出提示", failed, ["流媒体服务器配置写入失败，重启后可能丢失"])
+        cfg.save = original_save
+        check("恢复后写盘成功", registry.save(), True)
+
         registry.remove_server(server["id"])
         check("删除后为空", registry.servers(), [])
 
