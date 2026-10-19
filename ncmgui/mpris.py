@@ -89,8 +89,12 @@ def metadata_for(song) -> dict:
 
     值的类型必须写成 ``Variant``：``a{sv}`` 里每个值都带自己的签名，dbus-next
     不会替我们猜（``mpris:length`` 是 int64，``xesam:artist`` 是字符串数组）。
+
+    没有 dbus-next 时（非 Linux 平台、精简安装）连 ``Variant`` 这个名字都不存在。
+    此时 MPRIS 整个不可用，返回空表即可 —— 这个函数在窗口构造阶段就会被调用，
+    不能因为可选依赖缺失而抛 ``NameError``。
     """
-    if song is None:
+    if not _AVAILABLE or song is None:
         return {}
 
     meta: dict = {
@@ -632,6 +636,15 @@ def _self_test() -> int:
         problems.append(f"本地歌曲 trackid 不对：{track_id(song)}")
     if track_id(None) != f"{OBJECT_PATH}/Track/none":
         problems.append("空歌曲的 trackid 不对")
+
+    # 模拟没有 dbus-next 的机器：窗口构造会调用 metadata_for，不能抛 NameError
+    saved_available = _AVAILABLE
+    globals()["_AVAILABLE"] = False
+    try:
+        if metadata_for(song) != {}:
+            problems.append("没有 dbus-next 时 Metadata 应为空")
+    finally:
+        globals()["_AVAILABLE"] = saved_available
 
     if _AVAILABLE:
         meta = metadata_for(song)
