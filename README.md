@@ -8,17 +8,15 @@
 在此之上还补了播放页、歌词、本地曲库和队列，日常听歌可以完全留在界面里。
 侧边栏可以在深色 / 亮色主题之间切换，选择会记进配置文件，下次启动保持原样。
 
-![发现页](docs/screenshots/02-discover.png)
+![发现页（顶部可直接搜索）](docs/screenshots/01-discover.png)
 
-![搜索页](docs/screenshots/03-search.png)
-
-![本地曲库](docs/screenshots/06-local.png)
+![本地曲库](docs/screenshots/04-local.png)
 
 ![播放页：黑胶唱片与歌词](docs/screenshots/11-player.png)
 
-![流媒体服务器](docs/screenshots/12-streaming.png)
+![流媒体服务器](docs/screenshots/07-streaming.png)
 
-![下载页](docs/screenshots/09-download.png)
+![下载与云盘](docs/screenshots/06-transfer.png)
 
 ## 功能覆盖
 
@@ -27,20 +25,14 @@ ncmctl 的全部子命令都在界面里有对应入口：
 | 页面 | 对应命令 | 说明 |
 | --- | --- | --- |
 | 账号 | `login qrcode` / `phone` / `cookie` / `cookiecloud`、`logout` | 四种登录方式；扫码登录会在界面里显示二维码 |
-| 发现 | 网易云 `/api/*` | 每日推荐、推荐歌单、新碟、推荐歌手；卡片点进去就是详情 |
-| 搜索 | 网易云 `/api/*` | 歌曲 / 专辑 / 歌手 / 歌单四类结果，带搜索建议与历史；公开内容未登录也能搜 |
+| 发现 | 网易云 `/api/*` | 每日推荐、推荐歌单、新碟、推荐歌手；顶部搜索框直接搜歌曲 / 专辑 / 歌手 / 歌单，结果替换发现内容 |
 | 我喜欢的音乐 | `SongPlayerV1` + 随包 mpv | 红心歌单列表，点一首即流播；播放页、歌词、队列、四种播放顺序 |
 | 收藏 | 网易云 `/api/*` | 收藏的歌单 / 专辑 / 歌手三个 Tab，点进去看详情，可直接取消收藏 |
 | 本地曲库 | 随包 mpv | 扫描下载目录或任意文件夹；歌曲 / 文件夹 / 本地歌手 / 本地专辑四个 Tab，支持本地歌单 |
-| 播放历史 | 本地 SQLite | 最近 500 次播放，可搜索、清空、整段重播；重复播放更新同一条 |
-| 听歌统计 | 本地 SQLite | 90 天热力图、24 小时分布、常听歌曲 / 专辑 / 歌手、音质构成 |
-| 下载 | `download` | 歌曲 ID、专辑 / 歌手 / 歌单链接；选音质、并发数、输出目录；**任务队列**、失败重试、历史记录、内置查重与歌词 / 封面下载 |
-| NCM 解码 | `ncm` | 把 `.ncm` 还原成 `.mp3` / `.flac`，纯本地操作 |
-| 云盘上传 | `cloud` | 云盘列表、容量、播放与删除；上传单曲或整个文件夹，可按体积和正则过滤 |
+| 历史与统计 | 本地 SQLite | 播放历史（最近 500 次，可搜索、清空、重播）与听歌统计（90 天热力图、24 小时分布、常听排行、音质构成）两个 Tab |
+| 下载与云盘 | `download` / `ncm` / `cloud` | 下载任务队列、失败重试与历史记录；`.ncm` 解码；云盘列表、容量、播放、删除与上传 |
 | 流媒体 | Subsonic / Jellyfin API | 连接自建的 Navidrome、Airsonic、Gonic、Jellyfin、Emby；歌曲 / 专辑 / 歌手 / 歌单浏览与播放 |
-| 账号任务 | `sign` / `scrobble` / `partner` / `task` | 单个任务立即执行，或挂成 cron 定时服务 |
-| 监控代理 | `proxy` | 本机 HTTP(S) 抓包代理 |
-| 调试工具 | `crypto encrypt` / `decrypt`、`curl` | 载荷加解密、直接调用导出的 Go API 方法 |
+| 高级工具 | `sign` / `scrobble` / `partner` / `task`、`proxy`、`crypto` / `curl` | 账号任务、抓包代理与调试工具三个 Tab |
 | 设置 | `update`、全局 `--home` / `-c` / `--debug` | ncmctl 定位、运行参数；本程序自身的自动更新 |
 
 ## 安装
@@ -634,7 +626,8 @@ ncmgui/
   desktop/             桌面歌词窗与系统托盘
   dialogs/             播放工具、评论、加入歌单
   widgets/             Card、FormCard、ConsolePanel、PlaybackBar、Vinyl、歌曲表格/封面网格/分页
-  pages/               十六个导航页 + 播放页（player.py，不是导航项）+ 详情宿主
+  pages/               十个导航页 + 搜索页 + 播放页（player.py，不是导航项）+ 详情宿主；
+                       groups.py 把历史/统计、下载/NCM/云盘、账号任务/代理/调试合成标签页
 ```
 
 几条设计约定：

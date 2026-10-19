@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable
 
-from PyQt6.QtWidgets import QFrame, QMessageBox, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QFrame,
+    QMessageBox,
+    QScrollArea,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .. import ncmctl
 from ..widgets.card import page_header
@@ -150,3 +157,75 @@ class BasePage(QWidget):
 
     def toast(self, message: str) -> None:
         self.window.toast(message)
+
+
+class TabbedPage(BasePage):
+    """把几个关系紧密的页面收进一个标签页，缩短侧边栏。
+
+    ``TABS`` 里是 ``(key, 标签文字, 页面类)``。子页面仍然各自是完整的
+    :class:`BasePage`（滚动、表格、懒加载都不变），只是把标题让给外层，
+    避免「标签名 + 大标题」重复两遍。
+
+    子页面不进主窗口的 stack，但会被注册到 ``window.pages`` 里，所以
+    ``window.show_page("history")``、``window.pages["download"]`` 这类旧入口
+    照常可用；主窗口负责把 ``show_page`` 翻译成「切到这个宿主页的对应标签」。
+    """
+
+    SCROLLABLE = False
+    TRAILING_STRETCH = False
+    TABS: tuple[tuple[str, str, type[BasePage]], ...] = ()
+
+    def __init__(self, window: "MainWindow") -> None:
+        self.tabs: dict[str, BasePage] = {}
+        self._switching = False
+        super().__init__(window)
+
+    def build(self) -> None:
+        self.tab_widget = QTabWidget()
+        for key, label, page_cls in self.TABS:
+            # 动态子类只改标题：页面内容一行都不用动，标题也不会重复显示
+            embedded_cls = type(
+                page_cls.__name__,
+                (page_cls,),
+                {"PAGE_TITLE": "", "PAGE_SUBTITLE": ""},
+            )
+            child = embedded_cls(self.window)
+            self.tabs[key] = child
+            self.tab_widget.addTab(child, label)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        self.content.addWidget(self.tab_widget)
+
+    # ------------------------------------------------------------ 标签切换
+
+    def current_key(self) -> str:
+        index = self.tab_widget.currentIndex()
+        if 0 <= index < len(self.TABS):
+            return self.TABS[index][0]
+        return ""
+
+    def select_tab(self, key: str) -> bool:
+        """切到指定子页面；找不到时返回 False。"""
+        for index, (tab_key, _label, _cls) in enumerate(self.TABS):
+            if tab_key != key:
+                continue
+            if self.tab_widget.currentIndex() != index:
+                # 由 show_page 统一触发 on_show，避免一次切换调用两遍
+                self._switching = True
+                self.tab_widget.setCurrentIndex(index)
+                self._switching = False
+            return True
+        return False
+
+    def on_show(self) -> None:
+        child = self.tabs.get(self.current_key())
+        hook = getattr(child, "on_show", None)
+        if callable(hook):
+            try:
+                hook()
+            except RuntimeError:
+                pass
+
+    def _on_tab_changed(self, _index: int) -> None:
+        if self._switching or not self.isVisible():
+            return
+        self.on_show()

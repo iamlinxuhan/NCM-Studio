@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 from ..api import ApiError, AuthRequired
 from ..images import placeholder
@@ -30,6 +30,7 @@ class DiscoverPage(BasePage):
 
     def build(self) -> None:
         self.actions = self.window.actions
+        self._build_search_bar()
         self._build_hero()
         self._build_daily_table()
         self._build_public()
@@ -38,6 +39,36 @@ class DiscoverPage(BasePage):
         self._hero_key = ""
 
     # ---------------------------------------------------------------- 构建
+
+    def _build_search_bar(self) -> None:
+        """搜索不再单独占一个侧边栏入口，直接放在发现页顶部。
+
+        回车后内容区整体换成搜索结果；侧边栏的「发现」保持选中，搜索页里
+        有「← 发现」可以回来。
+        """
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.quick_search = QLineEdit()
+        self.quick_search.setPlaceholderText("搜索歌曲、专辑、歌手或歌单")
+        self.quick_search.setClearButtonEnabled(True)
+        self.quick_search.returnPressed.connect(self._quick_search)
+        row.addWidget(self.quick_search, 1)
+
+        button = ghost_button("搜索", compact=True)
+        button.clicked.connect(self._quick_search)
+        row.addWidget(button)
+        self.content.addLayout(row)
+
+    def _quick_search(self) -> None:
+        text = self.quick_search.text().strip()
+        if text:
+            self.actions.search(text)
+            return
+        self.window.show_page("search")
+        page = self.window.pages.get("search")
+        focus = getattr(page, "focus_search", None)
+        if callable(focus):
+            focus()
 
     def _build_hero(self) -> None:
         card = Card("每日推荐", "每天 6 点更新，按你的口味挑 30 首。")

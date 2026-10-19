@@ -37,23 +37,17 @@ from .library import LibraryDB
 from .lyrics_service import LyricsService
 from .mpris import MprisService
 from .pages.account import AccountPage
-from .pages.cloud import CloudPage
+from .pages.base import TabbedPage
 from .pages.detail import DetailHost
 from .pages.discover import DiscoverPage
-from .pages.download import DownloadPage
 from .pages.favorites import FavoritesPage
-from .pages.history import HistoryPage
+from .pages.groups import AdvancedPage, HistoryStatsPage, TransferPage
 from .pages.liked import LikedPage
 from .pages.local import LocalPage
-from .pages.ncm import NcmPage
 from .pages.player import PlayerPage
-from .pages.proxy import ProxyPage
 from .pages.search import SearchPage
 from .pages.settings import SettingsPage
-from .pages.stats import StatsPage
 from .pages.streaming import StreamingPage
-from .pages.tasks import TasksPage
-from .pages.tools import ToolsPage
 from .playback import PlaybackController
 from .streaming import StreamingRegistry
 from .widgets.card import Chip
@@ -62,25 +56,42 @@ from .widgets.playbackbar import PlaybackBar
 from .widgets.themetoggle import ThemeToggle
 from .workers import BackgroundTask
 
-#: (键, 图标, 名称, 页面类)
+#: 侧边栏项目：(键, 图标, 名称, 页面类)
+#:
+#: 侧边栏只放这 10 项；关系紧密的页面在页面内部用标签页收拢，
+#: 「搜索」则并进发现页（见 ``EXTRA_PAGES`` 与 ``PAGE_NAV``）。
 NAV_ITEMS = (
-    ("account", "◈", "账号", AccountPage),
     ("discover", "✦", "发现", DiscoverPage),
-    ("search", "⌕", "搜索", SearchPage),
     ("liked", "♡", "我喜欢的音乐", LikedPage),
     ("favorites", "★", "收藏", FavoritesPage),
     ("local", "♪", "本地曲库", LocalPage),
-    ("history", "⟲", "播放历史", HistoryPage),
-    ("stats", "▤", "听歌统计", StatsPage),
-    ("download", "▼", "下载", DownloadPage),
-    ("ncm", "◇", "NCM 解码", NcmPage),
-    ("cloud", "☁", "云盘上传", CloudPage),
+    ("history_stats", "⟲", "历史与统计", HistoryStatsPage),
+    ("transfer", "▼", "下载与云盘", TransferPage),
     ("streaming", "◉", "流媒体", StreamingPage),
-    ("tasks", "◑", "账号任务", TasksPage),
-    ("proxy", "⇄", "监控代理", ProxyPage),
-    ("tools", "▧", "调试工具", ToolsPage),
+    ("advanced", "▧", "高级工具", AdvancedPage),
+    ("account", "◈", "账号", AccountPage),
     ("settings", "⚙", "设置", SettingsPage),
 )
+
+#: 不在侧边栏出现、但仍需放进 stack 的页面。搜索由发现页顶部的
+#: 搜索框进入，内容区直接换成搜索结果
+EXTRA_PAGES = (
+    ("search", "⌕", "搜索", SearchPage),
+)
+
+#: 页面键 -> 侧边栏按键。标签子页与搜索页都借父项的选中状态，
+#: 侧边栏因此不会出现「没选中任何一项」的空档
+PAGE_NAV = {
+    "search": "discover",
+    "history": "history_stats",
+    "stats": "history_stats",
+    "download": "transfer",
+    "ncm": "transfer",
+    "cloud": "transfer",
+    "tasks": "advanced",
+    "proxy": "advanced",
+    "tools": "advanced",
+}
 
 
 class MainWindow(QMainWindow):
@@ -133,7 +144,7 @@ class MainWindow(QMainWindow):
         #: 自检与截图不往会话总线上注册服务
         self.mpris = MprisService(self.playback, self, parent=self)
         #: 从播放页「返回」时回到的导航页
-        self._last_page_key = "account"
+        self._last_page_key = "discover"
 
         # 上次异常退出可能留下含二维码/Cookie 的临时文件；只清超过一小时的，
         # 不会碰到同时运行的另一个实例正在用的文件
@@ -249,6 +260,8 @@ class MainWindow(QMainWindow):
         self._nav_group.setExclusive(True)
         self._nav_buttons: dict[str, QPushButton] = {}
         self._nav_index: dict[str, int] = {}
+        #: 标签子页 -> 宿主页，show_page 用它先切到正确的标签
+        self._tab_hosts: dict[str, TabbedPage] = {}
 
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {}
@@ -261,7 +274,7 @@ class MainWindow(QMainWindow):
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(0)
 
-        for index, (key, glyph, label, page_cls) in enumerate(NAV_ITEMS):
+        for _index, (key, glyph, label, page_cls) in enumerate(NAV_ITEMS):
             button = QPushButton(f"  {theme.safe_glyph(glyph, '·')}   {label}")
             button.setObjectName("Nav")
             button.setCheckable(True)
@@ -270,12 +283,20 @@ class MainWindow(QMainWindow):
 
             self._nav_group.addButton(button)
             self._nav_buttons[key] = button
-            self._nav_index[key] = index
             nav_layout.addWidget(button)
 
             page = page_cls(self)
             self.pages[key] = page
             self.stack.addWidget(page)
+            self._nav_index[key] = self.stack.count() - 1
+            self._register_tabs(key, page)
+
+        # 搜索页不在侧边栏，但仍在 stack 里；发现页的搜索框切到这里
+        for key, _glyph, _label, page_cls in EXTRA_PAGES:
+            page = page_cls(self)
+            self.pages[key] = page
+            self.stack.addWidget(page)
+            self._nav_index[key] = self.stack.count() - 1
 
         nav_layout.addStretch(1)
         nav_scroll = QScrollArea()
@@ -297,8 +318,8 @@ class MainWindow(QMainWindow):
         )
         self.stack.addWidget(self.detail_host)
 
-        if "account" in self._nav_buttons:
-            self._nav_buttons["account"].setChecked(True)
+        if "discover" in self._nav_buttons:
+            self._nav_buttons["discover"].setChecked(True)
         self.playback.set_local_provider(self.pages["liked"].local_path)
         self.playback.errorRaised.connect(self._on_playback_error)
         self.playback.playerExited.connect(self._on_player_exited)
@@ -459,6 +480,19 @@ class MainWindow(QMainWindow):
 
     # ==================================================================== 导航
 
+    def _register_tabs(self, host_key: str, page: QWidget) -> None:
+        """把带标签页的宿主页里的子页注册进 ``self.pages``。
+
+        子页共用宿主的 stack 索引：``show_page("download")`` 先切到
+        ``transfer`` 宿主，再由 :meth:`show_page` 选中「下载」标签。
+        """
+        if not isinstance(page, TabbedPage):
+            return
+        for child_key, child in page.tabs.items():
+            self.pages[child_key] = child
+            self._nav_index[child_key] = self._nav_index[host_key]
+            self._tab_hosts[child_key] = page
+
     def show_page(self, key: str) -> None:
         index = self._nav_index.get(key)
         if index is None:
@@ -468,9 +502,18 @@ class MainWindow(QMainWindow):
             self.detail_host.clear()
         self._last_page_key = key
         self.stack.setCurrentIndex(index)
-        self._nav_buttons[key].setChecked(True)
+        # 子页与搜索页借父项的按钮，侧边栏始终有一项处于选中状态
+        nav_key = PAGE_NAV.get(key, key)
+        button = self._nav_buttons.get(nav_key)
+        if button is not None:
+            button.setChecked(True)
+        host = self._tab_hosts.get(key)
+        if host is not None:
+            host.select_tab(key)
+            page: QWidget | None = host
+        else:
+            page = self.pages.get(key)
         # 懒加载页面（如红心歌单）在这里才去取数据，启动时不必联网
-        page = self.pages.get(key)
         hook = getattr(page, "on_show", None)
         if callable(hook) and not self.defer_page_loads:
             try:
@@ -544,7 +587,9 @@ class MainWindow(QMainWindow):
                 return
             for key, page in self.pages.items():
                 if page is widget:
-                    self._nav_buttons[key].setChecked(True)
+                    button = self._nav_buttons.get(PAGE_NAV.get(key, key))
+                    if button is not None:
+                        button.setChecked(True)
                     self._last_page_key = key
                     hook = getattr(page, "on_show", None)
                     if callable(hook) and not self.defer_page_loads:

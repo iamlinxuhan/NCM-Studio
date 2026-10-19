@@ -64,8 +64,10 @@ def _self_test(window: MainWindow) -> int:
     problems: list[str] = []
 
     expected = {
-        "account",
+        "discover",
+        "search",
         "liked",
+        "favorites",
         "local",
         "history",
         "stats",
@@ -76,6 +78,7 @@ def _self_test(window: MainWindow) -> int:
         "tasks",
         "proxy",
         "tools",
+        "account",
         "settings",
     }
     missing = expected - set(window.pages)
@@ -86,9 +89,21 @@ def _self_test(window: MainWindow) -> int:
         if page.content.count() == 0:
             problems.append(f"页面 {key} 没有任何内容")
 
-    # 导航按钮数量应当和页面数量一致
-    if len(window._nav_buttons) != len(window.pages):
-        problems.append("侧边栏按钮与页面数量不一致")
+    # 侧边栏只放 NAV_ITEMS；合并页的子页与搜索页都要映射到某个按钮，
+    # 且必须能通过 show_page 找到 stack 位置
+    from ncmgui.window import EXTRA_PAGES, NAV_ITEMS, PAGE_NAV
+
+    nav_keys = [item[0] for item in NAV_ITEMS]
+    if list(window._nav_buttons) != nav_keys:
+        problems.append("侧边栏按钮与 NAV_ITEMS 不一致")
+    for key in window.pages:
+        if PAGE_NAV.get(key, key) not in window._nav_buttons:
+            problems.append(f"页面 {key} 没有对应的侧边栏入口")
+        if key not in window._nav_index:
+            problems.append(f"页面 {key} 没有 stack 索引")
+    for key, *_ in EXTRA_PAGES:
+        if key in window._nav_buttons:
+            problems.append(f"不在侧边栏的页面 {key} 混进了导航按钮")
 
     # 登出按钮的可用状态必须和登录状态一致。用户实际撞见过反例：状态写着「未登录」，
     # 旁边却亮着红色的「登出」。断言的是两者**永远相等**，所以这句在本机已登录、

@@ -85,6 +85,11 @@ class SearchPage(BasePage):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
+        # 搜索不再是侧边栏入口，给一个明确的回程，避免用户找不到发现页
+        back = ghost_button("← 发现", compact=True)
+        back.clicked.connect(lambda: self.window.show_page("discover"))
+        layout.addWidget(back)
+
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索歌曲、专辑、歌手或歌单")
         self.search.setClearButtonEnabled(True)
