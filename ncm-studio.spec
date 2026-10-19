@@ -48,6 +48,10 @@ binaries: list = []
 # importlib.import_module 拼接名字），PyInstaller 的静态分析看不到这些目标。
 # 不列出来的话，打包版会在打开本地曲库或流媒体页时 ImportError。
 hiddenimports: list = [
+    # ncmgui.api 的包入口同样按需导入
+    "ncmgui.api.client",
+    "ncmgui.api.errors",
+    "ncmgui.api.models",
     "ncmgui.library.db",
     "ncmgui.library.history",
     "ncmgui.library.playlists",
