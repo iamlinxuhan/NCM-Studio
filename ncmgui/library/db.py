@@ -22,7 +22,7 @@ from typing import Any, Iterator, Sequence
 
 from ..config import config_dir
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def default_db_path() -> Path:
@@ -121,6 +121,18 @@ class LibraryDB:
             if "stream_id" not in columns:
                 self._conn.execute(
                     "ALTER TABLE play_events ADD COLUMN stream_id TEXT NOT NULL DEFAULT ''"
+                )
+            version_row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()
+            previous = int(version_row["value"]) if version_row is not None else 0
+            if previous < 3:
+                # 3.0.0 早期的扫描器把缺失标签写成了字符串 "None"。
+                # mtime 归零后，下一次增量扫描会重新读取这些文件并覆盖坏数据；
+                # 保留歌曲 ID，本地歌单的引用不受影响。
+                self._conn.execute(
+                    "UPDATE tracks SET mtime = -1"
+                    " WHERE name = 'None' OR artists = 'None' OR album = 'None'"
                 )
             self._conn.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
@@ -257,6 +269,23 @@ def _selftest() -> int:
         check("重开保留 schema", reopened.meta("schema_version"), str(SCHEMA_VERSION))
         check("重开保留下一首 ID", reopened.next_track_id(), -3)
         reopened.close()
+
+        # 2 -> 3：旧扫描器把缺失标签写成 "None"，mtime 归零以触发重读
+        legacy = LibraryDB(path)
+        with legacy.batch() as conn:
+            conn.execute(
+                "INSERT INTO tracks(id, path, name, artists, album, duration_ms,"
+                " quality, size, mtime, added_at, updated_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (-99, str(Path(root) / "bad.flac"), "None", "None", "None",
+                 1000, "", 1, 123.0, now, now),
+            )
+        legacy.set_meta("schema_version", "2")
+        legacy.close()
+        repaired = LibraryDB(path)
+        row = repaired.query_one("SELECT mtime FROM tracks WHERE id = -99")
+        check("旧库 None 元数据触发重扫", row["mtime"], -1.0)
+        repaired.close()
 
     if failures:
         print(f"曲库数据库自检失败 {len(failures)} 项：")

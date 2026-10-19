@@ -43,16 +43,24 @@ _EXPORTS = {
 __all__ = list(_EXPORTS)
 
 
+def _value(name: str, module):
+    if name == "history_count":
+        return module.count
+    if name == "playlists":
+        return module
+    return getattr(module, name)
+
+
 def __getattr__(name: str):
     module_name = _EXPORTS.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module = importlib.import_module(f".{module_name}", __name__)
-    if name == "history_count":
-        value = module.count
-    elif name == "playlists":
-        value = module
-    else:
-        value = getattr(module, name)
-    globals()[name] = value
-    return value
+    # 导入子模块时 Python 会把包属性 ``scan`` 指向模块对象。若只解析当前
+    # 请求的名字（比如 forget_directory），之后 ``from .library import scan``
+    # 会直接拿到模块，调用时就是 "'module' object is not callable"。
+    # 因此把同一子模块的导出一次性解析完，确保函数名覆盖掉模块属性。
+    for export, target in _EXPORTS.items():
+        if target == module_name:
+            globals()[export] = _value(export, module)
+    return globals()[name]

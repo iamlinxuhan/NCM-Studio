@@ -940,17 +940,37 @@ class PlaybackController(QObject):
             duration = int(data.get("duration") or 0)
         except (TypeError, ValueError):
             fee, duration = 0, 0
+        path = str(data.get("path") or "")
+        album = str(data.get("album") or "")
+        source = str(data.get("source") or "")
+        # 3.0.0 早期版本把缺失标签存成了字符串 "None"；本地队列按文件名修一次，
+        # 避免恢复队列后底栏还显示 None。
+        if source == "local" and path and (name == "None" or not name):
+            stem = Path(path).stem.strip() or Path(path).name
+            artist_part, separator, title = stem.partition(" - ")
+            if separator:
+                name = title.strip() or stem
+                artists = tuple(
+                    part.strip() for part in artist_part.split(",") if part.strip()
+                )
+            else:
+                name = stem
+                artists = ()
+        if artists == ("None",):
+            artists = ()
+        if album == "None":
+            album = ""
         return Song(
             id=song_id,
             name=name,
             artists=artists,
             fee=fee,
-            album=str(data.get("album") or ""),
+            album=album,
             duration=duration,
             pic_url=str(data.get("pic_url") or ""),
-            path=str(data.get("path") or ""),
+            path=path,
             quality=str(data.get("quality") or ""),
-            source=str(data.get("source") or ""),
+            source=source,
             stream_id=str(data.get("stream_id") or ""),
         )
 

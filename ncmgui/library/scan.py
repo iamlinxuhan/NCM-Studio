@@ -41,7 +41,11 @@ class ScanResult:
 
 
 def _first_tag(tags, keys: Sequence[str]) -> str:
-    """mutagen 的标签值可能是字符串、列表或数字。取第一个非空项。"""
+    """mutagen 的标签值可能是字符串、列表或数字。取第一个非空项。
+
+    ``tags.get()`` 对缺失的键返回 ``None``，必须先跳过再 ``str()``；否则
+    缺失的标签会被写成字符串 ``"None"``，曲库里所有字段都变成 None。
+    """
     if tags is None:
         return ""
     for key in keys:
@@ -49,8 +53,12 @@ def _first_tag(tags, keys: Sequence[str]) -> str:
             value = tags.get(key)
         except (AttributeError, TypeError):
             continue
+        if value is None:
+            continue
         if isinstance(value, (list, tuple)):
             value = value[0] if value else ""
+        if value is None:
+            continue
         text = str(value).strip()
         if text:
             return text
@@ -226,8 +234,16 @@ def scan(
             result.scanned += 1
             mtime = stat.st_mtime_ns / 1e9
             row = existing.get(resolved)
+            # 旧版本把缺失的标签写成了字符串 "None"；这类行即使文件没变也要
+            # 重读一次，否则增量扫描永远不会修复它。
+            polluted = row is not None and (
+                row["name"] == "None"
+                or row["artists"] == "None"
+                or row["album"] == "None"
+            )
             unchanged = (
                 row is not None
+                and not polluted
                 and int(row["size"]) == int(stat.st_size)
                 and abs(float(row["mtime"]) - mtime) < 0.001
             )
@@ -312,6 +328,9 @@ def _selftest() -> int:
     def check(name: str, got: object, want: object) -> None:
         if got != want:
             failures.append(f"{name}: 期望 {want!r}，实际 {got!r}")
+
+    check("缺失标签不写成 None", _first_tag({"title": None}, ("title",)), "")
+    check("列表标签取首项", _first_tag({"title": ["甲", "乙"]}, ("title",)), "甲")
 
     with tempfile.TemporaryDirectory() as root:
         music = Path(root) / "music"
