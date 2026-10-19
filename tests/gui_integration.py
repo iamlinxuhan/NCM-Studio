@@ -89,12 +89,14 @@ hooks_seen: list[object] = []
 real_submit = window.submit
 
 
-def spy(title, argv, confirm=None, cwd=None, intro=None, tagger=None, on_finish=None):
+def spy(title, argv, confirm=None, cwd=None, intro=None, tagger=None,
+        on_finish=None, sensitive_input=False):
     submitted.append((title, list(argv), list(intro or [])))
     tagger_seen.append(tagger)
     hooks_seen.append(on_finish)
     return real_submit(
-        title, argv, confirm, cwd, intro=intro, tagger=tagger, on_finish=on_finish
+        title, argv, confirm, cwd, intro=intro, tagger=tagger,
+        on_finish=on_finish, sensitive_input=sensitive_input,
     )
 
 
