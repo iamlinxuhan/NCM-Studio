@@ -348,7 +348,10 @@ def _selftest() -> int:
         check("忽略隐藏/非音频", result.scanned, 2)
         check("索引数量", db.query_one(
             "SELECT COUNT(*) AS n FROM tracks")["n"], 2)
-        row = db.query_one("SELECT * FROM tracks WHERE path = ?", (str(first),))
+        # 扫描入库的是 resolve() 之后的路径；macOS 的 /var 会解析到 /private/var，
+        # 这里必须用同一个形式查询，否则本机过、macOS 上查不到行
+        row = db.query_one(
+            "SELECT * FROM tracks WHERE path = ?", (str(first.resolve()),))
         check("文件名拆歌手", row["artists"], "甲")
         check("文件名拆歌名", row["name"], "第一首")
         check("本地 ID 为负", row["id"] < 0, True)
