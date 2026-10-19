@@ -22,10 +22,12 @@ from .base import (
     StreamTrack,
     join_names,
 )
+from .. import VERSION
 
 CLIENT_NAME = "NCM Studio"
 DEVICE_NAME = "Linux"
-DEVICE_VERSION = "3.0.0"
+#: 报给服务器的客户端版本，跟程序版本保持一致，避免两处各改各的
+DEVICE_VERSION = VERSION
 
 
 def _text(value) -> str:
