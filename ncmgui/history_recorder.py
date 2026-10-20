@@ -39,9 +39,10 @@ _TICK_MS = 1000
 class HistoryRecorder(QObject):
     """挂在 :class:`PlaybackController` 上的记录器，每个窗口一个。
 
-    除了写本地库，还发出两个信号给网易云播放日志（:mod:`.scrobble`）：
+    除了写本地库，还发出三个信号给网易云播放日志（:mod:`.scrobble`）：
 
     * ``playStarted``：这一轮第一次真正出声；
+    * ``playQualified``：本轮累计听满 5 秒（每轮一次）；
     * ``playSettled``：一轮结束，附带实际收听毫秒数。
 
     计时只在这里做一次，避免本地统计和云端记录各算一套、对不上。
@@ -49,6 +50,11 @@ class HistoryRecorder(QObject):
 
     #: 本轮第一次真正开始播放（暂停后恢复不会重复发）
     playStarted = pyqtSignal(object)
+    #: 本轮累计收听达到 5 秒门槛（每轮只发一次）。
+    #:
+    #: 云端播放日志用它发 ``startPlay``：真正听住了一轮才上报，快速切歌
+    #: 不会在几秒内制造一串开始日志。
+    playQualified = pyqtSignal(object)
     #: 一轮结束，携带曲目与累计实际收听毫秒数
     playSettled = pyqtSignal(object, int)
 
@@ -77,6 +83,8 @@ class HistoryRecorder(QObject):
         self._completed = False
         #: 本轮是否已经发过 ``playStarted``；暂停恢复不重复
         self._started_sent = False
+        #: 本轮是否已经跨过 5 秒门槛（决定要不要发 ``playQualified``）
+        self._qualified = False
         self._closed = False
 
         playback.trackStarted.connect(self._on_started)
@@ -102,6 +110,7 @@ class HistoryRecorder(QObject):
         self._event_id = None
         self._completed = False
         self._started_sent = False
+        self._qualified = False
         if self._playback.state == STATE_PLAYING and not self._playback.paused:
             self._active_since = self._clock()
             self._emit_started()
@@ -158,10 +167,17 @@ class HistoryRecorder(QObject):
         return total
 
     def _maybe_insert(self) -> None:
-        if self._event_id is not None or self._song is None:
+        if self._song is None:
             return
         listened = self._total_listened()
         if listened < self._threshold_ms:
+            return
+        # 跨过门槛只通知一次：云端用它在真正听住之后补发 startPlay。
+        # 即使本地落库失败也不影响判定，下一次 tick 不会重复发信号。
+        if not self._qualified:
+            self._qualified = True
+            self.playQualified.emit(self._song)
+        if self._event_id is not None:
             return
         self._event_id = self._insert(listened)
         self._listened_ms = listened
@@ -208,6 +224,12 @@ class HistoryRecorder(QObject):
         song = self._song
         self._completed = self._completed or completed
 
+        # 刚好在两 tick 之间跨过门槛就结束了：这里补发资格信号，
+        # 保证云端 startPlay 一定排在对应 play 前面
+        if not self._qualified and total >= self._threshold_ms:
+            self._qualified = True
+            self.playQualified.emit(song)
+
         if self._event_id is None:
             # 自然播完的短音频也算；没播完又不足阈值就不记
             if completed or total >= self._threshold_ms:
@@ -231,6 +253,7 @@ class HistoryRecorder(QObject):
         self._event_id = None
         self._completed = False
         self._started_sent = False
+        self._qualified = False
 
     def flush(self) -> None:
         """把当前播放补写成一条完整记录（暂停/退出前调用）。"""
@@ -311,10 +334,12 @@ def _selftest() -> int:
         fake = FakePlayback()
         recorder = HistoryRecorder(db, fake, clock=clock.monotonic,
                                    wall_clock=clock.time)
-        #: 云端播放日志收到的 (歌曲 ID, 动作/毫秒)
+        #: 云端播放日志收到的 (歌曲 ID, 动作/毫秒/满 5 秒)
         starts: list[int] = []
+        qualified: list[int] = []
         settles: list[tuple[int, int]] = []
         recorder.playStarted.connect(lambda song: starts.append(song.id))
+        recorder.playQualified.connect(lambda song: qualified.append(song.id))
         recorder.playSettled.connect(
             lambda song, ms: settles.append((song.id, ms)))
 
@@ -343,6 +368,7 @@ def _selftest() -> int:
         recorder._on_tick()
         rows = db.query("SELECT * FROM play_events")
         check("满阈值后记录", len(rows), 1)
+        check("满阈值才通知云端", qualified, [2])
         first_id = int(rows[0]["id"])
         check("记录歌名", rows[0]["title"], "二")
         check("在线歌记录实际音质", rows[0]["quality"], "Hi-Res 高解析")
@@ -363,6 +389,8 @@ def _selftest() -> int:
             "SELECT COUNT(*) AS n FROM play_events")["n"], 2)
         # 暂停恢复仍是同一轮，不能重复发开始日志
         check("暂停恢复不重发开始", starts, [1, 2, 2])
+        # 第二轮同样只通知一次「满 5 秒」，暂停恢复不重复
+        check("每轮只通知一次满阈值", qualified, [2, 2])
 
         # 手动切歌收尾，完整播放标记为 0
         clock.advance(2)

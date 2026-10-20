@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import QLabel, QMessageBox, QProgressBar, QScrollArea
 from .. import NCMCTL_VERSION, VERSION, ncmctl, player, updater
 from ..config import config_dir
 from ..netutil import ProxyError, normalize_proxy
+from ..scrobble import PAUSE_MESSAGE
 from ..widgets.card import accent_button, danger_button, ghost_button
 from ..widgets.form import FormCard
 from ..workers import BackgroundTask
@@ -155,6 +156,15 @@ class SettingsPage(BasePage):
             "有效播放次数，也可能触发账号风控；只在明确了解风险后开启。",
         )
 
+        # 连续限流时上报器会自己熔断；这里让用户看得见，而不是以为还在同步
+        self.scrobble_status = QLabel("")
+        self.scrobble_status.setObjectName("Hint")
+        self.scrobble_status.setWordWrap(True)
+        card.add_widget(self.scrobble_status)
+        self.window.scrobble.pausedChanged.connect(self._on_scrobble_paused)
+        if self.window.scrobble.paused:
+            self._on_scrobble_paused(True, PAUSE_MESSAGE)
+
         self.close_to_tray = card.add_switch(
             "关闭主窗口时最小化到托盘",
             bool(self.cfg.get("ui.close_to_tray", False)),
@@ -288,6 +298,9 @@ class SettingsPage(BasePage):
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         if box.exec() != QMessageBox.StandardButton.Ok:
             self.scrobble.setChecked(False)
+
+    def _on_scrobble_paused(self, paused: bool, reason: str) -> None:
+        self.scrobble_status.setText(f"⚠ {reason}" if paused else "")
 
     def _save(self) -> None:
         # 代理串在这里统一校验并规范化：裸 host:port 补 http://，socks5 直接拒绝

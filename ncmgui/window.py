@@ -152,6 +152,8 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self.history.playStarted.connect(self.scrobble.on_started)
+        # 听满 5 秒才补发 startPlay：快速切歌不制造开始日志洪水
+        self.history.playQualified.connect(self.scrobble.on_qualified)
         self.history.playSettled.connect(self.scrobble.on_settled)
         #: 蓝牙耳机/系统媒体键走 MPRIS；真正 start() 由 main.py 决定，
         #: 自检与截图不往会话总线上注册服务
@@ -1186,6 +1188,11 @@ class MainWindow(QMainWindow):
             # 先把当前这次播放补写成完整记录，再停播放器
             self.history.shutdown()
         except Exception:  # noqa: BLE001 - 统计失败不能挡住退出
+            pass
+        try:
+            # 排在刚补发的结算日志之后，让队列里的任务先走完
+            self.scrobble.shutdown()
+        except Exception:  # noqa: BLE001 - 上报失败不能挡住退出
             pass
         try:
             self.mpris.shutdown()

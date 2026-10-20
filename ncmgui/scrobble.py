@@ -13,7 +13,16 @@
 :meth:`ncmgui.api.client.ApiClient.scrobble`。
 
 计时不在这里重算：直接复用 :class:`~ncmgui.history_recorder.HistoryRecorder`
-的 ``playStarted`` / ``playSettled``，保证本地统计和云端记录对得上。
+的信号。只有一轮累计听满 5 秒才会收到 ``playQualified``，这时才补发
+``startPlay``；快速切歌不会在几秒内制造一串开始日志，``startPlay`` 与
+``play`` 也总是成对出现。
+
+**账号隔离**：每条日志在入队时就把当时的 ``MUSIC_U`` 固定下来，后台线程
+真正发送前会重新读一遍 Cookie 文件并比对；排队期间退出登录或切换账号，
+这条日志直接丢弃，绝不会用新账号的身份发出去。
+
+**限流与熔断**：同一账号每小时最多 120 条日志；接口连续 3 次返回限流就
+暂停 10 分钟，并通过 ``pausedChanged`` 通知界面。
 
 **默认关闭。** 这不是公开 API，属于网页端私有接口；功能可能随官方改版
 失效，也可能带来账号风控风险。只在用户明确开启后才上报，失败一律静默，
@@ -28,13 +37,16 @@
 
 from __future__ import annotations
 
+import queue
 import threading
+import time
+from dataclasses import dataclass
 from typing import Callable
 
-from PyQt6.QtCore import QObject
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from .api.client import ApiClient
-from .api.errors import ApiError
+from .api.errors import ApiError, RateLimited
 from .config import Config
 from .resolver import Song
 
@@ -47,16 +59,43 @@ CONFIG_KEY = "player.scrobble"
 #: 又会在短时间内制造一串很短的播放日志。少发一条就少一次暴露。
 MIN_LISTENED_MS = 5000
 
-#: 上报函数签名：``(song_id, action, seconds)``
-Sender = Callable[[int, str, int], None]
+#: 同一账号每小时最多发多少条日志（``startPlay`` 与 ``play`` 合计）。
+#: 正常听歌一小时远到不了这个量；超过说明行为异常，宁可少记。
+MAX_LOGS_PER_HOUR = 120
+
+#: 连续多少次限流后暂停上报
+FAILURE_LIMIT = 3
+#: 熔断时长（秒）
+PAUSE_SECONDS = 600.0
+#: 待发送队列上限；界面线程不会因为网络慢而堆积任务
+QUEUE_SIZE = 32
+
+PAUSE_MESSAGE = "接口连续返回限流，听歌记录同步已暂停，稍后自动恢复。"
+
+#: 上报函数签名：``(song_id, action, seconds, account)``
+Sender = Callable[[int, str, int, str], None]
+
+
+@dataclass(frozen=True)
+class _Task:
+    """一条待发送的日志，``account`` 是入队时的身份快照。"""
+
+    song_id: int
+    action: str
+    seconds: int
+    account: str
 
 
 class ScrobbleReporter(QObject):
     """把本地播放轮次翻译成网易云播放日志。
 
-    由窗口把 :class:`HistoryRecorder` 的两个信号接过来；本类只做“要不要发、
-    发什么”，网络请求放在守护线程里跑，不阻塞界面。
+    由窗口把 :class:`HistoryRecorder` 的信号接过来；本类只做“要不要发、
+    发什么”，网络请求放在一条串行的守护线程里跑，不阻塞界面，也保证
+    ``startPlay`` 一定排在对应的 ``play`` 前面。
     """
+
+    #: 熔断状态变化：``(是否暂停, 原因)``
+    pausedChanged = pyqtSignal(bool, str)
 
     def __init__(
         self,
@@ -73,8 +112,28 @@ class ScrobbleReporter(QObject):
         #: 避免继续用指向旧 home 的客户端把记录报到别的账号上
         self._client_provider = client_provider or (lambda: client)
         self._sender = sender or self._send_default
-        #: 开始这一轮时的 MUSIC_U；中途换号就不把结算记到新账号
+
+        #: 当前这一轮的歌曲与账号快照；只有结算信号对得上才发 ``play``
+        self._round_song_id: int | None = None
         self._round_account = ""
+        self._start_sent = False
+
+        self._lock = threading.Lock()
+        self._queue: queue.Queue[_Task | None] = queue.Queue(QUEUE_SIZE)
+        self._closed = False
+        self._clock = time.monotonic
+
+        self._failures = 0
+        self._paused_until = 0.0
+        self._paused_account = ""
+        self._budget_account = ""
+        self._budget_start = 0.0
+        self._budget_count = 0
+
+        self._worker = threading.Thread(
+            target=self._work, name="ncmgui-scrobble", daemon=True
+        )
+        self._worker.start()
 
     # ------------------------------------------------------------ 状态
 
@@ -82,6 +141,11 @@ class ScrobbleReporter(QObject):
     def enabled(self) -> bool:
         """每次播放时现读配置，设置页保存后立即生效。"""
         return bool(self._cfg.get(CONFIG_KEY, False))
+
+    @property
+    def paused(self) -> bool:
+        """是否因连续限流而暂时停止上报。"""
+        return bool(self._pause_reason())
 
     @staticmethod
     def _eligible(song: object) -> bool:
@@ -95,61 +159,198 @@ class ScrobbleReporter(QObject):
     # ------------------------------------------------------------ 事件
 
     def on_started(self, song: object) -> None:
+        """开始一轮播放：只记下身份快照，等听满 5 秒再发 ``startPlay``。"""
         if not self.enabled or not self._eligible(song):
             return
+        self._resume_if_expired()
         account = self._account()
         if not account:
-            # 未登录（或登出后）不发；结算时也按“无账号”处理
-            self._round_account = ""
+            self._clear_round()
             return
+        self._resume_for_account(account)
+        if self._pause_reason():
+            self._clear_round()
+            return
+        # 上一轮如果没收到结算就直接开始新的一轮，旧轮次作废
+        self._round_song_id = int(song.id)  # type: ignore[union-attr]
         self._round_account = account
-        self._dispatch(song.id, "startPlay", 0)  # type: ignore[union-attr]
+        self._start_sent = False
 
-    def on_settled(self, song: object, listened_ms: int) -> None:
+    def on_qualified(self, song: object) -> None:
+        """本轮听满 5 秒：这时才发 ``startPlay``。"""
         if not self.enabled or not self._eligible(song):
             return
+        if self._song_id(song) != self._round_song_id or not self._round_account:
+            return
+        if self._start_sent:
+            return
+        if self._account() != self._round_account:
+            # 播放途中换了账号/退出登录：这一轮不属于当前账号
+            return
+        self._resume_if_expired()
+        if self._pause_reason():
+            return
+        if self._dispatch(self._song_id(song), "startPlay", 0,
+                          self._round_account):
+            self._start_sent = True
+
+    def on_settled(self, song: object, listened_ms: int) -> None:
+        """一轮结束：按实际收听秒数发 ``play``。"""
+        if not self.enabled or not self._eligible(song):
+            self._clear_round()
+            return
         listened_ms = int(listened_ms)
-        # 快速试听/连续切歌不发：没有同步价值，还会制造大量短日志
         if listened_ms < MIN_LISTENED_MS:
+            self._clear_round()
             return
         # 与网页端一致：按秒四舍五入
         seconds = int(round(listened_ms / 1000.0))
         if seconds <= 0:
+            self._clear_round()
             return
-        current = self._account()
-        if not self._round_account or current != self._round_account:
-            # 这一轮开始时没登录，或播放途中换了账号：算旧账号的，
-            # 不往新账号里记
+        if self._song_id(song) != self._round_song_id or not self._round_account:
+            self._clear_round()
             return
-        self._dispatch(song.id, "play", seconds)  # type: ignore[union-attr]
+        account = self._round_account
+        self._clear_round()
+        if self._account() != account:
+            return
+        self._resume_if_expired()
+        if self._pause_reason():
+            return
+        self._dispatch(self._song_id(song), "play", seconds, account)
 
     # ------------------------------------------------------------ 上报
+
+    @staticmethod
+    def _song_id(song: object) -> int:
+        return int(getattr(song, "id", 0))
+
+    def _clear_round(self) -> None:
+        self._round_song_id = None
+        self._round_account = ""
+        self._start_sent = False
 
     def _account(self) -> str:
         client = self._client_provider()
         return client.jar.value("MUSIC_U") if client is not None else ""
 
-    def _send_default(self, song_id: int, action: str, seconds: int) -> None:
+    def _send_default(
+        self, song_id: int, action: str, seconds: int, account: str
+    ) -> None:
+        """后台发送。发之前重新读 Cookie，并确认账号还是入队时那个。"""
         client = self._client_provider()
         if client is None:
             return
         # 用户可能刚登录/换号：每次上报前重新读一次 cookie 文件
         client.jar.reload()
+        if client.jar.value("MUSIC_U") != account:
+            # 排队期间退出登录或切换了账号。这条日志属于旧账号，
+            # 宁可不记，也不能用新账号的身份发出去。
+            return
         client.scrobble(song_id, action, seconds)
 
-    def _dispatch(self, song_id: int, action: str, seconds: int) -> None:
-        """后台发送一条日志；失败只当这次没记上。"""
-        sender = self._sender
+    def _dispatch(
+        self, song_id: int, action: str, seconds: int, account: str
+    ) -> bool:
+        """把一条日志放进串行队列；队列满或已熔断时直接丢掉。"""
+        if self._closed or not account:
+            return False
+        if self._pause_reason() or not self._admit(account):
+            return False
+        try:
+            self._queue.put_nowait(_Task(song_id, action, seconds, account))
+        except queue.Full:
+            return False
+        return True
 
-        def run() -> None:
+    def _work(self) -> None:
+        while True:
+            task = self._queue.get()
             try:
-                sender(song_id, action, seconds)
-            except (ApiError, ValueError, OSError):
-                pass
+                if task is None:
+                    return
+                try:
+                    self._sender(
+                        task.song_id, task.action, task.seconds, task.account
+                    )
+                except RateLimited:
+                    self._note_failure(task.account)
+                except (ApiError, ValueError, OSError):
+                    # 单条失败只当这次没记上，不影响后续播放
+                    pass
+                else:
+                    self._note_success()
+            finally:
+                self._queue.task_done()
 
-        threading.Thread(
-            target=run, name="ncmgui-scrobble", daemon=True
-        ).start()
+    # ------------------------------------------------------------ 限流/熔断
+
+    def _pause_reason(self) -> str:
+        with self._lock:
+            if self._paused_until and self._clock() < self._paused_until:
+                return PAUSE_MESSAGE
+        return ""
+
+    def _resume_if_expired(self) -> None:
+        with self._lock:
+            if not self._paused_until or self._clock() < self._paused_until:
+                return
+            self._paused_until = 0.0
+            self._paused_account = ""
+            self._failures = 0
+        self.pausedChanged.emit(False, "")
+
+    def _resume_for_account(self, account: str) -> None:
+        """换号后不再沿用上一个账号的熔断状态。"""
+        with self._lock:
+            if not (self._paused_until and self._paused_account):
+                return
+            if self._paused_account == account:
+                return
+            self._paused_until = 0.0
+            self._paused_account = ""
+            self._failures = 0
+        self.pausedChanged.emit(False, "")
+
+    def _admit(self, account: str) -> bool:
+        """账号级小时配额；超了就不再发，额度按小时窗口重置。"""
+        now = self._clock()
+        with self._lock:
+            if (self._budget_account != account
+                    or now - self._budget_start >= 3600.0):
+                self._budget_account = account
+                self._budget_start = now
+                self._budget_count = 0
+            if self._budget_count >= MAX_LOGS_PER_HOUR:
+                return False
+            self._budget_count += 1
+            return True
+
+    def _note_failure(self, account: str) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._failures < FAILURE_LIMIT:
+                return
+            self._failures = 0
+            self._paused_until = self._clock() + PAUSE_SECONDS
+            self._paused_account = account
+        # 可能在工作线程里，Qt 会把它排队到主线程
+        self.pausedChanged.emit(True, PAUSE_MESSAGE)
+
+    def _note_success(self) -> None:
+        with self._lock:
+            self._failures = 0
+
+    def shutdown(self) -> None:
+        """停止后台线程；未发送的任务随之丢弃。"""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -159,9 +360,13 @@ class ScrobbleReporter(QObject):
 def _selftest() -> int:
     import time
 
+    from PyQt6.QtCore import QCoreApplication
+
     from . import ensure_utf8_stdout
+    from .api.errors import RateLimited
 
     ensure_utf8_stdout()
+    app = QCoreApplication.instance() or QCoreApplication([])
     failures: list[str] = []
 
     def check(name: str, got: object, want: object) -> None:
@@ -203,31 +408,41 @@ def _selftest() -> int:
     client = FakeClient()
     cfg = FakeCfg(True)
     reporter = ScrobbleReporter(cfg, client)  # type: ignore[arg-type]
+    paused: list[bool] = []
+    reporter.pausedChanged.connect(
+        lambda state, _reason: paused.append(state))
 
     online = Song(321, "在线")
     local = Song(-1, "本地", source="local")
     streaming = Song(99, "流媒体", source="subsonic")
 
     # 本地/流媒体歌曲没有网易云 ID，怎么都不该发
-    reporter.on_started(local)
-    reporter.on_started(streaming)
-    reporter.on_settled(local, 60_000)
-    reporter.on_settled(streaming, 60_000)
+    for song in (local, streaming):
+        reporter.on_started(song)
+        reporter.on_qualified(song)
+        reporter.on_settled(song, 60_000)
     time.sleep(0.05)
     check("本地/流媒体不上报", client.calls, [])
 
     # 未登录时既不开始也不结算
     client.jar.account = ""
     reporter.on_started(online)
+    reporter.on_qualified(online)
     reporter.on_settled(online, 60_000)
     time.sleep(0.05)
     check("未登录不上报", client.calls, [])
     client.jar.account = "token-a"
 
-    # 开始播放：立刻发 startPlay，不带时长
+    # 开始播放不立刻发；听满 5 秒才发 startPlay
     reporter.on_started(online)
+    time.sleep(0.05)
+    check("开始时不立刻发送", client.calls, [])
+    reporter.on_qualified(online)
     wait_for(client.calls, 1)
-    check("开始日志", client.calls[0], (321, "startPlay", 0))
+    check("满 5 秒发开始日志", client.calls[0], (321, "startPlay", 0))
+    reporter.on_qualified(online)
+    time.sleep(0.05)
+    check("开始日志只发一次", len(client.calls), 1)
 
     # 结算：实际收听 12.6 秒 → 四舍五入 13 秒
     reporter.on_settled(online, 12_600)
@@ -235,6 +450,7 @@ def _selftest() -> int:
     check("结束日志", client.calls[1], (321, "play", 13))
 
     # 低于 5 秒的轮次不往云端发（快速试听/连续切歌）
+    reporter.on_started(online)
     reporter.on_settled(online, 4_999)
     time.sleep(0.05)
     check("不足 5 秒不上报", len(client.calls), 2)
@@ -242,28 +458,60 @@ def _selftest() -> int:
     # 播放途中换号：开始日志已经算旧账号，结算不能记到新账号
     base = len(client.calls)
     reporter.on_started(online)
-    wait_for(client.calls, base + 1)
     client.jar.account = "token-b"
+    reporter.on_qualified(online)
     reporter.on_settled(online, 30_000)
     time.sleep(0.05)
-    check("换号后不结算", len(client.calls), base + 1)
+    check("换号后不发送", len(client.calls), base)
     client.jar.account = "token-a"
+
+    # 真正的高危路径：任务已入队，执行前 Cookie 被切成另一个账号。
+    # 默认发送器必须在 reload 之后比对快照，不能拿新账号发旧日志。
+    reporter._sender = reporter._send_default
+    base = len(client.calls)
+    client.jar.account = "token-b"
+    reporter._dispatch(321, "startPlay", 0, "token-a")
+    time.sleep(0.2)
+    check("排队期间换号，旧任务丢弃", len(client.calls), base)
+    check("确实重新读过 Cookie", client.jar.reloaded >= 1, True)
+    client.jar.account = "token-a"
+
+    # 默认发送器在账号未变时正常发送
+    base = len(client.calls)
+    reporter._dispatch(321, "startPlay", 0, "token-a")
+    wait_for(client.calls, base + 1)
+    check("账号一致时正常发送", client.calls[base], (321, "startPlay", 0))
 
     # 关闭开关后不再上报
     cfg.enabled = False
+    base = len(client.calls)
     reporter.on_started(online)
+    reporter.on_qualified(online)
     reporter.on_settled(online, 30_000)
     time.sleep(0.05)
-    check("关闭后不上报", len(client.calls), base + 1)
+    check("关闭后不上报", len(client.calls), base)
 
-    # 默认发送器会先刷新 cookie，再调客户端
+    # 连续限流触发熔断，之后的任务直接丢弃
     cfg.enabled = True
-    reporter._sender = reporter._send_default
-    reporter.on_started(online)
-    wait_for(client.calls, base + 2)
-    check("上报前刷新 Cookie", client.calls[base + 1], (321, "startPlay", 0))
-    check("确实刷新了一次", client.jar.reloaded >= 3, True)
+    def always_limited(song_id: int, action: str, seconds: int,
+                       account: str) -> None:
+        raise RateLimited("限流")
+    reporter._sender = always_limited
+    deadline = time.monotonic() + 2.0
+    while not reporter.paused and time.monotonic() < deadline:
+        reporter._dispatch(321, "play", 10, "token-a")
+        time.sleep(0.02)
+    check("连续限流后熔断", reporter.paused, True)
+    app.processEvents()  # 工作线程发出的信号是排队投递的
+    check("熔断通知界面", True in paused, True)
+    check("熔断后不再入队", reporter._dispatch(321, "play", 10, "token-a"),
+          False)
+    # 换号后解除熔断
+    reporter._resume_for_account("token-b")
+    check("换号解除熔断", reporter.paused, False)
 
+    reporter.shutdown()
+    del app
     if failures:
         print(f"听歌记录上报自检失败 {len(failures)} 项：")
         for item in failures:
