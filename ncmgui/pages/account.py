@@ -79,6 +79,7 @@ class AccountPage(BasePage):
         self.content.addWidget(self.profile_card)
 
         self._build_status_card()
+        self._build_security_card()
         self._build_qrcode_card()
         self._build_phone_card()
         self._build_cookie_card()
@@ -117,6 +118,92 @@ class AccountPage(BasePage):
         card.add_row_of(refresh, info, self.logout_btn)
         self.content.addWidget(card)
 
+    def _build_security_card(self) -> None:
+        """一眼看清当前账号的安全相关状态，不展示任何凭据原文。"""
+        card = FormCard("账号安全")
+
+        self.security_identity = QLabel("—")
+        self.security_identity.setWordWrap(True)
+        card.add_row("登录身份", self.security_identity)
+
+        self.security_permission = QLabel("—")
+        self.security_permission.setWordWrap(True)
+        card.add_row("凭据权限", self.security_permission)
+
+        self.security_token = QLabel("—")
+        self.security_token.setWordWrap(True)
+        card.add_row("接口令牌", self.security_token)
+
+        self.security_scrobble = QLabel("—")
+        self.security_scrobble.setWordWrap(True)
+        card.add_row("听歌同步", self.security_scrobble)
+
+        note = QLabel(
+            "本程序只读取凭据文件，不写回；Cookie、CSRF 与接口令牌不会"
+            "显示在界面上，也不会写进日志。"
+        )
+        note.setObjectName("Hint")
+        note.setWordWrap(True)
+        card.add_widget(note)
+
+        # 熔断/当日上限变化时同步这一行，不必等用户手动刷新
+        self.window.scrobble.pausedChanged.connect(
+            lambda *_args: self._refresh_security())
+
+        self.content.addWidget(card)
+
+    def _refresh_security(self) -> None:
+        home = self.cfg.get("home", "")
+        logged_in = ncmctl.is_logged_in(home)
+        client = self.window.client
+
+        if not logged_in:
+            self.security_identity.setText("未登录")
+        else:
+            profile = client.profile
+            nickname = str(profile.get("nickname") or "").strip()
+            uid = int(profile.get("userId") or client.uid or 0)
+            if nickname and uid:
+                self.security_identity.setText(f"{nickname}（UID {uid}）")
+            elif uid:
+                self.security_identity.setText(f"UID {uid}")
+            else:
+                self.security_identity.setText("已登录（资料尚未加载）")
+
+        path = ncmctl.cookie_path(home)
+        if sys.platform == "win32":
+            self.security_permission.setText("由用户目录的 ACL 保护")
+        elif not logged_in:
+            self.security_permission.setText("—")
+        else:
+            try:
+                mode = path.stat().st_mode & 0o777
+            except OSError:
+                self.security_permission.setText("无法读取")
+            else:
+                if mode & 0o077:
+                    self.security_permission.setText(
+                        f"{mode:04o} · 同机其他用户可读，建议 chmod 600"
+                    )
+                else:
+                    self.security_permission.setText(
+                        f"{mode:04o} · 仅本人可读写")
+
+        if not logged_in:
+            self.security_token.setText("未登录")
+        elif client.jar.csrf:
+            self.security_token.setText("已就绪（不显示具体值）")
+        else:
+            self.security_token.setText("缺失，需要重新登录")
+
+        reporter = self.window.scrobble
+        if not reporter.enabled:
+            self.security_scrobble.setText("关闭（默认）")
+        else:
+            reason = reporter.pause_reason
+            self.security_scrobble.setText(
+                f"开启 · {reason}" if reason else "开启")
+
     def _refresh_status(self) -> None:
         home = self.cfg.get("home", "")
         logged_in = ncmctl.is_logged_in(home)
@@ -142,10 +229,12 @@ class AccountPage(BasePage):
                 f"未找到 {ncmctl.cookie_path(home)}<br>"
                 "推荐用下面的「扫码登录」，最省事也最安全。"
             )
+        self._refresh_security()
 
     def _on_profile_changed(self, profile: dict) -> None:
         self.profile_card.set_logged_in(self.window.is_logged_in())
         self.profile_card.set_profile(profile)
+        self._refresh_security()
 
     def _refresh_profile(self) -> None:
         """点账号卡：文件状态立即刷新，在线资料后台再取一次。"""

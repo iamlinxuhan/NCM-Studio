@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
 from .. import localmusic, ncmctl, player, theme
 from ..lyrics import AUDIO_SUFFIXES, index_audio
 from ..playback import STATE_PLAYING
-from ..resolver import Resolver, Song
+from ..resolver import Song
 from ..widgets.card import ghost_button
 from ..widgets.form import combo_data, set_combo_data
 from ..widgets.playmarker import PlayMarkerDelegate
@@ -415,9 +415,14 @@ class LikedPage(BasePage):
         holder: dict[str, BackgroundTask] = {}
 
         def work():
-            resolver = Resolver(self.window.binary, opts=self.opts(), timeout="20s")
-            resolver.progress = lambda message: holder["task"].progress.emit(message)
-            songs = resolver.liked_songs()
+            # 直接走程序内的接口客户端：ncmctl 子进程是另一套 TLS 指纹，
+            # 和搜索/详情页的请求混在一起反而更显眼，也白多一次进程开销
+            client = self.window.client
+            playlist = client.liked_playlist()
+            holder["task"].progress.emit(f"正在读取「{playlist.name}」…")
+            songs = client.playlist_tracks_all(playlist.id)
+            if not songs:
+                raise RuntimeError("红心歌单里没有可用的歌曲（曲目可能都已下架）")
             directory = str(Path(self.cfg.get("download.output", "")).expanduser())
             index = index_audio(directory) if directory else {}
             downloaded = {song.id for song in songs if song.base in index}

@@ -83,6 +83,21 @@ class Cookie:
         return path.startswith(self.path or "/")
 
 
+@dataclass(frozen=True)
+class CookieSnapshot:
+    """某一瞬间的登录身份快照。
+
+    需要「先核对账号、再发请求」的敏感接口（播放日志就是典型）不能分两步
+    各自去 CookieJar 取值：核对时是账号 A，组包时文件可能已经换成账号 B，
+    两步之间就是一个串号窗口。取一份快照，核对其中的 ``music_u``，再用同一
+    份快照里的 ``header``/``csrf`` 组包，把窗口彻底消掉。
+    """
+
+    header: str
+    csrf: str
+    music_u: str
+
+
 def parse_cookie_file(path: str | Path) -> list[Cookie]:
     """读取并解析 Cookie 文件；文件不存在或损坏时返回空列表。"""
     try:
@@ -186,6 +201,43 @@ class CookieJar:
                     continue
                 return cookie.value
         return ""
+
+    def snapshot(self, domain: str = DOMAIN, path: str = "/") -> CookieSnapshot:
+        """一次性取出发往 ``domain``/``path`` 的 Cookie 头、CSRF 与账号标识。
+
+        三个值从同一份 Cookie 集合里算出，中间不会掺进别的线程刚 reload
+        进来的新账号；调用方核对 ``music_u`` 后应直接把这个 ``header`` 和
+        ``csrf`` 交给传输层，而不是再让传输层自己去读一次。
+        """
+        now = self._clock()
+        with self._lock:
+            merged = {(c.name, c.domain, c.path): c for c in self._cookies}
+            merged.update(self._overlay)
+            cookies = list(merged.values())
+
+        # 与 header() 相同的筛选与优先级，只是共用同一次快照
+        chosen: dict[str, tuple[int, Cookie]] = {}
+        for cookie in cookies:
+            if cookie.expires is not None and cookie.expires <= now:
+                continue
+            if not cookie.matches(domain, path):
+                continue
+            depth = len(cookie.path or "/")
+            previous = chosen.get(cookie.name)
+            if previous is None or depth >= previous[0]:
+                chosen[cookie.name] = (depth, cookie)
+
+        header = "; ".join(
+            f"{name}={cookie.value}"
+            for name, (_depth, cookie) in sorted(chosen.items())
+        )
+        music_u = chosen.get("MUSIC_U")
+        csrf = chosen.get("__csrf")
+        return CookieSnapshot(
+            header=header,
+            csrf=csrf[1].value if csrf else "",
+            music_u=music_u[1].value if music_u else "",
+        )
 
     @property
     def csrf(self) -> str:
@@ -302,6 +354,17 @@ def _selftest() -> int:
         jar.apply_set_cookie(["__csrf=new; Path=/; Max-Age=3600"])
         check("内存覆盖生效", jar.csrf, "new")
         check("不写回文件", "__csrf=new" in path.read_text(encoding="utf-8"), False)
+
+        snap = jar.snapshot()
+        check("快照里的账号", snap.music_u, "token")
+        check("快照里的 CSRF", snap.csrf, "new")
+        check("快照头与 header 一致", snap.header, jar.header())
+        check("快照不混入别的域名", "wrong" in snap.header, False)
+        check("快照按目标主机筛选", jar.snapshot("other.example").music_u, "wrong")
+        # 文件/覆盖层在快照之后变化，旧的快照不受影响
+        jar.apply_set_cookie(["MUSIC_U=switched; Path=/"])
+        check("旧快照保持原账号", snap.music_u, "token")
+        check("新快照看到新账号", jar.snapshot().music_u, "switched")
 
     # 过期时间解析
     check("空过期时间是会话", _parse_expiry(""), None)

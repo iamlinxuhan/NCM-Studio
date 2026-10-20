@@ -14,7 +14,7 @@ import json
 from typing import Any, Callable
 
 from .. import ncmctl
-from .cookies import CookieJar
+from .cookies import CookieJar, CookieSnapshot
 from .errors import AntiCheatRequired, ApiError, AuthRequired
 from .models import (
     Album,
@@ -543,7 +543,17 @@ class ApiClient:
 
     # ---------------------------------------------------------- 播放日志
 
-    def scrobble(self, song_id: int, action: str, seconds: int = 0) -> None:
+    def web_session(self) -> CookieSnapshot:
+        """取播放日志出口的 Cookie 快照（含账号与 CSRF）。
+
+        调用方先比对外面这层快照里的 ``music_u``，再把同一个对象传给
+        :meth:`scrobble`，核对与组包用的就是同一份 Cookie。
+        """
+        return self.jar.snapshot(domain="clientlogusf.music.163.com",
+                                 path="/weapi/feedback/weblog")
+
+    def scrobble(self, song_id: int, action: str, seconds: int = 0, *,
+                 session: CookieSnapshot | None = None) -> None:
         """把一次播放动作写进网易云的听歌记录。
 
         走网页端同一个出口（``clientlogusf`` 的 ``/weapi/feedback/weblog``）：
@@ -568,7 +578,9 @@ class ApiClient:
         seconds = int(seconds)
         if action == "play" and seconds <= 0:
             return
-        if not self.jar.csrf:
+        if session is None:
+            session = self.web_session()
+        if not session.csrf:
             raise AuthRequired("登录信息缺少 CSRF 令牌，请重新登录")
 
         entry: dict[str, Any] = {
@@ -594,6 +606,7 @@ class ApiClient:
                 "x-music-web-os": "web3",
                 "Nm-GCore-Status": "1",
             },
+            session=session,
         )
 
 
@@ -629,6 +642,9 @@ class _FakeJar:
 
     def reload(self) -> bool:
         return False
+
+    def snapshot(self, **_kwargs) -> CookieSnapshot:
+        return CookieSnapshot("MUSIC_U=token; __csrf=csrf", "csrf", "token")
 
 
 def _selftest() -> int:
@@ -716,6 +732,14 @@ def _selftest() -> int:
     check("结束日志动作", logs[0]["action"], "play")
     check("结束日志时长", logs[0]["json"]["time"], 42)
     check("结束日志无结束方式", "end" in logs[0]["json"], False)
+
+    # 核对账号与实际组包必须用同一份 Cookie 快照：调用方给什么就用什么，
+    # 不再回头读 CookieJar（中途换号也串不了）
+    given = CookieSnapshot("MUSIC_U=snap; __csrf=c1", "c1", "snap")
+    client.scrobble(3, "startPlay", session=given)
+    sent = fake.last_weapi_kwargs.get("session")
+    check("播放日志使用传入的快照", sent, given)
+    check("快照提供了 CSRF", sent.csrf if sent else "", "c1")
 
     before = len(fake.calls)
     client.scrobble(3, "play", 0)  # 0 秒不产生请求

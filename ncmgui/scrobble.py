@@ -17,9 +17,13 @@
 ``startPlay``；快速切歌不会在几秒内制造一串开始日志，``startPlay`` 与
 ``play`` 也总是成对出现。
 
-**账号隔离**：每条日志在入队时就把当时的 ``MUSIC_U`` 固定下来，后台线程
-真正发送前会重新读一遍 Cookie 文件并比对；排队期间退出登录或切换账号，
-这条日志直接丢弃，绝不会用新账号的身份发出去。
+**账号隔离**：每条日志在入队时就把当时的 ``MUSIC_U`` 和 ``ApiClient``
+一起固定下来。后台线程真正发送前会重新读一遍 Cookie 文件，取一份
+:class:`~ncmgui.api.cookies.CookieSnapshot`，比对其中的 ``music_u``；
+退出登录或切换账号时这条日志直接丢弃。比对通过后，请求头的 Cookie 和
+CSRF 都用这份快照，不再回头读 CookieJar——核对与组包之间即使又换了号，
+也不会串到新账号上。客户端被设置页重建（``reload_api``）时，旧客户端
+名下的任务一并作废，不会拿到新会话里重发。
 
 **限流与熔断**：同一账号每小时最多 120 条、每天最多 200 条日志；
 接口连续 3 次返回限流就暂停 10 分钟，并通过 ``pausedChanged`` 通知界面。
@@ -77,18 +81,23 @@ QUEUE_SIZE = 32
 PAUSE_MESSAGE = "接口连续返回限流，听歌记录同步已暂停，稍后自动恢复。"
 DAILY_MESSAGE = "今日听歌记录上报已达上限，明天自动恢复。"
 
-#: 上报函数签名：``(song_id, action, seconds, account)``
-Sender = Callable[[int, str, int, str], None]
+#: 上报函数签名：``(song_id, action, seconds, account, client)``
+Sender = Callable[[int, str, int, str, ApiClient | None], None]
 
 
 @dataclass(frozen=True)
 class _Task:
-    """一条待发送的日志，``account`` 是入队时的身份快照。"""
+    """一条待发送的日志。
+
+    ``account`` 与 ``client`` 都是入队时的快照：前者防串号，后者防
+    ``reload_api`` 重建客户端后旧任务跑到新会话里。
+    """
 
     song_id: int
     action: str
     seconds: int
     account: str
+    client: object | None = None
 
 
 class ScrobbleReporter(QObject):
@@ -154,8 +163,13 @@ class ScrobbleReporter(QObject):
 
     @property
     def paused(self) -> bool:
-        """是否因连续限流而暂时停止上报。"""
+        """是否因连续限流/当日配额而暂时停止上报。"""
         return bool(self._pause_reason())
+
+    @property
+    def pause_reason(self) -> str:
+        """当前的暂停原因；正常运行时为空串。"""
+        return self._pause_reason()
 
     @staticmethod
     def _eligible(song: object) -> bool:
@@ -246,19 +260,24 @@ class ScrobbleReporter(QObject):
         return client.jar.value("MUSIC_U") if client is not None else ""
 
     def _send_default(
-        self, song_id: int, action: str, seconds: int, account: str
+        self, song_id: int, action: str, seconds: int, account: str,
+        client: ApiClient | None,
     ) -> None:
-        """后台发送。发之前重新读 Cookie，并确认账号还是入队时那个。"""
-        client = self._client_provider()
+        """后台发送。发之前重新读 Cookie，并确认账号还是入队时那个。
+
+        核对与组包共用同一份 :class:`CookieSnapshot`：比对完 ``music_u``
+        之后不再让传输层自己去读 CookieJar，换号插不进这两步之间。
+        """
         if client is None:
             return
         # 用户可能刚登录/换号：每次上报前重新读一次 cookie 文件
         client.jar.reload()
-        if client.jar.value("MUSIC_U") != account:
+        session = client.web_session()
+        if session.music_u != account:
             # 排队期间退出登录或切换了账号。这条日志属于旧账号，
             # 宁可不记，也不能用新账号的身份发出去。
             return
-        client.scrobble(song_id, action, seconds)
+        client.scrobble(song_id, action, seconds, session=session)
 
     def _dispatch(
         self, song_id: int, action: str, seconds: int, account: str
@@ -266,10 +285,14 @@ class ScrobbleReporter(QObject):
         """把一条日志放进串行队列；队列满或已熔断时直接丢掉。"""
         if self._closed or not account:
             return False
+        client = self._client_provider()
+        if client is None:
+            return False
         if self._pause_reason() or not self._admit(account):
             return False
         try:
-            self._queue.put_nowait(_Task(song_id, action, seconds, account))
+            self._queue.put_nowait(
+                _Task(song_id, action, seconds, account, client))
         except queue.Full:
             return False
         return True
@@ -280,9 +303,15 @@ class ScrobbleReporter(QObject):
             try:
                 if task is None:
                     return
+                current = self._client_provider()
+                if task.client is not None and current is not task.client:
+                    # 设置页重建过客户端：这条日志属于旧会话，丢弃而不是
+                    # 拿到新客户端里重发
+                    continue
                 try:
                     self._sender(
-                        task.song_id, task.action, task.seconds, task.account
+                        task.song_id, task.action, task.seconds, task.account,
+                        task.client,
                     )
                 except RateLimited:
                     self._note_failure(task.account)
@@ -407,6 +436,7 @@ def _selftest() -> int:
     from PyQt6.QtCore import QCoreApplication
 
     from . import ensure_utf8_stdout
+    from .api.cookies import CookieSnapshot
     from .api.errors import RateLimited
 
     ensure_utf8_stdout()
@@ -440,8 +470,22 @@ def _selftest() -> int:
         def __init__(self) -> None:
             self.jar = FakeJar()
             self.calls: list[tuple[int, str, int]] = []
+            self.sessions: list[object] = []
+            #: 模拟「核对完账号之后、真正组包之前」另一个线程换了号
+            self.switch_before_send = ""
 
-        def scrobble(self, song_id: int, action: str, seconds: int = 0) -> None:
+        def web_session(self):
+            return CookieSnapshot(
+                f"MUSIC_U={self.jar.account}; __csrf=csrf",
+                "csrf",
+                self.jar.account,
+            )
+
+        def scrobble(self, song_id: int, action: str, seconds: int = 0,
+                     *, session=None) -> None:
+            if self.switch_before_send:
+                self.jar.account = self.switch_before_send
+            self.sessions.append(session)
             self.calls.append((song_id, action, seconds))
 
     def wait_for(calls: list, count: int, timeout: float = 2.0) -> None:
@@ -526,6 +570,47 @@ def _selftest() -> int:
     wait_for(client.calls, base + 1)
     check("账号一致时正常发送", client.calls[base], (321, "startPlay", 0))
 
+    # 核对通过后、真正组包前又换了号：请求必须沿用核对时的快照，
+    # 不能再从 CookieJar 现取新账号的 Cookie
+    race = FakeClient()
+    race.jar.account = "token-a"
+    race.switch_before_send = "token-b"
+    racer = ScrobbleReporter(cfg, race)  # type: ignore[arg-type]
+    racer._dispatch(321, "startPlay", 0, "token-a")
+    wait_for(race.calls, 1)
+    check("核对后换号仍发一条", len(race.calls), 1)
+    snap = race.sessions[-1] if race.sessions else None
+    check("核对后换号沿用旧账号", getattr(snap, "music_u", ""), "token-a")
+    check("核对后换号沿用旧 Cookie",
+          "MUSIC_U=token-a" in getattr(snap, "header", ""), True)
+    racer.shutdown()
+
+    # reload_api 重建客户端后，旧客户端名下的排队任务作废：既不落到新
+    # 客户端，也不拿旧客户端继续发
+    holder = {"client": FakeClient()}
+    holder["client"].jar.account = "token-a"
+    replacement = ScrobbleReporter(
+        cfg, client_provider=lambda: holder["client"])  # type: ignore[arg-type]
+    gate = threading.Event()
+    blocked = threading.Event()
+
+    def blocking(song_id, action, seconds, account, client) -> None:
+        blocked.set()
+        gate.wait(2.0)
+
+    replacement._sender = blocking  # type: ignore[assignment]
+    replacement._dispatch(321, "block", 1, "token-a")
+    blocked.wait(2.0)
+    stale = holder["client"]
+    replacement._dispatch(322, "play", 10, "token-a")
+    holder["client"] = FakeClient()
+    holder["client"].jar.account = "token-a"
+    gate.set()
+    time.sleep(0.2)
+    check("重建客户端后旧任务作废", len(holder["client"].calls), 0)
+    check("旧客户端不会再收到任务", len(stale.calls), 0)
+    replacement.shutdown()
+
     # 关闭开关后不再上报
     cfg.enabled = False
     base = len(client.calls)
@@ -538,7 +623,7 @@ def _selftest() -> int:
     # 连续限流触发熔断，之后的任务直接丢弃
     cfg.enabled = True
     def always_limited(song_id: int, action: str, seconds: int,
-                       account: str) -> None:
+                       account: str, client) -> None:
         raise RateLimited("限流")
     reporter._sender = always_limited
     deadline = time.monotonic() + 2.0

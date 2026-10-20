@@ -293,6 +293,10 @@ def sync_appimage_name(
     final = versioned_appimage_name(path, version or VERSION)
     if final is None or final == path:
         return None
+    # 目标名已被别的文件占用（比如同时留着一份旧版本）时不要覆盖：
+    # 改名只是整理文件名，没理由拿当前这个文件去盖掉另一个
+    if final.exists():
+        return None
     try:
         os.replace(path, final)
     except OSError:
@@ -804,6 +808,24 @@ def _selftest() -> int:
           versioned_appimage_name(Path("/x/NCM-Studio-3.0.0.exe"), "3.0.3"), None)
     check("版本没变不动",
           versioned_appimage_name(Path("/x/NCM-Studio-3.0.3.AppImage"), "3.0.3"), None)
+
+    # ---- 启动时的改名
+    with tempfile.TemporaryDirectory() as tmp:
+        old = Path(tmp) / "NCM-Studio-3.0.0-x86_64.AppImage"
+        old.write_bytes(b"new")
+        target = Path(tmp) / "NCM-Studio-3.0.8-x86_64.AppImage"
+        check("改名成功",
+              sync_appimage_name("3.0.8", target=old, roots=[]), target)
+        check("旧名不再存在", old.exists(), False)
+        check("新名内容不变", target.read_bytes(), b"new")
+
+        # 目标名已经被另一个文件占用：不覆盖，也不动当前文件
+        occupied = Path(tmp) / "NCM-Studio-3.0.1-x86_64.AppImage"
+        occupied.write_bytes(b"old")
+        check("目标已存在时不改名",
+              sync_appimage_name("3.0.8", target=occupied, roots=[]), None)
+        check("没有覆盖已有文件", target.read_bytes(), b"new")
+        check("原文件保持不动", occupied.read_bytes(), b"old")
 
     # ---- 安装形态
     check("源码运行", install_kind(system="linux", frozen=False, appimage=""), "source")

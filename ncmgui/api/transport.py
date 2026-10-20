@@ -28,7 +28,7 @@ from typing import Callable, Iterable
 
 from ..config import config_dir
 from ..netutil import ProxyError, normalize_proxy
-from .cookies import CookieJar
+from .cookies import CookieJar, CookieSnapshot
 from .crypto import weapi_params
 from .errors import (
     ApiChanged,
@@ -240,23 +240,30 @@ class Transport:
 
     def weapi(self, path: str, data: dict | None = None, *,
               write: bool = False, anticheat: bool = False,
-              domain: str = "", headers: dict[str, str] | None = None) -> dict:
+              domain: str = "", headers: dict[str, str] | None = None,
+              session: CookieSnapshot | None = None) -> dict:
         """POST 一个 weapi 接口。``path`` 形如 ``/weapi/cloudsearch/pc``。
 
         ``domain`` 非空时把请求发到另一台主机（例如播放日志的
         ``clientlogusf.music.163.com``），Cookie 仍按该主机的域名筛选。
         ``headers`` 用于补齐某些接口要求、与网页端一致的请求头。
+
+        ``session`` 是一份固定的 Cookie 快照：加密用的 CSRF 和请求头里的
+        Cookie 都取自它，不再回头读 CookieJar。调用方已经核对过快照里的
+        账号，这样从核对到发出之间就不会再被换号插进来。
         """
-        if not self.jar.csrf:
+        token = session.csrf if session is not None else self.jar.csrf
+        if not token:
             raise AuthRequired("登录信息缺少 CSRF 令牌，请重新登录")
-        body = weapi_params(dict(data or {}), self.jar.csrf)
+        body = weapi_params(dict(data or {}), token)
         extra = dict(headers or {})
         if anticheat:
             token = self.anticheat_token()
             if token:
                 extra.setdefault("X-antiCheatToken", token)
         return self.request("POST", path, body, write=write, headers=extra,
-                            retry=not write, domain=domain)
+                            retry=not write, domain=domain,
+                            cookie_header=session.header if session else None)
 
     def request(
         self,
@@ -268,8 +275,13 @@ class Transport:
         headers: dict | None = None,
         retry: bool | None = None,
         domain: str = "",
+        cookie_header: str | None = None,
     ) -> dict:
-        """发请求并返回 JSON。``domain`` 可覆盖接口主机。"""
+        """发请求并返回 JSON。``domain`` 可覆盖接口主机。
+
+        ``cookie_header`` 非空时用它替代现读的 Cookie 头（空字符串表示
+        明确不带 Cookie）；用于发送已经核对过身份的快照。
+        """
         if retry is None:
             retry = not write
         attempts = 3 if retry else 1
@@ -283,7 +295,8 @@ class Transport:
             self._wait_cooldown(write)
             try:
                 return self._once(method, path, data or {}, write=write,
-                                  headers=headers or {}, domain=domain)
+                                  headers=headers or {}, domain=domain,
+                                  cookie_header=cookie_header)
             except RateLimited as exc:
                 last = exc
                 self._trip_cooldown()
@@ -300,7 +313,8 @@ class Transport:
     # -------------------------------------------------------------- 单次请求
 
     def _once(self, method: str, path: str, data: dict, *,
-              write: bool, headers: dict, domain: str = "") -> dict:
+              write: bool, headers: dict, domain: str = "",
+              cookie_header: str | None = None) -> dict:
         if not path.startswith("/"):
             path = "/" + path
         base_url = (domain or self.base_url).rstrip("/")
@@ -328,7 +342,10 @@ class Transport:
         # Cookie 按实际请求的主机筛选：播放日志发到 clientlogusf 子域，
         # 但登录凭据的 Domain 是 music.163.com，仍应带上。
         host = urllib.parse.urlsplit(base_url).hostname or "music.163.com"
-        cookie = self.jar.header(domain=host, path=path)
+        # 快照一旦给出就只认它：哪怕别的线程此刻把 CookieJar 换成了另一个
+        # 账号，这次请求仍然带着调用方核对过的那份身份。
+        cookie = (cookie_header if cookie_header is not None
+                  else self.jar.header(domain=host, path=path))
         if cookie:
             request_headers["Cookie"] = cookie
         request_headers.update(headers)
@@ -512,7 +529,7 @@ def _selftest() -> int:
             self.seen: dict = {}
 
         def request(self, method, path, data=None, **kwargs) -> dict:  # type: ignore[override]
-            self.seen = kwargs
+            self.seen = {"method": method, "path": path, "data": data, **kwargs}
             return {"code": 200}
 
     recorder = _Recorder()
@@ -520,6 +537,34 @@ def _selftest() -> int:
                    headers={"x-music-web-os": "web3", "Nm-GCore-Status": "1"})
     check("weapi 透传自定义请求头", recorder.seen.get("headers"),
           {"x-music-web-os": "web3", "Nm-GCore-Status": "1"})
+
+    # 传入快照后：加密用快照的 CSRF，并把它原样交给传输层做 Cookie 头，
+    # 不再回头读 CookieJar（_Jar 里的是另一个 token）
+    global weapi_params
+    captured_csrf: list[str] = []
+    original_params = weapi_params
+
+    def capture_csrf(data, token):
+        captured_csrf.append(token)
+        return {"params": "", "encSecKey": ""}
+
+    weapi_params = capture_csrf  # type: ignore[assignment]
+    try:
+        snap = CookieSnapshot("MUSIC_U=old; __csrf=fixed", "fixed", "old")
+        recorder.weapi("/weapi/feedback/weblog", {"logs": "[]"}, session=snap)
+        check("weapi 使用快照 Cookie 头", recorder.seen.get("cookie_header"),
+              "MUSIC_U=old; __csrf=fixed")
+        check("weapi 使用快照 CSRF 加密", captured_csrf, ["fixed"])
+
+        missing = CookieSnapshot("", "", "acc")
+        try:
+            recorder.weapi("/weapi/feedback/weblog", {}, session=missing)
+            raised_missing = False
+        except AuthRequired:
+            raised_missing = True
+        check("快照缺 CSRF 时要登录", raised_missing, True)
+    finally:
+        weapi_params = original_params
 
     if failures:
         print(f"传输层自检失败 {len(failures)} 项：")
