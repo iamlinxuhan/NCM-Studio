@@ -154,8 +154,12 @@ class CookieJar:
             stat = self.path.stat()
             stamp = (stat.st_mtime_ns, stat.st_size)
         except OSError:
+            # 文件被删除或不可读：连同内存覆盖层一起清空。只清 _cookies
+            # 会把之前 Set-Cookie 轮换的 MUSIC_U/__csrf 留在内存里，登出后
+            # snapshot() 仍能取到旧账号的凭据。
             with self._lock:
                 self._cookies = []
+                self._overlay.clear()
                 self._stamp = None
             return False
         with self._lock:
@@ -365,6 +369,15 @@ def _selftest() -> int:
         jar.apply_set_cookie(["MUSIC_U=switched; Path=/"])
         check("旧快照保持原账号", snap.music_u, "token")
         check("新快照看到新账号", jar.snapshot().music_u, "switched")
+
+        # 凭据文件被删除（登出）：内存里轮换过的 Cookie 也必须一起失效，
+        # 否则登出后 snapshot() 还能拿到旧账号的 MUSIC_U/__csrf
+        path.unlink()
+        jar.reload(force=True)
+        check("文件删除后不再登录", jar.has_login, False)
+        check("文件删除后快照无账号", jar.snapshot().music_u, "")
+        check("文件删除后快照无 CSRF", jar.snapshot().csrf, "")
+        check("文件删除后 Cookie 头为空", jar.snapshot().header, "")
 
     # 过期时间解析
     check("空过期时间是会话", _parse_expiry(""), None)

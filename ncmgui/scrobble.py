@@ -498,12 +498,15 @@ class ScrobbleReporter(QObject):
 # --------------------------------------------------------------------------- #
 
 def _selftest() -> int:
+    import json
+    import tempfile
     import time
+    from pathlib import Path
 
     from PyQt6.QtCore import QCoreApplication
 
     from . import ensure_utf8_stdout
-    from .api.cookies import CookieSnapshot
+    from .api.cookies import CookieJar, CookieSnapshot
     from .api.errors import RateLimited
 
     ensure_utf8_stdout()
@@ -738,6 +741,42 @@ def _selftest() -> int:
     time.sleep(0.2)
     check("关闭同步后队列不再发送", off_sent, [])
     toggler.shutdown()
+
+    # 凭据文件被删除（登出）后，内存里 Set-Cookie 轮换过的值不能再冒充
+    # 登录态 —— 这里用真实的 CookieJar/ApiClient 走完整的默认发送路径
+    class _RecordingTransport:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        def weapi(self, path: str, data: object = None, **kwargs) -> dict:
+            self.calls.append((path, data))
+            return {"code": 200}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cookie_file = Path(tmp) / "cookie.json"
+        cookie_file.write_text(json.dumps({
+            "163.com": {
+                "music.163.com;/;MUSIC_U": {
+                    "Name": "MUSIC_U", "Value": "token-a",
+                    "Domain": "music.163.com", "Path": "/",
+                },
+                "music.163.com;/;__csrf": {
+                    "Name": "__csrf", "Value": "csrf",
+                    "Domain": "music.163.com", "Path": "/",
+                },
+            }
+        }), encoding="utf-8")
+        disk_jar = CookieJar(cookie_file)
+        # 服务端轮换过同一个 MUSIC_U，值留在内存覆盖层里
+        disk_jar.apply_set_cookie(["MUSIC_U=token-a; Path=/"])
+        disk_transport = _RecordingTransport()
+        disk_client = ApiClient(jar=disk_jar, transport=disk_transport)
+        logged_out = ScrobbleReporter(cfg, disk_client)  # type: ignore[arg-type]
+        cookie_file.unlink()
+        logged_out._dispatch(321, "startPlay", 0, "token-a")
+        time.sleep(0.2)
+        check("凭据文件删除后不再发送", disk_transport.calls, [])
+        logged_out.shutdown()
 
     # 关闭开关后不再上报
     cfg.enabled = False
