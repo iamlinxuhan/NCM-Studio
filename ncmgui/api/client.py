@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 from .. import ncmctl
 from .cookies import CookieJar
@@ -64,9 +64,13 @@ class ApiClient:
         timeout: float = 15.0,
         jar: CookieJar | None = None,
         transport: Transport | None = None,
+        rate_limit_listener: Callable[[bool], None] | None = None,
     ) -> None:
         self.jar = jar or CookieJar(ncmctl.cookie_path(home))
-        self.transport = transport or Transport(self.jar, proxy=proxy, timeout=timeout)
+        self.transport = transport or Transport(
+            self.jar, proxy=proxy, timeout=timeout,
+            rate_limit_listener=rate_limit_listener,
+        )
         self.home = home
         self._profile: dict = {}
         self._uid = 0
@@ -208,25 +212,29 @@ class ApiClient:
     def daily_songs(self) -> list:
         """每日推荐。需要登录；接口返回 301 时抛 :class:`AuthRequired`。"""
         self.need_login()
-        payload = self.transport.get("/api/v1/discovery/recommend/songs")
+        payload = self.transport.get(
+            "/api/v1/discovery/recommend/songs", cache_day=True)
         data = payload.get("data") or {}
         return songs_from_api(data.get("dailySongs") or [])
 
     def personalized_playlists(self, limit: int = 12) -> list[Playlist]:
-        payload = self.transport.get("/api/personalized/playlist",
-                                     {"limit": max(1, int(limit))})
+        payload = self.transport.get(
+            "/api/personalized/playlist",
+            {"limit": max(1, int(limit))}, cache_day=True)
         return [playlist_from_api(item) for item in (payload.get("result") or [])
                 if isinstance(item, dict)]
 
     def new_albums(self, limit: int = 12) -> list[Album]:
-        payload = self.transport.get("/api/album/new",
-                                     {"area": "ALL", "limit": limit, "offset": 0})
+        payload = self.transport.get(
+            "/api/album/new",
+            {"area": "ALL", "limit": limit, "offset": 0}, cache_day=True)
         return [album_from_api(item) for item in (payload.get("albums") or [])
                 if isinstance(item, dict)]
 
     def top_artists(self, limit: int = 12) -> list[Artist]:
-        payload = self.transport.get("/api/artist/top",
-                                     {"limit": limit, "offset": 0})
+        payload = self.transport.get(
+            "/api/artist/top",
+            {"limit": limit, "offset": 0}, cache_day=True)
         return [artist_from_api(item) for item in (payload.get("artists") or [])
                 if isinstance(item, dict)]
 

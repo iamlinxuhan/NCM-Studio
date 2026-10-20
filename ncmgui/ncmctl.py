@@ -368,7 +368,7 @@ def build_download(
     targets: list[str],
     level: str = "lossless",
     output: str = "",
-    parallel: int = 5,
+    parallel: int = 3,
     strict: bool = False,
     opts: GlobalOpts | None = None,
 ) -> list[str]:

@@ -55,6 +55,12 @@ MODE_LIKED = "liked"
 #: 这个环节本来就只有几秒到几十秒，不值得为它把并发拉满。
 LYRIC_PARALLEL = 4
 
+#: 超过这个数量就先确认一次。批量越大越容易触发接口限流，也让用户对耗时
+#: 有个预期，而不是点完才发现要跑半小时。
+BATCH_CONFIRM = 100
+#: 估算批量耗时用的每首秒数（解析 + 下载 + 歌词/封面后处理，取偏保守的值）
+SECONDS_PER_SONG = 8
+
 #: 歌词接口的超时。比解析用的 30s 短 —— 一首歌的歌词就一个请求，卡住就是卡住，
 #: 拖着不返回只会白占一个并发位。
 LYRIC_TIMEOUT = "20s"
@@ -201,9 +207,9 @@ class DownloadPage(BasePage):
         )
         self.parallel = options.add_spin(
             "并发数",
-            int(self.cfg.get("download.parallel", 5)),
+            int(self.cfg.get("download.parallel", 3)),
             1, 20,
-            hint="同时下载的曲目数量，网络不稳定时建议调小。",
+            hint="同时下载的曲目数量，默认 3；网络不稳定或批量较大时建议调小。",
         )
         self.output = options.add_path(
             "输出目录",
@@ -626,6 +632,19 @@ class DownloadPage(BasePage):
         if not songs:
             self.toast(f"{label}{plan.total} 首歌曲都已存在于输出目录，无需下载")
             return
+
+        if len(songs) > BATCH_CONFIRM:
+            workers = max(1, int(self.parallel.value()))
+            minutes = max(
+                1, round(len(songs) * SECONDS_PER_SONG / workers / 60)
+            )
+            if not self.window._confirm(
+                "确认批量下载",
+                f"本批共 {len(songs)} 首，将逐个向网易云请求，"
+                f"预计需要约 {minutes} 分钟。\n\n"
+                "批量越大越容易触发接口限流，建议分批进行。确定开始吗？",
+            ):
+                return
 
         title = f"下载{label} {len(songs)} 首" if label else f"下载 {len(songs)} 首"
         self._submit_download(

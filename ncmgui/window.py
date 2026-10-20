@@ -102,6 +102,8 @@ class MainWindow(QMainWindow):
     loginChanged = pyqtSignal(bool)
     #: 在线校验拿到的账号资料（昵称、头像、UID）；登出时发空字典
     profileChanged = pyqtSignal(dict)
+    #: 接口因限流进入/退出自动退避；工作线程发信号，界面线程接收
+    rateLimitChanged = pyqtSignal(bool)
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
@@ -128,7 +130,11 @@ class MainWindow(QMainWindow):
             self,
             fetcher=lambda url: fetch_image(url, self._api_proxy()),
         )
-        self.client = ApiClient(cfg.get("home", ""), proxy=self._api_proxy())
+        self.client = ApiClient(
+            cfg.get("home", ""),
+            proxy=self._api_proxy(),
+            rate_limit_listener=self.rateLimitChanged.emit,
+        )
         self.playback = PlaybackController(
             cfg,
             binary=lambda: self.binary,
@@ -497,10 +503,24 @@ class MainWindow(QMainWindow):
         self.status_message.setObjectName("Hint")
         self.statusBar().addWidget(self.status_message, 1)
 
+        # 限流提示不跟 toast 一起自动消失：退避期间用户需要知道为什么变慢
+        self.rate_limit_label = QLabel("")
+        self.rate_limit_label.setObjectName("Hint")
+        self.rate_limit_label.hide()
+        self.statusBar().addPermanentWidget(self.rate_limit_label)
+        self.rateLimitChanged.connect(self._on_rate_limit_changed)
+
         self.status_right = QLabel("")
         self.status_right.setObjectName("Hint")
         self.statusBar().addPermanentWidget(self.status_right)
         self._update_status_right()
+
+    def _on_rate_limit_changed(self, active: bool) -> None:
+        if active:
+            self.rate_limit_label.setText("⚠ 接口限流，已自动暂停请求，稍后恢复…")
+            self.rate_limit_label.show()
+        else:
+            self.rate_limit_label.hide()
 
     # ==================================================================== 导航
 
@@ -1038,7 +1058,11 @@ class MainWindow(QMainWindow):
 
     def reload_api(self) -> None:
         """设置里改了状态目录或代理后，重建接口客户端。"""
-        self.client = ApiClient(self.cfg.get("home", ""), proxy=self._api_proxy())
+        self.client = ApiClient(
+            self.cfg.get("home", ""),
+            proxy=self._api_proxy(),
+            rate_limit_listener=self.rateLimitChanged.emit,
+        )
         self._cookie_stamp = self._cookie_signature()
         self._refresh_login_ui()
         if not self.defer_page_loads:

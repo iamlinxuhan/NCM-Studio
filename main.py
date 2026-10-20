@@ -24,7 +24,7 @@ from pathlib import Path
 # 允许直接 `python main.py` 而不必先安装成包
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PyQt6.QtCore import QTimer, Qt  # noqa: E402
+from PyQt6.QtCore import QLockFile, QTimer, Qt  # noqa: E402
 from PyQt6.QtGui import (  # noqa: E402
     QColor,
     QFont,
@@ -34,11 +34,11 @@ from PyQt6.QtGui import (  # noqa: E402
     QPainter,
     QPixmap,
 )
-from PyQt6.QtWidgets import QApplication, QLineEdit  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
 from ncmgui import updater  # noqa: E402
-from ncmgui.config import Config, default_music_dir  # noqa: E402
+from ncmgui.config import Config, config_dir, default_music_dir  # noqa: E402
 from ncmgui.lyrics import TimedLine, Word  # noqa: E402
 from ncmgui.resources import ICON_PATH  # noqa: E402
 from ncmgui.window import MainWindow  # noqa: E402
@@ -980,6 +980,22 @@ def main(argv: list[str] | None = None) -> int:
     # 先读配置再应用主题：启动时就该是用户上次选的那一档，不能先闪一下暗色
     cfg = Config()
     theme.apply_theme(app, cfg.get("ui.theme", "dark"))
+
+    # 同一份配置、曲库和播放器只允许一个实例使用：两个实例同时写 SQLite、
+    # 写配置或下载同一批文件会互相覆盖。自检/截图可以并行，不参与抢锁。
+    _instance_lock = None
+    if not self_test and not screenshot_dir:
+        _instance_lock = QLockFile(str(config_dir() / "ncm-studio.lock"))
+        # 只按「持锁进程是否还活着」判断失效；程序被挂起再久也不抢锁
+        _instance_lock.setStaleLockTime(0)
+        if not _instance_lock.tryLock(100):
+            QMessageBox.information(
+                None,
+                APP_NAME,
+                "NCM Studio 已经在运行。\n\n"
+                "同一时间只允许一个实例，避免配置、曲库和下载互相覆盖。",
+            )
+            return 0
 
     # 自动更新是原地替换内容，文件名不会自己变。用户文件名里如果带着版本号，
     # 这里把它对齐到当前版本，并同步改掉 .desktop 的 Exec —— 否则会出现

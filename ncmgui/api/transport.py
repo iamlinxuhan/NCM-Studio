@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
+import os
 import random
 import re
 import threading
@@ -21,8 +23,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Iterable
+from pathlib import Path
+from typing import Callable, Iterable
 
+from ..config import config_dir
 from ..netutil import ProxyError, normalize_proxy
 from .cookies import CookieJar
 from .crypto import weapi_params
@@ -49,7 +53,80 @@ MIN_INTERVAL = 0.12
 #: 同时进行的读请求上限
 READ_CONCURRENCY = 3
 
+#: 触发 429/460 后全局暂停请求的时长。读请求会等它结束，写请求直接失败，
+#: 避免在同一个限流窗口里反复撞接口。
+RATE_LIMIT_COOLDOWN = 30.0
+
 _TOKEN_RE = re.compile(r'\[200,0,"([^"]+)"\]')
+
+
+def _today() -> str:
+    """本地日期：发现页的按天缓存到第二天自然失效。"""
+    return time.strftime("%Y-%m-%d")
+
+
+def _cache_path(path: str, query: dict, account: str) -> Path:
+    """按接口、参数和账号生成缓存文件名。
+
+    账号参与哈希是为了换号后不把上一个账号的每日推荐端给新账号；文件名
+    只存摘要，不落 ``MUSIC_U`` 原文。
+    """
+    raw = json.dumps(
+        [path, sorted((str(key), str(value)) for key, value in query.items()),
+         account],
+        ensure_ascii=False, sort_keys=True,
+    )
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    return config_dir() / "http-cache" / f"{digest}.json"
+
+
+def _cache_load(path: Path) -> dict | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("date") != _today():
+        return None
+    payload = data.get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+def _cache_store(path: Path, payload: dict) -> None:
+    """原子写缓存；失败只当没缓存，不影响请求结果。"""
+    tmp: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps({"date": _today(), "payload": payload}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if os.name == "posix":
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        _prune_cache(path.parent)
+    except OSError:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _prune_cache(directory: Path, keep_days: int = 7) -> None:
+    """删掉一周前的缓存文件。发现页每天 4 个文件，不清会一直堆着。"""
+    cutoff = time.time() - keep_days * 86400
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
 
 
 def mask_sensitive(text: str) -> str:
@@ -98,12 +175,18 @@ class Transport:
         timeout: float = 15.0,
         base_url: str = BASE_URL,
         clock=time.monotonic,
+        rate_limit_listener: Callable[[bool], None] | None = None,
     ) -> None:
         self.jar = jar
         self.proxy = proxy
         self.timeout = float(timeout)
         self.base_url = base_url.rstrip("/")
         self._clock = clock
+        #: 限流状态变化回调；界面用它显示一条不会自动消失的提示
+        self._rate_limit_listener = rate_limit_listener
+        self._rate_lock = threading.Lock()
+        self._cooldown_until = 0.0
+        self._cooldown_notified = False
         self._read_slots = threading.BoundedSemaphore(READ_CONCURRENCY)
         self._write_lock = threading.Lock()
         self._pace_lock = threading.Lock()
@@ -117,12 +200,26 @@ class Transport:
     # ------------------------------------------------------------------ 公共
 
     def get(self, path: str, params: dict | None = None, *,
-            csrf: bool = False) -> dict:
-        """GET 一个明文接口。"""
+            csrf: bool = False, cache_day: bool = False) -> dict:
+        """GET 一个明文接口。
+
+        ``cache_day=True`` 时按「接口 + 参数 + 账号 + 本地日期」落盘缓存，
+        当天再次请求直接读文件；发现页的推荐位用它避免每次切页都重拉。
+        带 CSRF 的请求不缓存。
+        """
         query = dict(params or {})
         if csrf and self.jar.csrf:
             query.setdefault("csrf_token", self.jar.csrf)
-        return self.request("GET", path, query)
+        cache: Path | None = None
+        if cache_day and not csrf:
+            cache = _cache_path(path, query, self.jar.value("MUSIC_U"))
+            cached = _cache_load(cache)
+            if cached is not None:
+                return cached
+        payload = self.request("GET", path, query)
+        if cache is not None:
+            _cache_store(cache, payload)
+        return payload
 
     def post(self, path: str, data: dict | None = None, *,
              csrf: bool = False, write: bool = False,
@@ -181,11 +278,15 @@ class Transport:
             if attempt:
                 # 指数退避 + 抖动；写请求不会走到这里
                 time.sleep(min(4.0, 0.35 * (2 ** (attempt - 1))) * (0.7 + random.random() * 0.6))
+            # 上一次限流还没退避完：读请求等它结束，写请求直接失败，
+            # 避免在同一个限流窗口里继续撞接口
+            self._wait_cooldown(write)
             try:
                 return self._once(method, path, data or {}, write=write,
                                   headers=headers or {}, domain=domain)
             except RateLimited as exc:
                 last = exc
+                self._trip_cooldown()
                 if not retry:
                     raise
             except NetworkError as exc:
@@ -272,6 +373,7 @@ class Transport:
         error = _error_for(payload)
         if error is not None:
             raise error
+        self._clear_cooldown()
         return payload
 
     def _opener(self):
@@ -294,6 +396,47 @@ class Transport:
             if wait > 0:
                 time.sleep(wait)
             self._last_request = self._clock()
+
+    # ------------------------------------------------------------ 限流退避
+
+    def _notify_rate_limit(self, active: bool) -> None:
+        listener = self._rate_limit_listener
+        if listener is None:
+            return
+        try:
+            listener(active)
+        except Exception:  # noqa: BLE001 - 界面回调失败不能影响请求
+            pass
+
+    def _trip_cooldown(self) -> None:
+        with self._rate_lock:
+            self._cooldown_until = max(
+                self._cooldown_until, self._clock() + RATE_LIMIT_COOLDOWN
+            )
+            notify = not self._cooldown_notified
+            self._cooldown_notified = True
+        if notify:
+            self._notify_rate_limit(True)
+
+    def _clear_cooldown(self) -> None:
+        with self._rate_lock:
+            if not self._cooldown_notified:
+                return
+            if self._clock() < self._cooldown_until:
+                return
+            self._cooldown_until = 0.0
+            self._cooldown_notified = False
+        self._notify_rate_limit(False)
+
+    def _wait_cooldown(self, write: bool) -> None:
+        with self._rate_lock:
+            remaining = self._cooldown_until - self._clock()
+        if remaining <= 0:
+            return
+        if write:
+            raise RateLimited("接口限流，正在自动退避，请稍后再试", 460)
+        # 后台读请求等退避结束；上限就是 RATE_LIMIT_COOLDOWN，不会无限拖住
+        time.sleep(min(remaining, RATE_LIMIT_COOLDOWN))
 
     # ------------------------------------------------------------ 反作弊 token
 

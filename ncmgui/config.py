@@ -208,7 +208,8 @@ def _defaults() -> dict[str, Any]:
         "download": {
             "output": str(default_music_dir()),
             "level": "lossless",
-            "parallel": 5,
+            # 默认并发 3：网易云对高频请求敏感，5 路并发更容易撞限流
+            "parallel": 3,
             "strict": False,
             # 下载前先比对输出目录，已有的直接跳过（ncmctl 自身不会跳过）
             "skip_existing": True,

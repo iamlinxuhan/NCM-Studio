@@ -21,8 +21,8 @@
 真正发送前会重新读一遍 Cookie 文件并比对；排队期间退出登录或切换账号，
 这条日志直接丢弃，绝不会用新账号的身份发出去。
 
-**限流与熔断**：同一账号每小时最多 120 条日志；接口连续 3 次返回限流就
-暂停 10 分钟，并通过 ``pausedChanged`` 通知界面。
+**限流与熔断**：同一账号每小时最多 120 条、每天最多 200 条日志；
+接口连续 3 次返回限流就暂停 10 分钟，并通过 ``pausedChanged`` 通知界面。
 
 **默认关闭。** 这不是公开 API，属于网页端私有接口；功能可能随官方改版
 失效，也可能带来账号风控风险。只在用户明确开启后才上报，失败一律静默，
@@ -63,6 +63,10 @@ MIN_LISTENED_MS = 5000
 #: 正常听歌一小时远到不了这个量；超过说明行为异常，宁可少记。
 MAX_LOGS_PER_HOUR = 120
 
+#: 同一账号每天最多发多少条日志。即使整夜挂着播放器，也不该在一天里
+#: 产生几百条记录；到量后当天停止上报，第二天自然恢复。
+MAX_LOGS_PER_DAY = 200
+
 #: 连续多少次限流后暂停上报
 FAILURE_LIMIT = 3
 #: 熔断时长（秒）
@@ -71,6 +75,7 @@ PAUSE_SECONDS = 600.0
 QUEUE_SIZE = 32
 
 PAUSE_MESSAGE = "接口连续返回限流，听歌记录同步已暂停，稍后自动恢复。"
+DAILY_MESSAGE = "今日听歌记录上报已达上限，明天自动恢复。"
 
 #: 上报函数签名：``(song_id, action, seconds, account)``
 Sender = Callable[[int, str, int, str], None]
@@ -129,6 +134,11 @@ class ScrobbleReporter(QObject):
         self._budget_account = ""
         self._budget_start = 0.0
         self._budget_count = 0
+        #: 当日计数（内存即可，重启归零）：换号或跨天自动重置
+        self._day_account = ""
+        self._day_key = ""
+        self._day_count = 0
+        self._day_paused = False
 
         self._worker = threading.Thread(
             target=self._work, name="ncmgui-scrobble", daemon=True
@@ -288,6 +298,9 @@ class ScrobbleReporter(QObject):
 
     def _pause_reason(self) -> str:
         with self._lock:
+            # 跨天后当日上限自动失效；否则熔断会把第二天的上报也一起挡住
+            if self._day_paused and self._day_key == time.strftime("%Y-%m-%d"):
+                return DAILY_MESSAGE
             if self._paused_until and self._clock() < self._paused_until:
                 return PAUSE_MESSAGE
         return ""
@@ -302,30 +315,61 @@ class ScrobbleReporter(QObject):
         self.pausedChanged.emit(False, "")
 
     def _resume_for_account(self, account: str) -> None:
-        """换号后不再沿用上一个账号的熔断状态。"""
+        """换号后不再沿用上一个账号的熔断与当日额度。"""
         with self._lock:
-            if not (self._paused_until and self._paused_account):
-                return
-            if self._paused_account == account:
+            tripped_other = (
+                (self._paused_until and self._paused_account
+                 and self._paused_account != account)
+                or (self._day_paused and self._day_account
+                    and self._day_account != account)
+            )
+            if not tripped_other:
                 return
             self._paused_until = 0.0
             self._paused_account = ""
             self._failures = 0
+            self._day_paused = False
+            self._day_account = ""
+            self._day_key = ""
+            self._day_count = 0
         self.pausedChanged.emit(False, "")
 
     def _admit(self, account: str) -> bool:
-        """账号级小时配额；超了就不再发，额度按小时窗口重置。"""
+        """账号级小时/当日配额；超了就不再发。
+
+        小时窗口用于挡住短时间内的异常爆发；当日上限兜住整夜挂机这类
+        长时间的稳定上报。两者都只在内存里计数，重启后归零。
+        """
         now = self._clock()
+        day = time.strftime("%Y-%m-%d")
+        notice: tuple[bool, str] | None = None
         with self._lock:
-            if (self._budget_account != account
-                    or now - self._budget_start >= 3600.0):
-                self._budget_account = account
-                self._budget_start = now
-                self._budget_count = 0
-            if self._budget_count >= MAX_LOGS_PER_HOUR:
-                return False
-            self._budget_count += 1
-            return True
+            if self._day_account != account or self._day_key != day:
+                if self._day_paused:
+                    notice = (False, "")
+                self._day_account = account
+                self._day_key = day
+                self._day_count = 0
+                self._day_paused = False
+
+            allowed = False
+            if self._day_count >= MAX_LOGS_PER_DAY:
+                if not self._day_paused:
+                    self._day_paused = True
+                    notice = (True, DAILY_MESSAGE)
+            else:
+                if (self._budget_account != account
+                        or now - self._budget_start >= 3600.0):
+                    self._budget_account = account
+                    self._budget_start = now
+                    self._budget_count = 0
+                if self._budget_count < MAX_LOGS_PER_HOUR:
+                    self._budget_count += 1
+                    self._day_count += 1
+                    allowed = True
+        if notice is not None:
+            self.pausedChanged.emit(*notice)
+        return allowed
 
     def _note_failure(self, account: str) -> None:
         with self._lock:

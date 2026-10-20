@@ -45,8 +45,10 @@ from __future__ import annotations
 
 import bisect
 import os
+import random
 import re
 import threading
+import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -1685,13 +1687,15 @@ def collect(
                 on_note(odd_line)
 
     workers = max(1, min(int(parallel), len(items)))
-    if workers == 1:
-        for item in items:
-            work(item)
-    else:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ncmgui-lyric") as pool:
-            for _ in pool.map(work, items):
+    # 分批跑，批与批之间随机停 1~2 秒：一整张专辑几十首歌词接口连着打，
+    # 很容易触发限流；这点延后对下载完成后的后处理影响很小
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ncmgui-lyric") as pool:
+        for start in range(0, len(items), workers):
+            chunk = items[start:start + workers]
+            for _ in pool.map(work, chunk):
                 pass
+            if start + workers < len(items):
+                time.sleep(random.uniform(1.0, 2.0))
     return report
 
 

@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import base64
 import os
+import random
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -426,13 +428,14 @@ def collect(
             on_note(outcome.detail)
 
     workers = max(1, min(int(parallel), len(items)))
-    if workers == 1:
-        for item in items:
-            work(item)
-    else:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ncmgui-cover") as pool:
-            for _ in pool.map(work, items):
+    # 与歌词后处理一致：批与批之间随机停 1~2 秒，避免几十张封面连着打
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ncmgui-cover") as pool:
+        for start in range(0, len(items), workers):
+            chunk = items[start:start + workers]
+            for _ in pool.map(work, chunk):
                 pass
+            if start + workers < len(items):
+                time.sleep(random.uniform(1.0, 2.0))
     return report
 
 

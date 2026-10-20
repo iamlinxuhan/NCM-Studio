@@ -18,8 +18,9 @@ from . import lyrics, ncmctl
 from .resolver import Resolver, Song
 from .workers import BackgroundTask
 
-#: 缓存多少首歌的解析结果。歌词本身不大，主要省掉网络往返
-CACHE_SIZE = 40
+#: 缓存多少首歌的解析结果。歌词本身不大，主要省掉网络往返；
+#: 一轮听歌来回切歌时，100 首足够覆盖，不用反复请求同一首
+CACHE_SIZE = 100
 
 
 def song_key(song: Song | None) -> tuple:

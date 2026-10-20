@@ -22,7 +22,13 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .. import config, ncmctl
 from ..widgets.card import Chip, accent_button, danger_button, ghost_button
@@ -543,6 +549,30 @@ class AccountPage(BasePage):
             self.warn("CookieCloud 的 UUID 与密码都是必填项。")
             return
 
+        # 短时间内重复同步不会改变结果，却会反复打 CookieCloud 和网易云。
+        # 只在**成功**后记时间；失败后用户可以立刻重试。
+        try:
+            last = float(self.cfg.get("login.cc_last", 0) or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if last and time.time() - last < 3600:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setWindowTitle("CookieCloud 登录")
+            box.setText("上次同步成功还不到 1 小时。")
+            box.setInformativeText(
+                "短时间内重复同步容易触发风控，通常也没有必要。"
+                "如果确实要重新拉取浏览器的 Cookie，可以继续。"
+            )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+            )
+            box.button(QMessageBox.StandardButton.Ok).setText("仍然同步")
+            box.button(QMessageBox.StandardButton.Cancel).setText("取消")
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if box.exec() != QMessageBox.StandardButton.Ok:
+                return
+
         self.save_config()
         argv = ncmctl.build_login_cookiecloud(
             uuid,
@@ -551,7 +581,13 @@ class AccountPage(BasePage):
             headers=self.cc_headers.text().strip(),
             opts=self.opts(),
         )
-        self.submit("CookieCloud 登录", argv)
+
+        def done(_panel, code: int) -> None:
+            if code == 0:
+                self.cfg.set("login.cc_last", time.time())
+                self.cfg.save()
+
+        self.submit("CookieCloud 登录", argv, on_finish=done)
 
     # ------------------------------------------------------------------ 配置
 

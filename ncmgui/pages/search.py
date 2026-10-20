@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import QStringListModel, Qt, QTimer
 from PyQt6.QtWidgets import (
     QCompleter,
@@ -48,6 +50,9 @@ class SearchPage(BasePage):
     def __init__(self, window) -> None:
         self._task: BackgroundTask | None = None
         self._suggest_task: BackgroundTask | None = None
+        #: 搜索建议的最小请求间隔：300ms 防抖挡不住连续输入，接口仍会被打满
+        self._suggest_last_at = 0.0
+        self._suggest_last_keyword = ""
         self._hot_task: BackgroundTask | None = None
         self._generation = 0
         self._hot_loaded = False
@@ -188,6 +193,16 @@ class SearchPage(BasePage):
         keyword = self.search.text().strip()
         if len(keyword) < 2:
             return
+        now = time.monotonic()
+        wait = 1.0 - (now - self._suggest_last_at)
+        if wait > 0:
+            # 距上次请求不足 1 秒：稍后再试，期间继续输入会重新起算
+            self._suggest_timer.start(max(50, int(wait * 1000) + 10))
+            return
+        if keyword == self._suggest_last_keyword:
+            return
+        self._suggest_last_at = now
+        self._suggest_last_keyword = keyword
         client = self.window.client
 
         def work():
