@@ -553,7 +553,8 @@ class ApiClient:
                                  path="/weapi/feedback/weblog")
 
     def scrobble(self, song_id: int, action: str, seconds: int = 0, *,
-                 session: CookieSnapshot | None = None) -> None:
+                 session: CookieSnapshot | None = None,
+                 cancel: Callable[[], bool] | None = None) -> None:
         """把一次播放动作写进网易云的听歌记录。
 
         走网页端同一个出口（``clientlogusf`` 的 ``/weapi/feedback/weblog``）：
@@ -607,6 +608,7 @@ class ApiClient:
                 "Nm-GCore-Status": "1",
             },
             session=session,
+            cancel=cancel,
         )
 
 

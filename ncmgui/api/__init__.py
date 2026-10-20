@@ -19,6 +19,7 @@ _EXPORTS = {
     "ApiError": ".errors",
     "AuthRequired": ".errors",
     "RateLimited": ".errors",
+    "RequestCancelled": ".errors",
     "AntiCheatRequired": ".errors",
     "UnsupportedEndpoint": ".errors",
     "ApiChanged": ".errors",

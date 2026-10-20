@@ -39,6 +39,14 @@ class RateLimited(ApiError):
         return True
 
 
+class RequestCancelled(ApiError):
+    """调用方在请求真正发出前撤销了它（换号、关闭同步、退出等）。
+
+    队列里已经取出、但还排在限流退避/写锁后面的任务会收到这个错误；
+    发送方应当静默丢弃，不当成接口失败。
+    """
+
+
 class AntiCheatRequired(ApiError):
     """写操作被风控拦截，通常需要网页端完成。"""
 

@@ -36,6 +36,7 @@ from .errors import (
     AuthRequired,
     NetworkError,
     RateLimited,
+    RequestCancelled,
 )
 
 BASE_URL = "https://music.163.com"
@@ -241,7 +242,8 @@ class Transport:
     def weapi(self, path: str, data: dict | None = None, *,
               write: bool = False, anticheat: bool = False,
               domain: str = "", headers: dict[str, str] | None = None,
-              session: CookieSnapshot | None = None) -> dict:
+              session: CookieSnapshot | None = None,
+              cancel: Callable[[], bool] | None = None) -> dict:
         """POST 一个 weapi 接口。``path`` 形如 ``/weapi/cloudsearch/pc``。
 
         ``domain`` 非空时把请求发到另一台主机（例如播放日志的
@@ -251,6 +253,10 @@ class Transport:
         ``session`` 是一份固定的 Cookie 快照：加密用的 CSRF 和请求头里的
         Cookie 都取自它，不再回头读 CookieJar。调用方已经核对过快照里的
         账号，这样从核对到发出之间就不会再被换号插进来。
+
+        ``cancel`` 在真正打开连接前会被反复询问：返回 True 就抛
+        :class:`RequestCancelled`，不再发出请求。用于“关闭同步/登出”这类
+        必须立即失效、但发送线程可能正排在写锁或退避后面的场景。
         """
         token = session.csrf if session is not None else self.jar.csrf
         if not token:
@@ -263,7 +269,8 @@ class Transport:
                 extra.setdefault("X-antiCheatToken", token)
         return self.request("POST", path, body, write=write, headers=extra,
                             retry=not write, domain=domain,
-                            cookie_header=session.header if session else None)
+                            cookie_header=session.header if session else None,
+                            cancel=cancel)
 
     def request(
         self,
@@ -276,11 +283,13 @@ class Transport:
         retry: bool | None = None,
         domain: str = "",
         cookie_header: str | None = None,
+        cancel: Callable[[], bool] | None = None,
     ) -> dict:
         """发请求并返回 JSON。``domain`` 可覆盖接口主机。
 
         ``cookie_header`` 非空时用它替代现读的 Cookie 头（空字符串表示
         明确不带 Cookie）；用于发送已经核对过身份的快照。
+        ``cancel`` 在每次真正开连接前检查，返回 True 则放弃请求。
         """
         if retry is None:
             retry = not write
@@ -296,7 +305,7 @@ class Transport:
             try:
                 return self._once(method, path, data or {}, write=write,
                                   headers=headers or {}, domain=domain,
-                                  cookie_header=cookie_header)
+                                  cookie_header=cookie_header, cancel=cancel)
             except RateLimited as exc:
                 last = exc
                 self._trip_cooldown()
@@ -314,7 +323,10 @@ class Transport:
 
     def _once(self, method: str, path: str, data: dict, *,
               write: bool, headers: dict, domain: str = "",
-              cookie_header: str | None = None) -> dict:
+              cookie_header: str | None = None,
+              cancel: Callable[[], bool] | None = None) -> dict:
+        if cancel is not None and cancel():
+            raise RequestCancelled("请求已取消")
         if not path.startswith("/"):
             path = "/" + path
         base_url = (domain or self.base_url).rstrip("/")
@@ -358,6 +370,10 @@ class Transport:
         slot = self._write_lock if write else self._read_slots
         with slot:
             self._pace()
+            # 可能刚在写锁/退避后面等过：开连接前再问一次。撤销请求的任务
+            # （比如关闭听歌同步后）不应该在等待结束后悄悄发出去
+            if cancel is not None and cancel():
+                raise RequestCancelled("请求已取消")
             try:
                 with opener.open(request, timeout=self.timeout) as response:
                     raw = response.read()
@@ -565,6 +581,19 @@ def _selftest() -> int:
         check("快照缺 CSRF 时要登录", raised_missing, True)
     finally:
         weapi_params = original_params
+
+    # 取消回调一路传到 request；已取消的请求在开连接前就抛错
+    stop = {"done": False}
+    recorder.weapi("/weapi/feedback/weblog", {}, cancel=lambda: stop["done"])
+    check("weapi 透传取消回调", callable(recorder.seen.get("cancel")), True)
+
+    plain = Transport(jar=_Jar())  # type: ignore[arg-type]
+    try:
+        plain.request("POST", "/x", {}, write=True, cancel=lambda: True)
+        cancelled = False
+    except RequestCancelled:
+        cancelled = True
+    check("已取消的请求不发出", cancelled, True)
 
     if failures:
         print(f"传输层自检失败 {len(failures)} 项：")

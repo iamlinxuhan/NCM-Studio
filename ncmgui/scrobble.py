@@ -26,9 +26,12 @@ CSRF 都用这份快照，不再回头读 CookieJar——核对与组包之间�
 
 **会话代数**：每条任务还记下入队时的代数。换号、登出、关闭同步、改状态
 目录/代理（``reload_api``）或退出程序时，代数递增并清空待发队列；工作
-线程在消费前、发送器在真正组包前各核对一次。队列是串行、有界的，因此
-关闭后最多只剩一条已经进入发送函数、刚通过检查的任务，不会出现“关掉了
-还在刷”的情况。
+线程在消费前核对一次，发送器在组包前核对一次，传输层在真正打开连接前
+再通过取消回调核对一次。也就是说，排在写锁、限流退避后面的旧任务撤销后
+不会再补发；只有已经交给 socket 的那一个请求无法收回。
+
+**取消回调**：:class:`~ncmgui.api.transport.Transport` 的 ``cancel`` 参数
+是通用的：其他“用户在等待、但设置已经改了”的写请求也可以复用。
 
 **限流与熔断**：同一账号每小时最多 120 条、每天最多 200 条日志；
 接口连续 3 次返回限流就暂停 10 分钟，并通过 ``pausedChanged`` 通知界面。
@@ -279,13 +282,9 @@ class ScrobbleReporter(QObject):
         之后不再让传输层自己去读 CookieJar，换号插不进这两步之间。
         """
         # 已关闭同步/已登出/客户端被重建：即使工作线程刚刚通过检查，
-        # 这里也再拦一道。真正的网络请求只可能来自已经走到这一步的任务，
-        # 而队列在 invalidate() 时已被清空，最多只剩这一条在途。
-        if client is None or not self.enabled:
+        # 这里也再拦一道
+        if client is None or self._stale(generation):
             return
-        with self._lock:
-            if generation != self._generation or self._closed:
-                return
         # 用户可能刚登录/换号：每次上报前重新读一次 cookie 文件
         client.jar.reload()
         session = client.web_session()
@@ -293,13 +292,17 @@ class ScrobbleReporter(QObject):
             # 排队期间退出登录或切换了账号。这条日志属于旧账号，
             # 宁可不记，也不能用新账号的身份发出去。
             return
-        client.scrobble(song_id, action, seconds, session=session)
+        # 快照、加密和等写锁都可能花时间；传输层在真正开连接前会再用
+        # 这个回调问一次，撤销发生后不会再补发
+        client.scrobble(song_id, action, seconds, session=session,
+                        cancel=lambda: self._stale(generation))
 
     def invalidate(self) -> None:
         """作废当前会话的全部上报。
 
         换号、登出、关闭听歌同步、设置页重建客户端时调用：递增代数并清空
-        待发队列，工作线程手里的任务也会在发送前发现代数不符而丢弃。
+        待发队列。工作线程手里的任务会在发送前、传输层开连接前各核对一次
+        代数，撤销后不会再补发。
         """
         with self._lock:
             if self._closed:
@@ -307,6 +310,16 @@ class ScrobbleReporter(QObject):
             self._generation += 1
         self._clear_round()
         self._drain_queue()
+
+    def _stale(self, generation: int) -> bool:
+        """这条日志所属的会话是否已经失效。
+
+        关闭同步、登出、换号、重建客户端、退出都会让代数对不上；传输层在
+        开连接前调用它，保证排在写锁/退避后面的旧任务不会事后补发。
+        """
+        with self._lock:
+            return (self._closed or generation != self._generation
+                    or not self.enabled)
 
     def _drain_queue(self) -> None:
         """丢弃所有还没被工作线程取走的任务（不动关机哨兵）。"""
@@ -353,11 +366,7 @@ class ScrobbleReporter(QObject):
                     return
                 # 消费前重新核对：同步可能刚被关掉，账号/客户端/会话代数
                 # 也可能刚变过
-                if not self.enabled:
-                    continue
-                with self._lock:
-                    generation = self._generation
-                if task.generation != generation:
+                if self._stale(task.generation):
                     continue
                 current = self._client_provider()
                 if task.client is not None and current is not task.client:
@@ -540,7 +549,9 @@ def _selftest() -> int:
             )
 
         def scrobble(self, song_id: int, action: str, seconds: int = 0,
-                     *, session=None) -> None:
+                     *, session=None, cancel=None) -> None:
+            if cancel is not None and cancel():
+                return
             if self.switch_before_send:
                 self.jar.account = self.switch_before_send
             self.sessions.append(session)
