@@ -150,9 +150,9 @@ class SettingsPage(BasePage):
         self.scrobble = card.add_switch(
             "把播放记录同步到网易云账号",
             bool(self.cfg.get("player.scrobble", False)),
-            hint="按实际收听时长写入账号的听歌记录与听歌排行。使用网页端私有"
-            "接口，不保证计入有效播放次数，也可能触发账号风控；只在明确"
-            "了解风险后开启。",
+            hint="按实际收听时长写入账号的听歌记录与听歌排行（不足 5 秒的"
+            "轮次不上报）。这是实验性功能：使用网页端私有接口，不保证计入"
+            "有效播放次数，也可能触发账号风控；只在明确了解风险后开启。",
         )
 
         self.close_to_tray = card.add_switch(
@@ -274,10 +274,11 @@ class SettingsPage(BasePage):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("同步听歌记录")
-        box.setText("开启后，每首歌的实际收听时长会发送到网易云账号。")
+        box.setText("开启后，每轮听满 5 秒的播放会把实际收听时长发送到网易云账号。")
         box.setInformativeText(
-            "这使用的是网页端私有接口：官方改版后可能失效，上报的记录也不"
-            "保证计入有效播放；同时存在触发账号风控的可能。确认了解后再开启。"
+            "这是实验性功能，使用的是网页端私有接口：官方改版后可能失效，"
+            "上报的记录也不保证计入有效播放；同时存在触发账号风控的可能。"
+            "确认了解后再开启。"
         )
         box.setStandardButtons(
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel

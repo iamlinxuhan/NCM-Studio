@@ -42,15 +42,18 @@ class HistoryRecorder(QObject):
     除了写本地库，还发出两个信号给网易云播放日志（:mod:`.scrobble`）：
 
     * ``playStarted``：这一轮第一次真正出声；
-    * ``playSettled``：一轮结束，附带实际收听毫秒数。
+    * ``playSettled``：一轮结束，附带实际收听毫秒数与是否自然播完。
 
     计时只在这里做一次，避免本地统计和云端记录各算一套、对不上。
     """
 
     #: 本轮第一次真正开始播放（暂停后恢复不会重复发）
     playStarted = pyqtSignal(object)
-    #: 一轮结束，携带曲目与累计实际收听毫秒数
-    playSettled = pyqtSignal(object, int)
+    #: 一轮结束，携带曲目、累计实际收听毫秒数、是否自然播完
+    #:
+    #: 最后一个参数给云端播放日志用：网易云用 ``end`` 区分「播完」与
+    #: 「中途切歌」，两者在推荐/统计里的权重不同。
+    playSettled = pyqtSignal(object, int, bool)
 
     def __init__(
         self,
@@ -220,9 +223,10 @@ class HistoryRecorder(QObject):
             except sqlite3.Error:
                 pass
 
-        # 云端播放日志只关心实际听了几秒；0 秒不必发（接口也会拒绝）
+        # 云端播放日志关心实际听了几秒、以及是播完还是中途切走；
+        # 0 秒不必发（接口也会拒绝）
         if total > 0:
-            self.playSettled.emit(song, total)
+            self.playSettled.emit(song, total, self._completed)
 
         self._song = None
         self._started_at = 0
@@ -311,12 +315,12 @@ def _selftest() -> int:
         fake = FakePlayback()
         recorder = HistoryRecorder(db, fake, clock=clock.monotonic,
                                    wall_clock=clock.time)
-        #: 云端播放日志收到的 (歌曲 ID, 动作/毫秒)
+        #: 云端播放日志收到的 (歌曲 ID, 毫秒, 是否播完)
         starts: list[int] = []
-        settles: list[tuple[int, int]] = []
+        settles: list[tuple[int, int, bool]] = []
         recorder.playStarted.connect(lambda song: starts.append(song.id))
         recorder.playSettled.connect(
-            lambda song, ms: settles.append((song.id, ms)))
+            lambda song, ms, done: settles.append((song.id, ms, done)))
 
         one = Song(1, "一", ("甲",), duration=200_000)
         two = Song(2, "二", ("乙",), duration=200_000)
@@ -336,7 +340,7 @@ def _selftest() -> int:
         check("短播放不记录", len(rows), 0)
         # 云端日志与本地阈值无关：开始要发，切走时按实际 3 秒结算
         check("开始日志只发一次", starts, [1, 2])
-        check("切歌结算实际时长", settles, [(1, 3_000)])
+        check("切歌结算实际时长", settles, [(1, 3_000, False)])
 
         # 满 5 秒插入，结束时补写时长
         clock.advance(6)
@@ -378,7 +382,8 @@ def _selftest() -> int:
         check("退出不新增", db.query_one(
             "SELECT COUNT(*) AS n FROM play_events")["n"], 2)
         check("每轮都按实际时长结算", settles,
-              [(1, 3_000), (2, 10_000), (2, 8_000), (3, 1_000)])
+              [(1, 3_000, False), (2, 10_000, True),
+               (2, 8_000, False), (3, 1_000, False)])
         db.close()
 
     del app

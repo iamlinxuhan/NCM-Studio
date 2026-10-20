@@ -4,7 +4,7 @@ import sys
 
 APP_NAME = "NCM Studio"
 APP_ID = "ncm-studio"
-VERSION = "3.0.4"
+VERSION = "3.0.5"
 
 #: 随程序分发的 ncmctl 版本。
 #:
