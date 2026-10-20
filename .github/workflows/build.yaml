@@ -126,6 +126,8 @@ jobs:
           python -m ncmgui.library.playlists
           # 播放记录器：5 秒阈值、切歌补写、实际音质落库
           python -m ncmgui.history_recorder
+          # 听歌记录同步：开关、云端日志动作与时长换算
+          python -m ncmgui.scrobble
           # 网易云接口层：Cookie 解析、weapi 加密、传输重试与脱敏、模型归一化
           python -m ncmgui.api.cookies
           python -m ncmgui.api.crypto

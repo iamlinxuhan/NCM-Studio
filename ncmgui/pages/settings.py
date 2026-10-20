@@ -147,6 +147,14 @@ class SettingsPage(BasePage):
             hint="关闭时遇到只有 30 秒试听的歌曲会直接提示，不会误当成完整版播放。",
         )
 
+        self.scrobble = card.add_switch(
+            "把播放记录同步到网易云账号",
+            bool(self.cfg.get("player.scrobble", False)),
+            hint="按实际收听时长写入账号的听歌记录与听歌排行。使用网页端私有"
+            "接口，不保证计入有效播放次数，也可能触发账号风控；只在明确"
+            "了解风险后开启。",
+        )
+
         self.close_to_tray = card.add_switch(
             "关闭主窗口时最小化到托盘",
             bool(self.cfg.get("ui.close_to_tray", False)),
@@ -255,6 +263,31 @@ class SettingsPage(BasePage):
         if box.exec() != QMessageBox.StandardButton.Ok:
             self.debug.setChecked(False)
 
+    def _confirm_scrobble(self) -> None:
+        """第一次开启听歌记录同步时确认一次风险。
+
+        和 ``--debug`` 一样，取消只影响这一项，其余设置照常保存。
+        """
+        if not self.scrobble.isChecked() or bool(self.cfg.get("player.scrobble", False)):
+            return
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("同步听歌记录")
+        box.setText("开启后，每首歌的实际收听时长会发送到网易云账号。")
+        box.setInformativeText(
+            "这使用的是网页端私有接口：官方改版后可能失效，上报的记录也不"
+            "保证计入有效播放；同时存在触发账号风控的可能。确认了解后再开启。"
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        box.button(QMessageBox.StandardButton.Ok).setText("仍然开启")
+        box.button(QMessageBox.StandardButton.Cancel).setText("取消")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Ok:
+            self.scrobble.setChecked(False)
+
     def _save(self) -> None:
         # 代理串在这里统一校验并规范化：裸 host:port 补 http://，socks5 直接拒绝
         for label, field in (
@@ -284,6 +317,7 @@ class SettingsPage(BasePage):
         ):
             return
         self._confirm_debug()
+        self._confirm_scrobble()
         self.save_config()
         self.cfg.save()
         self.window.reload_binary()
@@ -297,6 +331,7 @@ class SettingsPage(BasePage):
         self.config_file.set_path("")
         self.debug.setChecked(False)
         self.allow_trial.setChecked(False)
+        self.scrobble.setChecked(False)
         self.save_config()
         self.cfg.save()
         self.window.reload_binary()
@@ -789,6 +824,7 @@ class SettingsPage(BasePage):
         self.cfg.set("ncmctl_path", self.binary_path.path())
         self.cfg.set("player.mpv_path", self.mpv_path.path())
         self.cfg.set("player.allow_trial", self.allow_trial.isChecked())
+        self.cfg.set("player.scrobble", self.scrobble.isChecked())
         self.cfg.set("ui.close_to_tray", self.close_to_tray.isChecked())
         self.cfg.set("home", self.home.path())
         self.cfg.set("config_file", self.config_file.path())

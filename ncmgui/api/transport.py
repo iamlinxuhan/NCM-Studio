@@ -142,8 +142,13 @@ class Transport:
         return self.request("POST", path, payload, write=write, headers=headers)
 
     def weapi(self, path: str, data: dict | None = None, *,
-              write: bool = False, anticheat: bool = False) -> dict:
-        """POST 一个 weapi 接口。``path`` 形如 ``/weapi/cloudsearch/pc``。"""
+              write: bool = False, anticheat: bool = False,
+              domain: str = "") -> dict:
+        """POST 一个 weapi 接口。``path`` 形如 ``/weapi/cloudsearch/pc``。
+
+        ``domain`` 非空时把请求发到另一台主机（例如播放日志的
+        ``clientlogusf.music.163.com``），Cookie 仍按该主机的域名筛选。
+        """
         if not self.jar.csrf:
             raise AuthRequired("登录信息缺少 CSRF 令牌，请重新登录")
         body = weapi_params(dict(data or {}), self.jar.csrf)
@@ -153,7 +158,7 @@ class Transport:
             if token:
                 headers["X-antiCheatToken"] = token
         return self.request("POST", path, body, write=write, headers=headers,
-                            retry=not write)
+                            retry=not write, domain=domain)
 
     def request(
         self,
@@ -164,8 +169,9 @@ class Transport:
         write: bool = False,
         headers: dict | None = None,
         retry: bool | None = None,
+        domain: str = "",
     ) -> dict:
-        """发请求并返回 JSON。"""
+        """发请求并返回 JSON。``domain`` 可覆盖接口主机。"""
         if retry is None:
             retry = not write
         attempts = 3 if retry else 1
@@ -176,7 +182,7 @@ class Transport:
                 time.sleep(min(4.0, 0.35 * (2 ** (attempt - 1))) * (0.7 + random.random() * 0.6))
             try:
                 return self._once(method, path, data or {}, write=write,
-                                  headers=headers or {})
+                                  headers=headers or {}, domain=domain)
             except RateLimited as exc:
                 last = exc
                 if not retry:
@@ -192,10 +198,11 @@ class Transport:
     # -------------------------------------------------------------- 单次请求
 
     def _once(self, method: str, path: str, data: dict, *,
-              write: bool, headers: dict) -> dict:
+              write: bool, headers: dict, domain: str = "") -> dict:
         if not path.startswith("/"):
             path = "/" + path
-        url = self.base_url + path
+        base_url = (domain or self.base_url).rstrip("/")
+        url = base_url + path
         body: bytes | None = None
         if method == "GET":
             if data:
@@ -216,7 +223,10 @@ class Transport:
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
-        cookie = self.jar.header(path=path)
+        # Cookie 按实际请求的主机筛选：播放日志发到 clientlogusf 子域，
+        # 但登录凭据的 Domain 是 music.163.com，仍应带上。
+        host = urllib.parse.urlsplit(base_url).hostname or "music.163.com"
+        cookie = self.jar.header(domain=host, path=path)
         if cookie:
             request_headers["Cookie"] = cookie
         request_headers.update(headers)

@@ -49,6 +49,7 @@ from .pages.search import SearchPage
 from .pages.settings import SettingsPage
 from .pages.streaming import StreamingPage
 from .playback import PlaybackController
+from .scrobble import ScrobbleReporter
 from .streaming import StreamingRegistry
 from .widgets.console import ConsolePanel, classify
 from .widgets.playbackbar import PlaybackBar
@@ -144,6 +145,14 @@ class MainWindow(QMainWindow):
         self.actions = SongActions(self)
         #: 播放满 5 秒后写一条本地播放历史；统计页直接读同一张表
         self.history = HistoryRecorder(self.library, self.playback, parent=self)
+        #: 可选：把每轮播放记录同步到网易云账号（默认关闭）
+        self.scrobble = ScrobbleReporter(
+            self.cfg,
+            client_provider=lambda: self.client,
+            parent=self,
+        )
+        self.history.playStarted.connect(self.scrobble.on_started)
+        self.history.playSettled.connect(self.scrobble.on_settled)
         #: 蓝牙耳机/系统媒体键走 MPRIS；真正 start() 由 main.py 决定，
         #: 自检与截图不往会话总线上注册服务
         self.mpris = MprisService(self.playback, self, parent=self)

@@ -33,6 +33,9 @@ from .models import (
 )
 from .transport import Transport
 
+#: 网页端播放日志的出口。不能发到 music.163.com —— 那边没有这个端点。
+WEB_LOG_DOMAIN = "https://clientlogusf.music.163.com"
+
 #: 云搜索的类型编号
 SEARCH_TYPES = {"song": 1, "album": 10, "artist": 100, "playlist": 1000}
 #: 各类型的总数键
@@ -530,6 +533,53 @@ class ApiClient:
             csrf=True, write=True,
         )
 
+    # ---------------------------------------------------------- 播放日志
+
+    def scrobble(self, song_id: int, action: str, seconds: int = 0) -> None:
+        """把一次播放动作写进网易云的听歌记录。
+
+        走网页端同一个出口（``clientlogusf`` 的 ``/weapi/feedback/weblog``）：
+
+        * ``startPlay``：真正开始出声时发一次，不带时长；
+        * ``play``：这一轮结束（切歌/播完/停止）时发，``seconds`` 是实际
+          收听时长，必须大于 0。
+
+        接口本身只回 ``{"code":200,"data":"success"}``，没有更多语义。登录
+        失效时由 :class:`Transport` 抛 :class:`AuthRequired`；调用方应当把它
+        当成“这次不上报”而不是播放错误。
+        """
+        song_id = int(song_id)
+        if song_id <= 0:
+            raise ValueError("播放日志需要正的歌曲 ID")
+        if action not in ("startPlay", "play"):
+            raise ValueError(f"不认识的播放日志动作：{action}")
+        seconds = int(seconds)
+        if action == "play" and seconds <= 0:
+            return
+        if not self.jar.csrf:
+            raise AuthRequired("登录信息缺少 CSRF 令牌，请重新登录")
+
+        entry: dict[str, Any] = {
+            "mainSite": "2",
+            "mainSiteWeb": "2",
+            "id": str(song_id),
+            "type": "song",
+            "content": "",
+        }
+        if action == "play":
+            entry.update({"time": seconds, "wifi": 0, "download": 0})
+        logs = json.dumps(
+            [{"action": action, "json": entry}],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.transport.weapi(
+            "/weapi/feedback/weblog",
+            {"logs": logs},
+            write=True,
+            domain=WEB_LOG_DOMAIN,
+        )
+
 
 # --------------------------------------------------------------------------- #
 # 自检
@@ -548,8 +598,9 @@ class _FakeTransport:
         self.calls.append(("POST", path, dict(data or {})))
         return self.responses.get(path, {"code": 200})
 
-    def weapi(self, path: str, data: dict | None = None, **_kwargs) -> dict:
+    def weapi(self, path: str, data: dict | None = None, **kwargs) -> dict:
         self.calls.append(("WEAPI", path, dict(data or {})))
+        self.last_weapi_kwargs = kwargs
         return self.responses.get(path, {"code": 200, "data": []})
 
 
@@ -628,6 +679,25 @@ def _selftest() -> int:
     check("歌单名", playlist.name, "歌单")
     check("歌单曲目", tracks[0].id, 3)
     check("歌单总数", total, 2)
+
+    # 播放日志：开始动作不带时长，结束动作带实际收听秒数
+    client.scrobble(3, "startPlay")
+    path = fake.calls[-1][1]
+    check("播放日志路径", path, "/weapi/feedback/weblog")
+    check("播放日志域名", fake.last_weapi_kwargs.get("domain"), WEB_LOG_DOMAIN)
+    logs = json.loads(fake.calls[-1][2]["logs"])
+    check("开始日志动作", logs[0]["action"], "startPlay")
+    check("开始日志不带时长", "time" in logs[0]["json"], False)
+    check("开始日志歌曲 ID", logs[0]["json"]["id"], "3")
+
+    client.scrobble(3, "play", 42)
+    logs = json.loads(fake.calls[-1][2]["logs"])
+    check("结束日志动作", logs[0]["action"], "play")
+    check("结束日志时长", logs[0]["json"]["time"], 42)
+
+    before = len(fake.calls)
+    client.scrobble(3, "play", 0)  # 0 秒不产生请求
+    check("零时长不上报", len(fake.calls), before)
 
     # 未登录时写操作给出明确错误
     client.jar = type("J", (), {"has_login": False, "csrf": "", "reload": lambda self: None})()

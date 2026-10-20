@@ -22,7 +22,7 @@ import time
 from dataclasses import replace
 from typing import Callable
 
-from PyQt6.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .library.db import LibraryDB
 from .library.history import record_play, update_play
@@ -37,7 +37,20 @@ _TICK_MS = 1000
 
 
 class HistoryRecorder(QObject):
-    """挂在 :class:`PlaybackController` 上的记录器，每个窗口一个。"""
+    """挂在 :class:`PlaybackController` 上的记录器，每个窗口一个。
+
+    除了写本地库，还发出两个信号给网易云播放日志（:mod:`.scrobble`）：
+
+    * ``playStarted``：这一轮第一次真正出声；
+    * ``playSettled``：一轮结束，附带实际收听毫秒数。
+
+    计时只在这里做一次，避免本地统计和云端记录各算一套、对不上。
+    """
+
+    #: 本轮第一次真正开始播放（暂停后恢复不会重复发）
+    playStarted = pyqtSignal(object)
+    #: 一轮结束，携带曲目与累计实际收听毫秒数
+    playSettled = pyqtSignal(object, int)
 
     def __init__(
         self,
@@ -62,6 +75,8 @@ class HistoryRecorder(QObject):
         self._active_since: float | None = None
         self._event_id: int | None = None
         self._completed = False
+        #: 本轮是否已经发过 ``playStarted``；暂停恢复不重复
+        self._started_sent = False
         self._closed = False
 
         playback.trackStarted.connect(self._on_started)
@@ -86,8 +101,10 @@ class HistoryRecorder(QObject):
         self._active_since = None
         self._event_id = None
         self._completed = False
+        self._started_sent = False
         if self._playback.state == STATE_PLAYING and not self._playback.paused:
             self._active_since = self._clock()
+            self._emit_started()
 
     def _on_ended(self, song: object) -> None:
         if self._closed:
@@ -102,6 +119,8 @@ class HistoryRecorder(QObject):
             return
         playing = state == STATE_PLAYING and not self._playback.paused
         self._sync_active(playing)
+        if playing:
+            self._emit_started()
         if state == "idle":
             # 用户按了停止，或顺序播放在末尾自然停下
             self._finalize(completed=False)
@@ -109,10 +128,18 @@ class HistoryRecorder(QObject):
     def _on_tick(self) -> None:
         if self._closed or self._song is None:
             return
-        self._sync_active(
-            self._playback.state == STATE_PLAYING and not self._playback.paused
-        )
+        playing = self._playback.state == STATE_PLAYING and not self._playback.paused
+        self._sync_active(playing)
+        if playing:
+            # 兜底：控制器有时先改状态再补发 stateChanged，别漏掉开始日志
+            self._emit_started()
         self._maybe_insert()
+
+    def _emit_started(self) -> None:
+        if self._started_sent or self._song is None:
+            return
+        self._started_sent = True
+        self.playStarted.emit(self._song)
 
     # ------------------------------------------------------------ 计时
 
@@ -178,6 +205,7 @@ class HistoryRecorder(QObject):
             return
         self._sync_active(False)
         total = self._total_listened()
+        song = self._song
         self._completed = self._completed or completed
 
         if self._event_id is None:
@@ -192,12 +220,17 @@ class HistoryRecorder(QObject):
             except sqlite3.Error:
                 pass
 
+        # 云端播放日志只关心实际听了几秒；0 秒不必发（接口也会拒绝）
+        if total > 0:
+            self.playSettled.emit(song, total)
+
         self._song = None
         self._started_at = 0
         self._listened_ms = 0
         self._active_since = None
         self._event_id = None
         self._completed = False
+        self._started_sent = False
 
     def flush(self) -> None:
         """把当前播放补写成一条完整记录（暂停/退出前调用）。"""
@@ -278,6 +311,12 @@ def _selftest() -> int:
         fake = FakePlayback()
         recorder = HistoryRecorder(db, fake, clock=clock.monotonic,
                                    wall_clock=clock.time)
+        #: 云端播放日志收到的 (歌曲 ID, 动作/毫秒)
+        starts: list[int] = []
+        settles: list[tuple[int, int]] = []
+        recorder.playStarted.connect(lambda song: starts.append(song.id))
+        recorder.playSettled.connect(
+            lambda song, ms: settles.append((song.id, ms)))
 
         one = Song(1, "一", ("甲",), duration=200_000)
         two = Song(2, "二", ("乙",), duration=200_000)
@@ -295,6 +334,9 @@ def _selftest() -> int:
         fake.start(two)
         rows = db.query("SELECT * FROM play_events")
         check("短播放不记录", len(rows), 0)
+        # 云端日志与本地阈值无关：开始要发，切走时按实际 3 秒结算
+        check("开始日志只发一次", starts, [1, 2])
+        check("切歌结算实际时长", settles, [(1, 3_000)])
 
         # 满 5 秒插入，结束时补写时长
         clock.advance(6)
@@ -319,6 +361,8 @@ def _selftest() -> int:
         recorder._on_tick()
         check("循环第二轮", db.query_one(
             "SELECT COUNT(*) AS n FROM play_events")["n"], 2)
+        # 暂停恢复仍是同一轮，不能重复发开始日志
+        check("暂停恢复不重发开始", starts, [1, 2, 2])
 
         # 手动切歌收尾，完整播放标记为 0
         clock.advance(2)
@@ -333,6 +377,8 @@ def _selftest() -> int:
         recorder.shutdown()
         check("退出不新增", db.query_one(
             "SELECT COUNT(*) AS n FROM play_events")["n"], 2)
+        check("每轮都按实际时长结算", settles,
+              [(1, 3_000), (2, 10_000), (2, 8_000), (3, 1_000)])
         db.close()
 
     del app
