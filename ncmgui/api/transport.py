@@ -143,21 +143,22 @@ class Transport:
 
     def weapi(self, path: str, data: dict | None = None, *,
               write: bool = False, anticheat: bool = False,
-              domain: str = "") -> dict:
+              domain: str = "", headers: dict[str, str] | None = None) -> dict:
         """POST 一个 weapi 接口。``path`` 形如 ``/weapi/cloudsearch/pc``。
 
         ``domain`` 非空时把请求发到另一台主机（例如播放日志的
         ``clientlogusf.music.163.com``），Cookie 仍按该主机的域名筛选。
+        ``headers`` 用于补齐某些接口要求、与网页端一致的请求头。
         """
         if not self.jar.csrf:
             raise AuthRequired("登录信息缺少 CSRF 令牌，请重新登录")
         body = weapi_params(dict(data or {}), self.jar.csrf)
-        headers = {}
+        extra = dict(headers or {})
         if anticheat:
             token = self.anticheat_token()
             if token:
-                headers["X-antiCheatToken"] = token
-        return self.request("POST", path, body, write=write, headers=headers,
+                extra.setdefault("X-antiCheatToken", token)
+        return self.request("POST", path, body, write=write, headers=extra,
                             retry=not write, domain=domain)
 
     def request(
@@ -358,6 +359,24 @@ def _selftest() -> int:
     check("脱敏 MUSIC_U", "MUSIC_U=***" in mask_sensitive("Cookie: MUSIC_U=abc; x=1"), True)
     check("脱敏 csrf", "__csrf=***" in mask_sensitive("__csrf=abc&a=1"), True)
     check("不误伤普通文本", mask_sensitive("播放失败"), "播放失败")
+
+    class _Jar:
+        csrf = "token"
+
+    class _Recorder(Transport):
+        def __init__(self) -> None:
+            super().__init__(jar=_Jar())  # type: ignore[arg-type]
+            self.seen: dict = {}
+
+        def request(self, method, path, data=None, **kwargs) -> dict:  # type: ignore[override]
+            self.seen = kwargs
+            return {"code": 200}
+
+    recorder = _Recorder()
+    recorder.weapi("/weapi/feedback/weblog", {"logs": "[]"},
+                   headers={"x-music-web-os": "web3", "Nm-GCore-Status": "1"})
+    check("weapi 透传自定义请求头", recorder.seen.get("headers"),
+          {"x-music-web-os": "web3", "Nm-GCore-Status": "1"})
 
     if failures:
         print(f"传输层自检失败 {len(failures)} 项：")

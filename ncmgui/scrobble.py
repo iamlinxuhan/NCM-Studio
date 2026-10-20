@@ -2,9 +2,11 @@
 
 网易云网页本身用两条播放日志：
 
-* 真正开始出声时发 ``startplay``；
-* 这一轮结束（切歌、播完、停止）时发 ``play``，带上实际收听秒数，并用
-  ``end`` 区分播完（``playend``）与中途切走（``interrupt``）。
+* 真正开始出声时发 ``startPlay``；
+* 这一轮结束（切歌、播完、停止）时发 ``play``，带上实际收听秒数。
+
+报文形状以 2026-10 的网页端 Firefox 抓包为准：动作名是 ``startPlay``
+（大写 P），``play`` 里没有 ``end`` 字段。
 
 服务端据此更新账号的听歌记录与听歌排行。请求走网页端同一个出口
 （``clientlogusf.music.163.com/weapi/feedback/weblog``），实现见
@@ -19,8 +21,7 @@
 
 上游 ncmctl 也有 ``scrobble`` 命令，但那是「刷够 300 首」的打卡工具：
 把整首歌的时长当作收听时长、只发 ``play``，官方帮助里自己标注了高风控
-风险。本模块只上报真实发生的播放，不采用那套伪造时长的做法；对齐的只有
-动作名、``end`` 字段这些协议细节。
+风险。本模块只上报真实发生的播放，不采用那套伪造时长的做法。
 
     .venv/bin/python -m ncmgui.scrobble
 """
@@ -43,11 +44,11 @@ CONFIG_KEY = "player.scrobble"
 #: 低于这个实际收听时长就不往云端报。
 #:
 #: 与本地历史记录的门槛一致：快速试听、连续切歌的轮次既没有同步价值，
-#: 又会在短时间内制造一串 ``interrupt`` 日志。少发一条就少一次暴露。
+#: 又会在短时间内制造一串很短的播放日志。少发一条就少一次暴露。
 MIN_LISTENED_MS = 5000
 
-#: 上报函数签名：``(song_id, action, seconds, completed)``
-Sender = Callable[[int, str, int, bool], None]
+#: 上报函数签名：``(song_id, action, seconds)``
+Sender = Callable[[int, str, int], None]
 
 
 class ScrobbleReporter(QObject):
@@ -102,11 +103,9 @@ class ScrobbleReporter(QObject):
             self._round_account = ""
             return
         self._round_account = account
-        self._dispatch(song.id, "startplay", 0, False)  # type: ignore[union-attr]
+        self._dispatch(song.id, "startPlay", 0)  # type: ignore[union-attr]
 
-    def on_settled(
-        self, song: object, listened_ms: int, completed: bool = False
-    ) -> None:
+    def on_settled(self, song: object, listened_ms: int) -> None:
         if not self.enabled or not self._eligible(song):
             return
         listened_ms = int(listened_ms)
@@ -122,7 +121,7 @@ class ScrobbleReporter(QObject):
             # 这一轮开始时没登录，或播放途中换了账号：算旧账号的，
             # 不往新账号里记
             return
-        self._dispatch(song.id, "play", seconds, bool(completed))  # type: ignore[union-attr]
+        self._dispatch(song.id, "play", seconds)  # type: ignore[union-attr]
 
     # ------------------------------------------------------------ 上报
 
@@ -130,27 +129,21 @@ class ScrobbleReporter(QObject):
         client = self._client_provider()
         return client.jar.value("MUSIC_U") if client is not None else ""
 
-    def _send_default(
-        self, song_id: int, action: str, seconds: int, completed: bool
-    ) -> None:
+    def _send_default(self, song_id: int, action: str, seconds: int) -> None:
         client = self._client_provider()
         if client is None:
             return
         # 用户可能刚登录/换号：每次上报前重新读一次 cookie 文件
         client.jar.reload()
-        # ``end`` 只属于结算日志；开始日志没有「怎么结束」这回事
-        end = ("playend" if completed else "interrupt") if action == "play" else ""
-        client.scrobble(song_id, action, seconds, end=end)
+        client.scrobble(song_id, action, seconds)
 
-    def _dispatch(
-        self, song_id: int, action: str, seconds: int, completed: bool
-    ) -> None:
+    def _dispatch(self, song_id: int, action: str, seconds: int) -> None:
         """后台发送一条日志；失败只当这次没记上。"""
         sender = self._sender
 
         def run() -> None:
             try:
-                sender(song_id, action, seconds, completed)
+                sender(song_id, action, seconds)
             except (ApiError, ValueError, OSError):
                 pass
 
@@ -197,12 +190,10 @@ def _selftest() -> int:
     class FakeClient:
         def __init__(self) -> None:
             self.jar = FakeJar()
-            self.calls: list[tuple[int, str, int, str]] = []
+            self.calls: list[tuple[int, str, int]] = []
 
-        def scrobble(
-            self, song_id: int, action: str, seconds: int = 0, *, end: str = ""
-        ) -> None:
-            self.calls.append((song_id, action, seconds, end))
+        def scrobble(self, song_id: int, action: str, seconds: int = 0) -> None:
+            self.calls.append((song_id, action, seconds))
 
     def wait_for(calls: list, count: int, timeout: float = 2.0) -> None:
         deadline = time.monotonic() + timeout
@@ -233,35 +224,27 @@ def _selftest() -> int:
     check("未登录不上报", client.calls, [])
     client.jar.account = "token-a"
 
-    # 开始播放：立刻发 startplay，不带时长
+    # 开始播放：立刻发 startPlay，不带时长
     reporter.on_started(online)
     wait_for(client.calls, 1)
-    check("开始日志", client.calls[0], (321, "startplay", 0, ""))
+    check("开始日志", client.calls[0], (321, "startPlay", 0))
 
-    # 结算：实际收听 12.6 秒 → 四舍五入 13 秒；播完 → playend
-    reporter.on_settled(online, 12_600, True)
+    # 结算：实际收听 12.6 秒 → 四舍五入 13 秒
+    reporter.on_settled(online, 12_600)
     wait_for(client.calls, 2)
-    check("播完日志", client.calls[1], (321, "play", 13, "playend"))
+    check("结束日志", client.calls[1], (321, "play", 13))
 
     # 低于 5 秒的轮次不往云端发（快速试听/连续切歌）
-    reporter.on_settled(online, 4_999, False)
+    reporter.on_settled(online, 4_999)
     time.sleep(0.05)
     check("不足 5 秒不上报", len(client.calls), 2)
-
-    # 中途切歌：30 秒 → interrupt
-    reporter.on_started(online)
-    wait_for(client.calls, 3)
-    check("第二次开始", client.calls[2], (321, "startplay", 0, ""))
-    reporter.on_settled(online, 30_000, False)
-    wait_for(client.calls, 4)
-    check("切歌日志", client.calls[3], (321, "play", 30, "interrupt"))
 
     # 播放途中换号：开始日志已经算旧账号，结算不能记到新账号
     base = len(client.calls)
     reporter.on_started(online)
     wait_for(client.calls, base + 1)
     client.jar.account = "token-b"
-    reporter.on_settled(online, 30_000, True)
+    reporter.on_settled(online, 30_000)
     time.sleep(0.05)
     check("换号后不结算", len(client.calls), base + 1)
     client.jar.account = "token-a"
@@ -269,7 +252,7 @@ def _selftest() -> int:
     # 关闭开关后不再上报
     cfg.enabled = False
     reporter.on_started(online)
-    reporter.on_settled(online, 30_000, True)
+    reporter.on_settled(online, 30_000)
     time.sleep(0.05)
     check("关闭后不上报", len(client.calls), base + 1)
 
@@ -278,7 +261,7 @@ def _selftest() -> int:
     reporter._sender = reporter._send_default
     reporter.on_started(online)
     wait_for(client.calls, base + 2)
-    check("上报前刷新 Cookie", client.calls[base + 1], (321, "startplay", 0, ""))
+    check("上报前刷新 Cookie", client.calls[base + 1], (321, "startPlay", 0))
     check("确实刷新了一次", client.jar.reloaded >= 3, True)
 
     if failures:

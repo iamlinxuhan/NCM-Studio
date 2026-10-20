@@ -535,23 +535,18 @@ class ApiClient:
 
     # ---------------------------------------------------------- 播放日志
 
-    def scrobble(
-        self,
-        song_id: int,
-        action: str,
-        seconds: int = 0,
-        *,
-        end: str = "",
-    ) -> None:
+    def scrobble(self, song_id: int, action: str, seconds: int = 0) -> None:
         """把一次播放动作写进网易云的听歌记录。
 
         走网页端同一个出口（``clientlogusf`` 的 ``/weapi/feedback/weblog``）：
 
-        * ``startplay``：真正开始出声时发一次，不带时长（动作名全小写，
-          与网页端日志一致）；
+        * ``startPlay``：真正开始出声时发一次，不带时长；
         * ``play``：这一轮结束（切歌/播完/停止）时发，``seconds`` 是实际
-          收听时长，必须大于 0；``end`` 说明怎么结束的——``playend``
-          播完，``interrupt`` 中途切走，缺省按播完处理。
+          收听时长，必须大于 0。
+
+        报文形状按 2026-10 的网页端 Firefox 抓包对齐：动作名是
+        ``startPlay``（大写 P），``play`` 里没有 ``end`` 字段；网页额外带
+        ``x-music-web-os`` / ``Nm-GCore-Status`` 两个请求头，这里一并补上。
 
         接口本身只回 ``{"code":200,"data":"success"}``，没有更多语义。登录
         失效时由 :class:`Transport` 抛 :class:`AuthRequired`；调用方应当把它
@@ -560,10 +555,8 @@ class ApiClient:
         song_id = int(song_id)
         if song_id <= 0:
             raise ValueError("播放日志需要正的歌曲 ID")
-        if action not in ("startplay", "play"):
+        if action not in ("startPlay", "play"):
             raise ValueError(f"不认识的播放日志动作：{action}")
-        if end and end not in ("playend", "interrupt"):
-            raise ValueError(f"不认识的播放结束方式：{end}")
         seconds = int(seconds)
         if action == "play" and seconds <= 0:
             return
@@ -578,12 +571,7 @@ class ApiClient:
             "content": "",
         }
         if action == "play":
-            entry.update({
-                "time": seconds,
-                "end": end or "playend",
-                "wifi": 0,
-                "download": 0,
-            })
+            entry.update({"time": seconds, "wifi": 0, "download": 0})
         logs = json.dumps(
             [{"action": action, "json": entry}],
             ensure_ascii=False,
@@ -594,6 +582,10 @@ class ApiClient:
             {"logs": logs},
             write=True,
             domain=WEB_LOG_DOMAIN,
+            headers={
+                "x-music-web-os": "web3",
+                "Nm-GCore-Status": "1",
+            },
         )
 
 
@@ -696,41 +688,30 @@ def _selftest() -> int:
     check("歌单曲目", tracks[0].id, 3)
     check("歌单总数", total, 2)
 
-    # 播放日志：开始动作不带时长，结束动作带实际收听秒数与结束方式
-    client.scrobble(3, "startplay")
+    # 播放日志：开始动作不带时长，结束动作带实际收听秒数
+    client.scrobble(3, "startPlay")
     path = fake.calls[-1][1]
     check("播放日志路径", path, "/weapi/feedback/weblog")
     check("播放日志域名", fake.last_weapi_kwargs.get("domain"), WEB_LOG_DOMAIN)
+    check("播放日志请求头", fake.last_weapi_kwargs.get("headers"), {
+        "x-music-web-os": "web3",
+        "Nm-GCore-Status": "1",
+    })
     logs = json.loads(fake.calls[-1][2]["logs"])
-    check("开始日志动作", logs[0]["action"], "startplay")
+    check("开始日志动作", logs[0]["action"], "startPlay")
     check("开始日志不带时长", "time" in logs[0]["json"], False)
     check("开始日志不带结束方式", "end" in logs[0]["json"], False)
     check("开始日志歌曲 ID", logs[0]["json"]["id"], "3")
 
-    client.scrobble(3, "play", 42, end="playend")
+    client.scrobble(3, "play", 42)
     logs = json.loads(fake.calls[-1][2]["logs"])
     check("结束日志动作", logs[0]["action"], "play")
     check("结束日志时长", logs[0]["json"]["time"], 42)
-    check("播完结束方式", logs[0]["json"]["end"], "playend")
-
-    client.scrobble(3, "play", 12, end="interrupt")
-    logs = json.loads(fake.calls[-1][2]["logs"])
-    check("切歌结束方式", logs[0]["json"]["end"], "interrupt")
-
-    client.scrobble(3, "play", 5)  # 不传 end 时默认播完
-    logs = json.loads(fake.calls[-1][2]["logs"])
-    check("缺省结束方式", logs[0]["json"]["end"], "playend")
+    check("结束日志无结束方式", "end" in logs[0]["json"], False)
 
     before = len(fake.calls)
     client.scrobble(3, "play", 0)  # 0 秒不产生请求
     check("零时长不上报", len(fake.calls), before)
-
-    try:
-        client.scrobble(3, "play", 5, end="nonsense")
-    except ValueError:
-        pass
-    else:
-        failures.append("未知结束方式应当抛 ValueError")
 
     # 未登录时写操作给出明确错误
     client.jar = type("J", (), {"has_login": False, "csrf": "", "reload": lambda self: None})()
