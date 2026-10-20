@@ -964,7 +964,11 @@ class MainWindow(QMainWindow):
         self._logged_in = current
         self._refresh_login_ui()
         if not current:
-            # 登出后红心歌单没了，正在播的队列也不该继续
+            # 登出后红心歌单没了，正在播的队列也不该继续；
+            # 还没发出的听歌记录也一并作废，不能等同一账号再登录后补发
+            reporter = getattr(self, "scrobble", None)
+            if reporter is not None:
+                reporter.invalidate()
             self.playback.stop()
             self.playback.clear_queue()
             self.actions.clear_liked()
@@ -986,6 +990,11 @@ class MainWindow(QMainWindow):
         exists = signature is not None
         changed = signature != self._cookie_stamp
         self._cookie_stamp = signature
+        if changed:
+            # 凭据文件变了：新登录、换号或轮换。旧会话的待发日志一律作废
+            reporter = getattr(self, "scrobble", None)
+            if reporter is not None:
+                reporter.invalidate()
 
         if not exists:
             self._set_logged_in(False)
@@ -1058,6 +1067,9 @@ class MainWindow(QMainWindow):
 
     def reload_api(self) -> None:
         """设置里改了状态目录或代理后，重建接口客户端。"""
+        # 旧客户端名下的待发日志全部作废，免得换了状态目录/代理后
+        # 还拿旧会话把记录发出去
+        self.scrobble.invalidate()
         self.client = ApiClient(
             self.cfg.get("home", ""),
             proxy=self._api_proxy(),

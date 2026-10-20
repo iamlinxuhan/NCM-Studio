@@ -22,8 +22,13 @@
 :class:`~ncmgui.api.cookies.CookieSnapshot`，比对其中的 ``music_u``；
 退出登录或切换账号时这条日志直接丢弃。比对通过后，请求头的 Cookie 和
 CSRF 都用这份快照，不再回头读 CookieJar——核对与组包之间即使又换了号，
-也不会串到新账号上。客户端被设置页重建（``reload_api``）时，旧客户端
-名下的任务一并作废，不会拿到新会话里重发。
+也不会串到新账号上。
+
+**会话代数**：每条任务还记下入队时的代数。换号、登出、关闭同步、改状态
+目录/代理（``reload_api``）或退出程序时，代数递增并清空待发队列；工作
+线程在消费前、发送器在真正组包前各核对一次。队列是串行、有界的，因此
+关闭后最多只剩一条已经进入发送函数、刚通过检查的任务，不会出现“关掉了
+还在刷”的情况。
 
 **限流与熔断**：同一账号每小时最多 120 条、每天最多 200 条日志；
 接口连续 3 次返回限流就暂停 10 分钟，并通过 ``pausedChanged`` 通知界面。
@@ -81,16 +86,17 @@ QUEUE_SIZE = 32
 PAUSE_MESSAGE = "接口连续返回限流，听歌记录同步已暂停，稍后自动恢复。"
 DAILY_MESSAGE = "今日听歌记录上报已达上限，明天自动恢复。"
 
-#: 上报函数签名：``(song_id, action, seconds, account, client)``
-Sender = Callable[[int, str, int, str, ApiClient | None], None]
+#: 上报函数签名：``(song_id, action, seconds, account, client, generation)``
+Sender = Callable[[int, str, int, str, ApiClient | None, int], None]
 
 
 @dataclass(frozen=True)
 class _Task:
     """一条待发送的日志。
 
-    ``account`` 与 ``client`` 都是入队时的快照：前者防串号，后者防
-    ``reload_api`` 重建客户端后旧任务跑到新会话里。
+    ``account``、``client`` 与 ``generation`` 都是入队时的快照：账号防串号，
+    客户端防旧会话复用，代数让换号/登出/关闭同步/重建客户端能一次性作废
+    所有未发送的任务。
     """
 
     song_id: int
@@ -98,6 +104,7 @@ class _Task:
     seconds: int
     account: str
     client: object | None = None
+    generation: int = 0
 
 
 class ScrobbleReporter(QObject):
@@ -135,6 +142,9 @@ class ScrobbleReporter(QObject):
         self._lock = threading.Lock()
         self._queue: queue.Queue[_Task | None] = queue.Queue(QUEUE_SIZE)
         self._closed = False
+        #: 会话代数。换号、登出、关闭同步、重建客户端时递增，已入队但还没
+        #: 发出的日志随之作废；工作线程在消费前和真正发送前各校验一次。
+        self._generation = 0
         self._clock = time.monotonic
 
         self._failures = 0
@@ -261,15 +271,21 @@ class ScrobbleReporter(QObject):
 
     def _send_default(
         self, song_id: int, action: str, seconds: int, account: str,
-        client: ApiClient | None,
+        client: ApiClient | None, generation: int,
     ) -> None:
-        """后台发送。发之前重新读 Cookie，并确认账号还是入队时那个。
+        """后台发送。发之前再校验一次开关、会话代数和账号。
 
         核对与组包共用同一份 :class:`CookieSnapshot`：比对完 ``music_u``
         之后不再让传输层自己去读 CookieJar，换号插不进这两步之间。
         """
-        if client is None:
+        # 已关闭同步/已登出/客户端被重建：即使工作线程刚刚通过检查，
+        # 这里也再拦一道。真正的网络请求只可能来自已经走到这一步的任务，
+        # 而队列在 invalidate() 时已被清空，最多只剩这一条在途。
+        if client is None or not self.enabled:
             return
+        with self._lock:
+            if generation != self._generation or self._closed:
+                return
         # 用户可能刚登录/换号：每次上报前重新读一次 cookie 文件
         client.jar.reload()
         session = client.web_session()
@@ -279,20 +295,52 @@ class ScrobbleReporter(QObject):
             return
         client.scrobble(song_id, action, seconds, session=session)
 
+    def invalidate(self) -> None:
+        """作废当前会话的全部上报。
+
+        换号、登出、关闭听歌同步、设置页重建客户端时调用：递增代数并清空
+        待发队列，工作线程手里的任务也会在发送前发现代数不符而丢弃。
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._generation += 1
+        self._clear_round()
+        self._drain_queue()
+
+    def _drain_queue(self) -> None:
+        """丢弃所有还没被工作线程取走的任务（不动关机哨兵）。"""
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if item is None:
+                    # 关机哨兵：放回去，等 shutdown 之后的正常退出
+                    self._queue.put_nowait(None)
+                    return
+            finally:
+                self._queue.task_done()
+
     def _dispatch(
         self, song_id: int, action: str, seconds: int, account: str
     ) -> bool:
         """把一条日志放进串行队列；队列满或已熔断时直接丢掉。"""
-        if self._closed or not account:
+        if not account:
             return False
         client = self._client_provider()
         if client is None:
             return False
+        with self._lock:
+            if self._closed:
+                return False
+            generation = self._generation
         if self._pause_reason() or not self._admit(account):
             return False
         try:
             self._queue.put_nowait(
-                _Task(song_id, action, seconds, account, client))
+                _Task(song_id, action, seconds, account, client, generation))
         except queue.Full:
             return False
         return True
@@ -303,6 +351,14 @@ class ScrobbleReporter(QObject):
             try:
                 if task is None:
                     return
+                # 消费前重新核对：同步可能刚被关掉，账号/客户端/会话代数
+                # 也可能刚变过
+                if not self.enabled:
+                    continue
+                with self._lock:
+                    generation = self._generation
+                if task.generation != generation:
+                    continue
                 current = self._client_provider()
                 if task.client is not None and current is not task.client:
                     # 设置页重建过客户端：这条日志属于旧会话，丢弃而不是
@@ -311,7 +367,7 @@ class ScrobbleReporter(QObject):
                 try:
                     self._sender(
                         task.song_id, task.action, task.seconds, task.account,
-                        task.client,
+                        task.client, task.generation,
                     )
                 except RateLimited:
                     self._note_failure(task.account)
@@ -417,9 +473,11 @@ class ScrobbleReporter(QObject):
 
     def shutdown(self) -> None:
         """停止后台线程；未发送的任务随之丢弃。"""
-        if self._closed:
-            return
-        self._closed = True
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._generation += 1
         try:
             self._queue.put_nowait(None)
         except queue.Full:
@@ -594,7 +652,7 @@ def _selftest() -> int:
     gate = threading.Event()
     blocked = threading.Event()
 
-    def blocking(song_id, action, seconds, account, client) -> None:
+    def blocking(song_id, action, seconds, account, client, generation) -> None:
         blocked.set()
         gate.wait(2.0)
 
@@ -611,6 +669,65 @@ def _selftest() -> int:
     check("旧客户端不会再收到任务", len(stale.calls), 0)
     replacement.shutdown()
 
+    # invalidate()：代数递增并清空队列，已排队但没开始发的一条也不能发
+    sent: list[int] = []
+    guard = threading.Event()
+    started = threading.Event()
+
+    def held_sender(song_id, action, seconds, account, client, generation):
+        if action == "hold":
+            started.set()
+            guard.wait(2.0)
+            return
+        sent.append(song_id)
+
+    inv_client = FakeClient()
+    inv_client.jar.account = "token-a"
+    invalidator = ScrobbleReporter(cfg, inv_client)  # type: ignore[arg-type]
+    invalidator._sender = held_sender  # type: ignore[assignment]
+    invalidator._dispatch(1, "hold", 1, "token-a")
+    started.wait(2.0)
+    invalidator._dispatch(2, "play", 10, "token-a")
+    before = invalidator._generation
+    invalidator.invalidate()
+    check("invalidate 递增代数", invalidator._generation > before, True)
+    guard.set()
+    time.sleep(0.2)
+    check("invalidate 清空队列", sent, [])
+
+    # 陈旧代数的任务即使被直接交给默认发送器也不能发
+    base = len(inv_client.calls)
+    invalidator._send_default(3, "startPlay", 0, "token-a",
+                              inv_client, before)
+    check("过期会话代数不发送", len(inv_client.calls), base)
+    invalidator.shutdown()
+
+    # 消费时同步已被关掉：队列里的任务直接丢弃
+    off_cfg = FakeCfg(True)
+    off_sent: list[int] = []
+    off_started = threading.Event()
+    off_gate = threading.Event()
+
+    def off_sender(song_id, action, seconds, account, client, generation):
+        if action == "hold":
+            off_started.set()
+            off_gate.wait(2.0)
+            return
+        off_sent.append(song_id)
+
+    off_client = FakeClient()
+    off_client.jar.account = "token-a"
+    toggler = ScrobbleReporter(off_cfg, off_client)  # type: ignore[arg-type]
+    toggler._sender = off_sender  # type: ignore[assignment]
+    toggler._dispatch(1, "hold", 1, "token-a")
+    off_started.wait(2.0)
+    toggler._dispatch(2, "play", 10, "token-a")
+    off_cfg.enabled = False
+    off_gate.set()
+    time.sleep(0.2)
+    check("关闭同步后队列不再发送", off_sent, [])
+    toggler.shutdown()
+
     # 关闭开关后不再上报
     cfg.enabled = False
     base = len(client.calls)
@@ -623,7 +740,7 @@ def _selftest() -> int:
     # 连续限流触发熔断，之后的任务直接丢弃
     cfg.enabled = True
     def always_limited(song_id: int, action: str, seconds: int,
-                       account: str, client) -> None:
+                       account: str, client, generation) -> None:
         raise RateLimited("限流")
     reporter._sender = always_limited
     deadline = time.monotonic() + 2.0

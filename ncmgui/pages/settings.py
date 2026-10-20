@@ -838,7 +838,11 @@ class SettingsPage(BasePage):
         self.cfg.set("ncmctl_path", self.binary_path.path())
         self.cfg.set("player.mpv_path", self.mpv_path.path())
         self.cfg.set("player.allow_trial", self.allow_trial.isChecked())
-        self.cfg.set("player.scrobble", self.scrobble.isChecked())
+        scrobble_enabled = self.scrobble.isChecked()
+        if bool(self.cfg.get("player.scrobble", False)) != scrobble_enabled:
+            # 关掉同步的同一时刻就作废队列，不等工作线程慢慢消费
+            self.window.scrobble.invalidate()
+        self.cfg.set("player.scrobble", scrobble_enabled)
         self.cfg.set("ui.close_to_tray", self.close_to_tray.isChecked())
         self.cfg.set("home", self.home.path())
         self.cfg.set("config_file", self.config_file.path())
