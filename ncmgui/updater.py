@@ -624,10 +624,15 @@ def install(
         # 先原地替换：即使后面的改名失败，旧路径上也已经是新版本，程序还能用
         os.replace(new, target)
         if final != target:
-            try:
-                os.replace(target, final)
-            except OSError:
+            # 目标名已被另一个文件占用（用户可能手动下过同名新版本）：
+            # 保持原名，不覆盖它 —— 新内容此时已经在 target 上了
+            if final.exists():
                 final = target
+            else:
+                try:
+                    os.replace(target, final)
+                except OSError:
+                    final = target
     except OSError as exc:
         raise UpdateError(f"替换 {target.name} 失败：{exc}") from exc
 
@@ -826,6 +831,31 @@ def _selftest() -> int:
               sync_appimage_name("3.0.8", target=occupied, roots=[]), None)
         check("没有覆盖已有文件", target.read_bytes(), b"new")
         check("原文件保持不动", occupied.read_bytes(), b"old")
+
+    # ---- 自动更新的替换 + 改名（与启动改名同一套防覆盖规则）
+    with tempfile.TemporaryDirectory() as tmp:
+        downloaded = Path(tmp) / "download.AppImage"
+        downloaded.write_bytes(b"v308")
+        running = Path(tmp) / "NCM-Studio-3.0.7-x86_64.AppImage"
+        running.write_bytes(b"old")
+        final = Path(tmp) / "NCM-Studio-3.0.8-x86_64.AppImage"
+        check("安装后改名",
+              install(downloaded, running, "appimage", version="3.0.8",
+                      desktop_roots=[]), final)
+        check("新内容在最终文件里", final.read_bytes(), b"v308")
+        check("旧路径已让出", running.exists(), False)
+
+        downloaded2 = Path(tmp) / "download2.AppImage"
+        downloaded2.write_bytes(b"v309")
+        running2 = Path(tmp) / "NCM-Studio-3.0.6-x86_64.AppImage"
+        running2.write_bytes(b"old")
+        occupied2 = Path(tmp) / "NCM-Studio-3.0.9-x86_64.AppImage"
+        occupied2.write_bytes(b"someone-else")
+        check("目标名被占用时保持原名",
+              install(downloaded2, running2, "appimage", version="3.0.9",
+                      desktop_roots=[]), running2)
+        check("占用文件不被覆盖", occupied2.read_bytes(), b"someone-else")
+        check("新内容仍在运行时路径", running2.read_bytes(), b"v309")
 
     # ---- 安装形态
     check("源码运行", install_kind(system="linux", frozen=False, appimage=""), "source")
