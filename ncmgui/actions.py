@@ -104,20 +104,41 @@ class SongActions(QObject):
         task.failed.connect(lambda _message: None)
         task.start()
 
+    def _sync_liked_order(self, uid: int, base: str, liked: bool) -> None:
+        """红心变了就同步曲库里的收藏顺序，本地曲库不必再请求接口。
+
+        红心页还没完整加载过时没有基准顺序，先不动；等它加载时整体写入。
+        """
+        library = getattr(self.window, "library", None)
+        if library is None:
+            return
+        order = library.liked_order(uid)
+        if order is None:
+            return
+        order = [item for item in order if item != base]
+        if liked:
+            # 红心页按收藏时间倒序，新喜欢的排在最前面
+            order.insert(0, base)
+        library.replace_liked_order(uid, order)
+
     def toggle_like(self, song: Song, currently_liked: bool | None = None) -> None:
         if not self.window.require_login_silent("喜欢歌曲"):
             return
         liked = self.is_liked(song) if currently_liked is None else bool(currently_liked)
         target = not liked
 
+        client = self.window.client
+        uid = int(client.uid or 0)
+        library = getattr(self.window, "library", None)
+        previous_order = library.liked_order(uid) if library is not None else None
+
         # 乐观更新：立刻改本地状态，失败再回滚
         if target:
             self._liked.add(int(song.id))
         else:
             self._liked.discard(int(song.id))
+        self._sync_liked_order(uid, song.base, target)
         self.likedChanged.emit()
-
-        client = self.window.client
 
         def work():
             client.like(song.id, target)
@@ -130,6 +151,8 @@ class SongActions(QObject):
                 self._liked.discard(int(song.id))
             else:
                 self._liked.add(int(song.id))
+            if previous_order is not None and library is not None:
+                library.replace_liked_order(uid, previous_order)
             self.likedChanged.emit()
             self.window.toast(f"操作失败：{message}")
 

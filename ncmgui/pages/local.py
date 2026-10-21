@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import liked_order, localmusic
+from .. import localmusic
 from ..library import (
     album_list,
     artist_list,
@@ -611,13 +611,14 @@ class LocalPage(BasePage):
     # ------------------------------------------------------------ 喜欢顺序
 
     def _ensure_liked_rank(self) -> None:
-        """从红心页落盘的缓存里取收藏顺序，不访问网络。
+        """从曲库里取红心顺序，不访问网络。
 
-        缓存由 :class:`~ncmgui.pages.liked.LikedPage` 在加载红心列表时写入。
-        本地文件名就是 ncmctl 的「歌手 - 歌名」，和红心歌单里的
-        :attr:`Song.base` 同一套规则，因此能一一对上。
+        顺序由 :class:`~ncmgui.pages.liked.LikedPage` 在加载红心列表时写入
+        ``library.db``，之后每次点红心也会同步更新。本地文件名就是 ncmctl
+        的「歌手 - 歌名」，和红心歌单里的 :attr:`Song.base` 同一套规则，
+        因此能一一对上。
         """
-        order = liked_order.load(self.window.client.uid)
+        order = self.db.liked_order(self.window.client.uid)
         if order is None:
             self._liked_rank = None
             self.status_label.setText(

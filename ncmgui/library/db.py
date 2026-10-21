@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
 CREATE INDEX IF NOT EXISTS idx_playlist_tracks_order
     ON playlist_tracks(playlist_id, position);
 
+-- 「我喜欢的音乐」的收藏顺序。红心页加载后写入，本地曲库的「喜欢顺序」
+-- 排序读它。base 是 ncmctl 的文件名主干；按 uid 分账号，换号自动失效。
+CREATE TABLE IF NOT EXISTS liked_order (
+    uid      INTEGER NOT NULL DEFAULT 0,
+    base     TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (uid, base)
+);
+CREATE INDEX IF NOT EXISTS idx_liked_order_position
+    ON liked_order(uid, position);
+
 CREATE TABLE IF NOT EXISTS play_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     track_id    INTEGER,
@@ -202,6 +213,30 @@ class LibraryDB:
             )
             return value
 
+    # ------------------------------------------------------------ 红心顺序
+
+    def replace_liked_order(self, uid: int, bases: Sequence[str]) -> None:
+        """用一份新的收藏顺序替换某个账号的旧顺序。
+
+        调用方是红心页：它本来就要加载整个列表，顺手写进曲库，本地曲库
+        的「喜欢顺序」排序因此不需要再请求接口。
+        """
+        uid = int(uid or 0)
+        with self.batch() as conn:
+            conn.execute("DELETE FROM liked_order WHERE uid = ?", (uid,))
+            conn.executemany(
+                "INSERT INTO liked_order(uid, base, position) VALUES(?, ?, ?)",
+                [(uid, str(base), index) for index, base in enumerate(bases)],
+            )
+
+    def liked_order(self, uid: int = 0) -> list[str] | None:
+        """按收藏顺序返回文件名主干；没有缓存时返回 ``None``。"""
+        rows = self.query(
+            "SELECT base FROM liked_order WHERE uid = ? ORDER BY position",
+            (int(uid or 0),),
+        )
+        return [str(row["base"]) for row in rows] if rows else None
+
     # ------------------------------------------------------------ 维护
 
     def compact(self) -> None:
@@ -263,6 +298,15 @@ def _selftest() -> int:
             conn.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
         check("删除歌曲级联歌单",
               db.query_one("SELECT COUNT(*) AS n FROM playlist_tracks")["n"], 0)
+
+        check("没有红心顺序", db.liked_order(7), None)
+        db.replace_liked_order(7, ["甲 - 一", "乙 - 二"])
+        check("红心顺序", db.liked_order(7), ["甲 - 一", "乙 - 二"])
+        check("红心顺序按账号隔离", db.liked_order(8), None)
+        db.replace_liked_order(7, ["乙 - 二"])
+        check("红心顺序整体替换", db.liked_order(7), ["乙 - 二"])
+        db.replace_liked_order(7, [])
+        check("清空后视为无缓存", db.liked_order(7), None)
 
         db.close()
         reopened = LibraryDB(path)

@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import liked_order, localmusic, ncmctl, player, theme
+from .. import localmusic, ncmctl, player, theme
 from ..lyrics import AUDIO_SUFFIXES, index_audio
 from ..playback import STATE_PLAYING
 from ..resolver import Song
@@ -452,16 +452,27 @@ class LikedPage(BasePage):
 
         self.model.set_songs(self._songs)
         self.model.set_downloaded(downloaded, directory)
-        # 本地曲库的「喜欢顺序」只读这份缓存，不再自己请求接口
-        liked_order.save(
-            [song.base for song in self._songs], self.window.client.uid
-        )
+        self._save_liked_order()
         self._sync_count(len(songs), len(downloaded))
         self.refresh_btn.setEnabled(True)
         self.status_label.setText("")
 
         if was_liked_queue:
             self.playback.set_queue(self._songs)
+
+    def _save_liked_order(self) -> None:
+        """把当前红心顺序整体写进曲库。
+
+        本地曲库的「喜欢顺序」排序只读这张表，不再为了排序请求接口。
+        红心页每次真正加载（首次打开或手动刷新）后写入；点红心则由
+        :meth:`SongActions._sync_liked_order` 增量同步，避免拿页面上的
+        过期列表整表覆盖。
+        """
+        if not self._songs:
+            return
+        self.window.library.replace_liked_order(
+            self.window.client.uid, [song.base for song in self._songs]
+        )
 
     def _on_load_failed(self, message: str, generation: int) -> None:
         if generation != self._load_generation:
