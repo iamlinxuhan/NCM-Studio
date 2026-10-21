@@ -22,6 +22,9 @@ from .db import LibraryDB
 
 SORTS = (
     ("歌名", "name"),
+    # 按「我喜欢的音乐」里的收藏顺序排。顺序来自网易云歌单，SQL 排不了，
+    # 由 LocalPage 在取到列表后再排（``tracks`` 里回退成按歌名）。
+    ("喜欢顺序", "liked"),
     ("歌手", "artist"),
     ("专辑", "album"),
     ("时长", "duration"),
