@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Sequence
 
@@ -36,7 +35,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import localmusic
+from .. import liked_order, localmusic
 from ..library import (
     album_list,
     artist_list,
@@ -137,11 +136,8 @@ class LocalPage(BasePage):
         self._generation = 0
         self._demo_mode = False
         self._ever_shown = False
-        #: 「喜欢顺序」用的 文件名主干 → 红心歌单序号。None 表示还没取到。
+        #: 「喜欢顺序」用的 文件名主干 → 红心歌单序号。None 表示缓存还没有。
         self._liked_rank: dict[str, int] | None = None
-        self._liked_task: BackgroundTask | None = None
-        #: 取失败后冷却一段时间，免得搜索框每敲一个字都发一次请求
-        self._liked_retry_at = 0.0
 
         self._dirs = self._load_directories()
 
@@ -615,46 +611,21 @@ class LocalPage(BasePage):
     # ------------------------------------------------------------ 喜欢顺序
 
     def _ensure_liked_rank(self) -> None:
-        """取红心歌单的顺序，缓存成 ``base → 序号``。
+        """从红心页落盘的缓存里取收藏顺序，不访问网络。
 
-        本地文件名就是 ncmctl 的 ``歌手 - 歌名``，和红心歌单里的
+        缓存由 :class:`~ncmgui.pages.liked.LikedPage` 在加载红心列表时写入。
+        本地文件名就是 ncmctl 的「歌手 - 歌名」，和红心歌单里的
         :attr:`Song.base` 同一套规则，因此能一一对上。
         """
-        if self._liked_rank is not None:
+        order = liked_order.load(self.window.client.uid)
+        if order is None:
+            self._liked_rank = None
+            self.status_label.setText(
+                "「喜欢顺序」需要先打开一次「我喜欢的音乐」页，"
+                "加载过红心歌单后才能用。"
+            )
             return
-        if self._liked_task is not None and self._liked_task.is_running:
-            return
-        if not self.is_logged_in():
-            self.status_label.setText("「喜欢顺序」需要登录网易云，当前按歌名排列。")
-            return
-        if time.monotonic() < self._liked_retry_at:
-            return
-
-        def work():
-            client = self.window.client
-            playlist = client.liked_playlist()
-            songs = client.playlist_tracks_all(playlist.id)
-            return {song.base: index for index, song in enumerate(songs)}
-
-        task = BackgroundTask(work, parent=self)
-        self._liked_task = task
-        task.done.connect(self._on_liked_rank_loaded)
-        task.failed.connect(self._on_liked_rank_failed)
-        task.start()
-
-    def _on_liked_rank_loaded(self, rank) -> None:
-        # 取列表期间可能已经登出/换号，旧顺序不能再用
-        if not self.is_logged_in():
-            return
-        self._liked_rank = dict(rank)
-        if (self.sort_combo.currentData() or "name") == "liked":
-            self._reload_songs()
-
-    def _on_liked_rank_failed(self, message: str) -> None:
-        self._liked_retry_at = time.monotonic() + 30.0
-        if (self.sort_combo.currentData() or "name") == "liked":
-            self.status_label.setText(f"读取「喜欢顺序」失败：{message}，暂时按歌名排列。")
-            self._reload_songs()
+        self._liked_rank = {base: index for index, base in enumerate(order)}
 
     def _sort_by_liked(self, songs: list[Song]) -> list[Song]:
         """红心歌单里有的按收藏顺序排，没有的按歌名排在后面。"""

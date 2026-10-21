@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import localmusic, ncmctl, player, theme
+from .. import liked_order, localmusic, ncmctl, player, theme
 from ..lyrics import AUDIO_SUFFIXES, index_audio
 from ..playback import STATE_PLAYING
 from ..resolver import Song
@@ -452,6 +452,10 @@ class LikedPage(BasePage):
 
         self.model.set_songs(self._songs)
         self.model.set_downloaded(downloaded, directory)
+        # 本地曲库的「喜欢顺序」只读这份缓存，不再自己请求接口
+        liked_order.save(
+            [song.base for song in self._songs], self.window.client.uid
+        )
         self._sync_count(len(songs), len(downloaded))
         self.refresh_btn.setEnabled(True)
         self.status_label.setText("")
