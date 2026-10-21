@@ -577,13 +577,17 @@ class PlaybackBar(QWidget):
         layout.addWidget(self.now_playing)
         layout.addSpacing(2)
 
-        # 红心：喜欢时涂红，未喜欢只有轮廓；本地/流媒体歌曲不支持网易云红心
+        # 红心：喜欢时涂红，未喜欢只有轮廓；本地/流媒体歌曲没有这个概念，
+        # 直接隐藏。保留占位，否则切歌时播放键会左右跳。
         self.like_btn = ghost_button("", compact=True)
         self.like_btn.setProperty("transport", "flat")
         self.like_btn.setFixedSize(30, 30)
         self.like_btn.setIconSize(QSize(21, 21))
         self.like_btn.setIcon(_heart_icon(False, False))
         self.like_btn.clicked.connect(self._toggle_like)
+        like_policy = self.like_btn.sizePolicy()
+        like_policy.setRetainSizeWhenHidden(True)
+        self.like_btn.setSizePolicy(like_policy)
         layout.addWidget(self.like_btn)
 
         # 三个都是扁平的小图标，播放键只比上一首/下一首略大一点
@@ -718,20 +722,17 @@ class PlaybackBar(QWidget):
         song = self._song
         if not self._is_netease_song(song):
             liked = False
-            enabled = False
-            tip = (
-                "本地与流媒体歌曲不支持网易云红心"
-                if song is not None
-                else "喜欢"
-            )
+            visible = enabled = False
+            tip = "喜欢"
         elif not self.window.is_logged_in():
             liked = False
-            enabled = False
+            visible, enabled = True, False
             tip = "登录网易云后可喜欢"
         else:
             liked = self.window.actions.is_liked(song)
-            enabled = True
+            visible = enabled = True
             tip = "取消喜欢" if liked else "喜欢"
+        self.like_btn.setVisible(visible)
         self.like_btn.setEnabled(enabled)
         self.like_btn.setIcon(_heart_icon(liked, enabled))
         self.like_btn.setToolTip(tip)
