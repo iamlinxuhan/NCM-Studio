@@ -175,9 +175,13 @@ def manifest_files(
         + f"ManifestVersion: {MANIFEST_VERSION}\n"
     )
 
-    def locale_yaml(locale: str, short: str, description: str) -> str:
+    def locale_yaml(
+        locale: str, short: str, description: str, *, kind: str
+    ) -> str:
+        # 默认语言用 defaultLocale，其余语言用 locale —— 两者不能混用，
+        # 写错会被 winget-pkgs 的清单校验直接打回。
         return (
-            header.format(kind="defaultLocale")
+            header.format(kind=kind)
             + common
             + f"PackageLocale: {locale}\n"
             + f"Publisher: {PUBLISHER}\n"
@@ -196,15 +200,19 @@ def manifest_files(
             + "Tags:\n"
             + "".join(f"- {tag}\n" for tag in TAGS)
             + f"ReleaseNotesUrl: {PROJECT_URL}/releases/tag/{_tag(version)}\n"
-            + "ManifestType: defaultLocale\n"
+            + f"ManifestType: {kind}\n"
             + f"ManifestVersion: {MANIFEST_VERSION}\n"
         )
 
     return {
         f"{prefix}.yaml": version_yaml,
         f"{prefix}.installer.yaml": installer_yaml,
-        f"{prefix}.locale.zh-CN.yaml": locale_yaml("zh-CN", SHORT_ZH, DESCRIPTION_ZH),
-        f"{prefix}.locale.en-US.yaml": locale_yaml("en-US", SHORT_EN, DESCRIPTION_EN),
+        f"{prefix}.locale.zh-CN.yaml": locale_yaml(
+            "zh-CN", SHORT_ZH, DESCRIPTION_ZH, kind="defaultLocale"
+        ),
+        f"{prefix}.locale.en-US.yaml": locale_yaml(
+            "en-US", SHORT_EN, DESCRIPTION_EN, kind="locale"
+        ),
     }
 
 
@@ -261,6 +269,8 @@ def _selftest() -> int:
     check("发布日期", "ReleaseDate: 2026-10-24" in installer_text)
     check("中文商店名", "PackageName: NCM Studio" in zh_text)
     check("英文 locale", "PackageLocale: en-US" in en_text)
+    check("默认语言清单类型", "ManifestType: defaultLocale" in zh_text)
+    check("额外语言清单类型", "ManifestType: locale" in en_text)
     check("许可证", "License: AGPL-3.0" in zh_text)
     check("标签", "- netease-cloud-music" in zh_text)
     check("清单版本", "ManifestVersion: 1.10.0" in installer_text)
