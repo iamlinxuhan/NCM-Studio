@@ -139,6 +139,8 @@ jobs:
           python -m ncmgui.lyrics_service
           # mpv 能力探测（没有 mpv 时只验证降级路径）
           python -m ncmgui.dsp
+          # Windows SMTC：状态/按钮/时间轴映射；非 Windows 只验证降级路径
+          python -m ncmgui.smtc
 
       - name: 打包
         env:
@@ -170,6 +172,24 @@ jobs:
             }
           }
           Write-Host "ConPTY 运行时齐全：$($exe.Name)"
+
+      # SMTC 用的是 WinRT 投影包：全是 .pyd，PyInstaller 的静态分析看不见
+      # 运行时按需导入的命名空间，所以这里点名清点。msvcp140.dll 也必须
+      # 和 _winrt.pyd 落在同一个目录，缺了它媒体控件会在用户机器上静默失效。
+      - name: 清点 Windows 产物里的 WinRT 运行时
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist/*.exe | Select-Object -First 1
+          pyi-archive_viewer -l $exe.FullName > toc-winrt.txt
+          foreach ($name in '_winrt.cp312', '_winrt_windows_media.cp312',
+                            '_winrt_windows_media_playback', '_winrt_windows_storage_streams',
+                            'msvcp140.dll') {
+            if (-not (Select-String -Path toc-winrt.txt -SimpleMatch -Pattern $name -Quiet)) {
+              throw "产物里没有 $name —— SMTC 的 WinRT 运行时没被打进去"
+            }
+          }
+          Write-Host "WinRT 运行时齐全：$($exe.Name)"
 
       # 单文件包把 ncmctl 压在里面，只能翻归档目录
       - name: 清点单文件包里的 ncmctl

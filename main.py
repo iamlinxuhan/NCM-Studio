@@ -1015,8 +1015,9 @@ def main(argv: list[str] | None = None) -> int:
     if screenshot_dir:
         return _screenshot(window, screenshot_dir)
 
-    # 蓝牙耳机与系统媒体键：向会话总线注册 MPRIS。自检/截图不需要它
-    window.mpris.start()
+    # 蓝牙耳机与系统媒体键：Linux 注册 MPRIS，Windows 注册 SMTC。
+    # 自检/截图不需要它
+    window.media_controls.start()
 
     # 启动后稍等片刻再检查更新：先把主界面画出来，别让网络拖慢启动；
     # 发现新版会弹窗询问是否安装

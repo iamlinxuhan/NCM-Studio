@@ -328,8 +328,19 @@ mpv 自己不实现 MPRIS，随包 mpv 又用 `--no-config --load-scripts=no` �
 纯 Python 的 `dbus-next`，已写进 `requirements.txt` 的 Linux 条件依赖，打包时
 一并收进 AppImage。
 
-Windows 与 macOS 的媒体控制分别走 SMTC / Now Playing，目前还没有接入；
-这两个平台上的耳机按键暂时不会控制本程序。
+Windows 走的是 SMTC（`Windows.Media.SystemMediaTransportControls`，见
+[ncmgui/smtc.py](ncmgui/smtc.py)）：媒体键、任务栏的「正在播放」浮层和锁屏
+播放器共用这一个接口。程序创建了一个不出声的 `MediaPlayer` 作为媒体会话，
+标题、歌手、专辑、封面和播放进度都由界面写入，实际发声仍然交给 mpv。系统浮层
+上还能拖动进度、切换随机与循环，这些请求会转回播放器执行。
+
+SMTC 依赖 [PyWinRT](https://github.com/pywinrt/pywinrt) 的命名空间投影包，
+只在 Windows 上安装（`requirements.txt` 里按 `sys_platform == "win32"` 列出），
+打包时连同 `_winrt.pyd` 需要的 `msvcp140.dll` 一起收进 exe，用户不需要装
+Windows SDK 或 Visual C++ 运行库。缺任何一个绑定时整个功能静默关闭，播放不受
+影响。
+
+macOS 的 Now Playing 目前还没有接入；那边的耳机按键暂时不会控制本程序。
 
 ### 流媒体服务器
 
@@ -525,6 +536,9 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 # 代理串规范化（裸 host:port 补 http://，socks5 等明确拒绝）
 .venv/bin/python -m ncmgui.netutil
 
+# Windows SMTC：按钮/状态/循环模式/时间轴映射（纯函数，非 Windows 上只验降级）
+.venv/bin/python -m ncmgui.smtc
+
 # 证明随包的 mpv 真的能执行（打包产物自检用；源码运行则探测系统 mpv）
 .venv/bin/python main.py --mpv-version
 
@@ -657,6 +671,7 @@ ncmgui/
   playback.py          全局播放控制：队列、四种播放顺序、进度外推与竞态保护
   dsp.py               音频工具：mpv 能力探测、倍速/变调/EQ/响度/设备
   mpris.py             Linux MPRIS 服务：蓝牙耳机与系统媒体键（dbus-next）
+  smtc.py              Windows SMTC 服务：媒体键、任务栏「正在播放」与锁屏（PyWinRT）
   images.py            封面下载、放大、占位图与内存 LRU 缓存
   localmusic.py        本地音乐：文件名拆分、目录扫描（不依赖 Qt）
   lyrics_service.py    歌词获取/解析/缓存与全局偏移，播放页和桌面歌词共用
@@ -703,6 +718,9 @@ AGPL-3.0 发布，与本项目兼容。
 
 「写入音频标签」这一种歌词模式用到 [mutagen](https://mutagen.readthedocs.io/)，它同样以
 GPL-2.0-or-later 发布，可升级到 GPL-3.0 并与 AGPL-3.0 组合。默认的「独立 .lrc 文件」不需要它。
+
+Windows 的系统媒体控件通过 [PyWinRT](https://github.com/pywinrt/pywinrt)（MIT）
+调用 Windows Runtime，相关投影包只会装进 Windows 产物。
 
 流媒体播放用到的 [mpv](https://mpv.io/) 以 GPLv2+ 发布，它链接的 FFmpeg 等库各有
 自己的许可。Linux / Windows 的产物里随包分发 mpv，其来源、版本与版权文件放在

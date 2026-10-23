@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import Callable
 
@@ -35,7 +36,6 @@ from .desktop.lyrics_window import DesktopLyricsWindow
 from .desktop.tray import TrayIcon
 from .library import LibraryDB
 from .lyrics_service import LyricsService
-from .mpris import MprisService
 from .pages.account import AccountPage
 from .pages.base import TabbedPage
 from .pages.detail import DetailHost
@@ -56,6 +56,13 @@ from .widgets.playbackbar import PlaybackBar
 from .widgets.profilecard import ProfileCard
 from .widgets.themetoggle import ThemeToggle
 from .workers import BackgroundTask
+
+#: 系统媒体控制：Linux 走 MPRIS（D-Bus），Windows 走 SMTC。
+#: macOS 的 Now Playing 还没有接入，那边的 MPRIS 服务本来就是空操作。
+if sys.platform == "win32":
+    from .smtc import SmtcService as MediaControlService
+else:
+    from .mpris import MprisService as MediaControlService
 
 #: 侧边栏项目：(键, 图标, 名称, 页面类)
 #:
@@ -161,9 +168,9 @@ class MainWindow(QMainWindow):
         # 听满 5 秒才补发 startPlay：快速切歌不制造开始日志洪水
         self.history.playQualified.connect(self.scrobble.on_qualified)
         self.history.playSettled.connect(self.scrobble.on_settled)
-        #: 蓝牙耳机/系统媒体键走 MPRIS；真正 start() 由 main.py 决定，
-        #: 自检与截图不往会话总线上注册服务
-        self.mpris = MprisService(self.playback, self, parent=self)
+        #: 蓝牙耳机/系统媒体键走 MPRIS（Linux）或 SMTC（Windows）；真正 start()
+        #: 由 main.py 决定，自检与截图不注册系统媒体服务
+        self.media_controls = MediaControlService(self.playback, self, parent=self)
         #: 从播放页「返回」时回到的导航页
         self._last_page_key = "discover"
 
@@ -1231,8 +1238,8 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - 上报失败不能挡住退出
             pass
         try:
-            self.mpris.shutdown()
-        except Exception:  # noqa: BLE001 - D-Bus 不可用不能挡住退出
+            self.media_controls.shutdown()
+        except Exception:  # noqa: BLE001 - 系统媒体服务不可用不能挡住退出
             pass
         try:
             self.playback.shutdown()

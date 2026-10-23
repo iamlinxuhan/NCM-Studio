@@ -33,6 +33,23 @@ pywinpty>=2.0; sys_platform == "win32"
 # 许可 GPL-2.0-or-later，与本项目一致。
 mutagen>=1.47
 
+# Windows：SMTC 系统媒体控件（媒体键、任务栏「正在播放」与锁屏播放器）。
+#
+# 用 PyWinRT 的投影包，而不是把所有 Windows 命名空间打成一包的 winsdk：
+# 每个命名空间单独分发，这里只装实际用到的几个，产物体积小得多。
+# ncmgui/smtc.py 直接导入 winrt.runtime、Foundation、Media、Media.Playback
+# 与 Storage.Streams；Media.Core 和 Storage 是播放对象签名里可能出现的类型，
+# 一并装上，免得运行时按需导入失败后退化成「没有媒体控件」。
+# 非 Windows 平台不装，Windows 上缺任何一个时整个功能静默关闭，不影响播放。
+winrt-runtime~=3.2.1; sys_platform == "win32"
+winrt-Windows.Foundation~=3.2.1; sys_platform == "win32"
+winrt-Windows.Foundation.Collections~=3.2.1; sys_platform == "win32"
+winrt-Windows.Media~=3.2.1; sys_platform == "win32"
+winrt-Windows.Media.Core~=3.2.1; sys_platform == "win32"
+winrt-Windows.Media.Playback~=3.2.1; sys_platform == "win32"
+winrt-Windows.Storage~=3.2.1; sys_platform == "win32"
+winrt-Windows.Storage.Streams~=3.2.1; sys_platform == "win32"
+
 # Linux：MPRIS 媒体控制（蓝牙耳机 / 键盘上的播放暂停键）。
 #
 # Linux 桌面通过 MPRIS（D-Bus）把耳机的 AVRCP 指令转给播放器；mpv 自己不实现

@@ -74,6 +74,29 @@ if sys.platform == "win32":
     binaries.extend(winpty_binaries)
     hiddenimports.extend(winpty_hidden)
 
+    # SMTC（ncmgui/smtc.py）用到的 WinRT 投影。每个 Windows 命名空间是一个
+    # .pyd，运行时按类型名动态导入别的命名空间，PyInstaller 的静态分析看不到；
+    # collect_all 会把已安装的 winrt/* 以及 msvcp140.dll 一起收进来 ——
+    # 那个 dll 是 _winrt.pyd 的 C++ 运行时依赖，必须和它落在同一个目录。
+    # 少收任何一个，媒体控件都会在用户机器上静默失效。
+    winrt_datas, winrt_binaries, winrt_hidden = collect_all("winrt")
+    datas.extend(winrt_datas)
+    binaries.extend(winrt_binaries)
+    hiddenimports.extend(winrt_hidden)
+    hiddenimports.extend(
+        [
+            "winrt.runtime",
+            "winrt.system",
+            "winrt.windows.foundation",
+            "winrt.windows.foundation.collections",
+            "winrt.windows.media",
+            "winrt.windows.media.core",
+            "winrt.windows.media.playback",
+            "winrt.windows.storage",
+            "winrt.windows.storage.streams",
+        ]
+    )
+
 # ── 图标 ────────────────────────────────────────────────────────────────────
 # 放进包里的这份供 Qt 窗口图标使用（ncmgui/resources.py 按相对位置找它）。
 # AppImage 与 Windows 可执行文件用的是 packaging/ 下的同一份源文件。
