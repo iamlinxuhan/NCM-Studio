@@ -44,4 +44,5 @@ signing-key*.pem
 /promo_build.py
 /promo_cover.py
 /promo_cover_34.py
+/promo_cover_square.py
 /promo_record.py
