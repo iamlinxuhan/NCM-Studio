@@ -38,3 +38,10 @@ signing-key*.pem
 # 但下面这些是调试时可能出现的手工产物
 *.log
 /tmp-shots/
+
+# 本地推广视频脚本：依赖本机字体、录屏素材与 ffmpeg/NVENC，
+# 只用于制作演示视频，不入库、不参与打包
+/promo_build.py
+/promo_cover.py
+/promo_cover_34.py
+/promo_record.py
