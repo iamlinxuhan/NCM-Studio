@@ -141,6 +141,8 @@ jobs:
           python -m ncmgui.dsp
           # Windows SMTC：状态/按钮/时间轴映射；非 Windows 只验证降级路径
           python -m ncmgui.smtc
+          # winget 清单：版本/校验和校验、Inno 参数、输出路径
+          python scripts/winget_manifests.py --self-test
 
       - name: 打包
         env:
@@ -312,6 +314,60 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "自检失败，退出码 $LASTEXITCODE" }
           }
 
+      # Windows 安装包。必须放在冒烟测试之后：那一步用 dist/*.exe 找便携版，
+      # 安装包也叫 .exe，先生成的话可能被当成待测程序。
+      #
+      # 安装目录用 {autopf} + PrivilegesRequired=lowest，即
+      # %LOCALAPPDATA%\Programs\NCM Studio。程序内的更新器要覆盖正在运行的
+      # exe，装到 Program Files 就得提权，普通用户会自动更新失败。
+      - name: 制作 Windows 安装包
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          if (-not (Test-Path $iscc)) {
+            throw "安装 Inno Setup 后仍找不到 ISCC.exe"
+          }
+
+          $version = (python -c "from ncmgui import VERSION; print(VERSION)").Trim()
+          & $iscc "/DAppVersion=$version" packaging\ncm-studio.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败，退出码 $LASTEXITCODE" }
+
+          $portable = 'dist\ncm-studio-windows-x86_64.exe'
+          $setup = 'dist\ncm-studio-windows-x86_64-setup.exe'
+          if (-not (Test-Path $setup)) { throw "没有生成 $setup" }
+
+          # 静默装一遍再卸掉：证明安装包里的 exe 与刚冒烟测试过的便携版逐字节
+          # 一致，且卸载器能清干净。只看「文件生成了」挡不住打包错文件。
+          $target = Join-Path $env:RUNNER_TEMP 'ncm-studio-install-test'
+          Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $setup -Wait -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$target`""
+          if ($p.ExitCode -ne 0) { throw "静默安装失败，退出码 $($p.ExitCode)" }
+
+          $installed = Join-Path $target 'NCM Studio.exe'
+          if (-not (Test-Path $installed)) { throw "安装后找不到 $installed" }
+          if ((Get-FileHash $installed).Hash -ne (Get-FileHash $portable).Hash) {
+            throw "安装出来的 exe 与冒烟测试过的便携版不一致"
+          }
+
+          $uninstaller = Join-Path $target 'unins000.exe'
+          if (-not (Test-Path $uninstaller)) { throw "安装包没有生成卸载器" }
+          $u = Start-Process -FilePath $uninstaller -Wait -PassThru `
+            -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
+          if ($u.ExitCode -ne 0) { throw "静默卸载失败，退出码 $($u.ExitCode)" }
+
+          # 卸载器有时会把自己复制到临时目录再返回，文件清理稍慢一拍
+          for ($i = 0; $i -lt 20 -and (Test-Path $installed); $i++) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (Test-Path $installed) { throw "卸载后 $installed 仍在" }
+
+          Write-Host "Windows 安装包通过安装/卸载自检：$setup"
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
@@ -340,15 +396,17 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # 自动更新器按这三个文件名找安装包，缺一个那个平台的用户就永远更新不了；
-      # SHA256SUMS 也必须存在 —— 更新器宁可拒绝安装，也不会装一个没校验的文件。
-      # 这两个条件在发布前就该失败，而不是等用户点「下载并安装」才发现。
+      # 自动更新器按前三个文件名找安装包，缺一个那个平台的用户就永远更新不了；
+      # 第四个是 Windows 安装包，自动更新用不到，但下载页要提供。SHA256SUMS
+      # 必须存在 —— 更新器宁可拒绝安装，也不会装一个没校验的文件。这些条件
+      # 在发布前就该失败，而不是等用户点「下载并安装」才发现。
       - name: 校验发布资产
         run: |
           cd dist
           for f in \
             ncm-studio-linux-x86_64.AppImage \
             ncm-studio-windows-x86_64.exe \
+            ncm-studio-windows-x86_64-setup.exe \
             ncm-studio-macos-arm64
           do
             test -f "$f" || { echo "缺少资产：$f"; exit 1; }
@@ -356,6 +414,7 @@ jobs:
           sha256sum \
             ncm-studio-linux-x86_64.AppImage \
             ncm-studio-windows-x86_64.exe \
+            ncm-studio-windows-x86_64-setup.exe \
             ncm-studio-macos-arm64 > SHA256SUMS
           cat SHA256SUMS
 

@@ -43,13 +43,25 @@ ncmctl 的全部子命令都在界面里有对应入口：
 
 | 平台 | 文件 |
 | --- | --- |
-| Windows | `ncm-studio-windows-x86_64.exe` |
+| Windows | `ncm-studio-windows-x86_64-setup.exe`（安装版）<br>`ncm-studio-windows-x86_64.exe`（便携版） |
 | Linux | `ncm-studio-linux-x86_64.AppImage` |
 | macOS | `ncm-studio-macos-arm64` |
 
-都是单文件，双击即可，**不需要装 Python，也不需要单独装 ncmctl**。
+除了 Windows 安装包，其余都是单文件，双击即可，**不需要装 Python，也不需要单独装 ncmctl**。
 
-- **Windows**：SmartScreen 可能提示「已保护你的电脑」，点「更多信息 → 仍要运行」。
+- **Windows**：两个文件内容相同，按习惯二选一。
+  - **安装版**装到当前用户的 `%LOCALAPPDATA%\Programs\NCM Studio`，会创建开始菜单
+    快捷方式（桌面图标可选），之后可在「设置 → 应用」里卸载。装到用户目录是刻意的：
+    程序内的自动更新要覆盖正在运行的 exe，装进 Program Files 就需要管理员权限，
+    普通用户点更新会静默失败。
+  - **便携版**不写注册表、不建快捷方式，放在哪里就从哪里运行；自动更新同样可用。
+  - 两者都可能触发 SmartScreen 提示「已保护你的电脑」，点「更多信息 → 仍要运行」。
+  - 安装版也会提交到 [winget-pkgs](https://github.com/microsoft/winget-pkgs)，
+    审核合并后可以直接：
+
+    ```powershell
+    winget install --id iamlinxuhan.NCMStudio -e
+    ```
 - **macOS**：首次打开会被 Gatekeeper 拦下，右键点图标选「打开」，或在终端执行
   `xattr -d com.apple.quarantine ./ncm-studio-macos-arm64`。
 - **Linux**：给执行位就行，不需要 FUSE，也不需要 libfuse2。
@@ -539,6 +551,9 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 # Windows SMTC：按钮/状态/循环模式/时间轴映射（纯函数，非 Windows 上只验降级）
 .venv/bin/python -m ncmgui.smtc
 
+# winget 清单生成：版本校验、Inno 参数、校验和大小写、输出路径
+.venv/bin/python scripts/winget_manifests.py --self-test
+
 # 证明随包的 mpv 真的能执行（打包产物自检用；源码运行则探测系统 mpv）
 .venv/bin/python main.py --mpv-version
 
@@ -563,6 +578,13 @@ pip install pyinstaller
 # Windows：单文件（解压 mpv 的 .7z 需要 7-Zip；没有时退回 pip install py7zr）
 NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
+
+# Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
+iscc /DAppVersion=3.0.12 packaging\ncm-studio.iss
+
+# 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
+python scripts/winget_manifests.py \
+  --installer dist/ncm-studio-windows-x86_64-setup.exe
 
 # macOS：单文件，不随包 mpv
 NCMGUI_BUNDLE_NCMCTL=1 pyinstaller ncm-studio.spec --noconfirm
@@ -606,7 +628,8 @@ CI（`.github/workflows/build.yaml`）在推 `main` 时会三平台各打一次�
 之后每次发版：
 
 1. 改版本号、提交、打 tag、推送（如 `v2.2.0`）；
-2. 等三平台 CI 跑完，确认草稿 Release 里三个安装包和 `SHA256SUMS` 都在；
+2. 等三平台 CI 跑完，确认草稿 Release 里三个平台的产物、Windows 安装包和
+   `SHA256SUMS` 都在；
 3. 本地签名、复核并转正：
 
    ```bash
@@ -615,6 +638,12 @@ CI（`.github/workflows/build.yaml`）在推 `main` 时会三平台各打一次�
 
    脚本会下载 `SHA256SUMS`、用离线私钥生成 `SHA256SUMS.sig`、上传，再用程序
    内置公钥复核一遍，全部通过才把草稿转为正式 Release。
+
+4. Release 转正会触发 `.github/workflows/winget.yaml`：下载安装版、重新计算
+   校验和、生成清单，并向 `microsoft/winget-pkgs` 提交 PR。这个工作流需要仓库
+   secret `WINGET_TOKEN` —— 一个带 `public_repo` 权限的 classic PAT（`GITHUB_TOKEN`
+   只能操作本仓库，开不了外部 PR）。没配时工作流会明确报错，补上 secret 后手动
+   重跑即可，不影响已经发布的版本。
 
 也可以随时独立复核从 Release 页面下载的两个文件：
 
@@ -649,6 +678,7 @@ scripts/
   fetch_ncmctl.py      下载并校验 ncmctl 到 vendor/（版本与 SHA-256 钉在里面）
   fetch_mpv.py         收集 mpv 到 vendor/mpv/（Linux 走 apt + ldd，Windows 走钉死的 .7z）
   release_sign.py      离线生成发布密钥、给 SHA256SUMS 签名并转正草稿 Release
+  winget_manifests.py  生成 winget-pkgs 清单（版本、安装器、中英文商店信息）
   make_icon.py         生成图标（纯几何绘制，不依赖字体）
 packaging/
   ncm-studio.png/.ico  图标，已入库（免得构建期还要装 Pillow）
@@ -657,6 +687,7 @@ packaging/
   bundle_libs.py       把 Qt 需要的系统库收进 AppDir
   check_glibc_floor.py 检查产物真正能跑的最低 glibc，超线即失败
   make_appimage.sh     组装 AppDir + 打 AppImage
+  ncm-studio.iss       Windows 安装包（Inno Setup 6），装到当前用户目录
 tests/
   gui_integration.py   下载页端到端测试（真实调接口、真实下载）
 ncmgui/
@@ -721,6 +752,9 @@ GPL-2.0-or-later 发布，可升级到 GPL-3.0 并与 AGPL-3.0 组合。默认�
 
 Windows 的系统媒体控件通过 [PyWinRT](https://github.com/pywinrt/pywinrt)（MIT）
 调用 Windows Runtime，相关投影包只会装进 Windows 产物。
+
+Windows 安装包由 [Inno Setup](https://jrsoftware.org/isinfo.php) 生成；安装界面的
+简体中文翻译取自其官方源码仓库（[packaging/ChineseSimplified.isl](packaging/ChineseSimplified.isl)）。
 
 流媒体播放用到的 [mpv](https://mpv.io/) 以 GPLv2+ 发布，它链接的 FFmpeg 等库各有
 自己的许可。Linux / Windows 的产物里随包分发 mpv，其来源、版本与版权文件放在
