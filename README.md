@@ -239,6 +239,10 @@ compatibility; download tag writing is not implemented"，实测下完的 flac �
 - **文件名对不上就不写。** 歌词要落到哪个文件上，是**扫输出目录反查**出来的，
   不是拿歌名去拼后缀：同一首歌可能落成 `.flac` 也可能 `.mp3`，重名时还会变成
   `歌曲(1).flac`，三种都得认。
+- **歌词对不上可以单曲校正。** 播放页的歌词菜单能把歌词整体提前 / 延后 0.5 秒。
+  本地歌曲的偏移按文件记在曲库数据库（`library.db` 的 `lyric_offsets`），下次
+  播放同一个文件自动恢复，重新扫描、换歌单都不丢；在线歌曲没有稳定的本地文件，
+  仍用配置里的全局偏移。选「偏移归零」会删掉这一首的记录。
 
 ## 封面
 
@@ -580,7 +584,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=3.0.12 packaging\ncm-studio.iss
+iscc /DAppVersion=3.0.13 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
@@ -705,7 +709,7 @@ ncmgui/
   smtc.py              Windows SMTC 服务：媒体键、任务栏「正在播放」与锁屏（PyWinRT）
   images.py            封面下载、放大、占位图与内存 LRU 缓存
   localmusic.py        本地音乐：文件名拆分、目录扫描（不依赖 Qt）
-  lyrics_service.py    歌词获取/解析/缓存与全局偏移，播放页和桌面歌词共用
+  lyrics_service.py    歌词获取/解析/缓存与偏移，播放页和桌面歌词共用
   download_manager.py  下载任务队列、失败重试与历史（JSON，0600）
   updater.py           GitHub Release 检查、校验与自我替换（不依赖 Qt）
   runner.py            subprocess + pty 封装，流式输出为信号（POSIX / Windows 双后端）

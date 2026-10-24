@@ -22,7 +22,7 @@ from typing import Any, Iterator, Sequence
 
 from ..config import config_dir
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def default_db_path() -> Path:
@@ -99,6 +99,13 @@ CREATE INDEX IF NOT EXISTS idx_play_events_started
     ON play_events(started_at);
 CREATE INDEX IF NOT EXISTS idx_play_events_track
     ON play_events(track_id);
+
+-- 本地歌曲的歌词偏移（毫秒）。按文件路径记而不是歌曲 ID：重扫、换歌单、
+-- 文件从下载目录挪走后再加回来，路径对得上就能恢复。0 不写行。
+CREATE TABLE IF NOT EXISTS lyric_offsets (
+    path      TEXT PRIMARY KEY,
+    offset_ms INTEGER NOT NULL
+);
 """
 
 
@@ -213,6 +220,34 @@ class LibraryDB:
             )
             return value
 
+    # ------------------------------------------------------------ 歌词偏移
+
+    @staticmethod
+    def _offset_key(path: str) -> str:
+        """偏移按文件路径记；先展开 ``~``，同一个文件别留下两种写法。"""
+        return str(Path(path).expanduser())
+
+    def lyric_offset(self, path: str) -> int:
+        """这首本地歌曲保存过的偏移；没有记录就是 0。"""
+        row = self.query_one(
+            "SELECT offset_ms FROM lyric_offsets WHERE path = ?",
+            (self._offset_key(path),),
+        )
+        return int(row["offset_ms"]) if row is not None else 0
+
+    def set_lyric_offset(self, path: str, offset_ms: int) -> None:
+        """写入某首歌的偏移；归零时删行，不给曲库留无意义的 0。"""
+        key = self._offset_key(path)
+        value = int(offset_ms)
+        if value == 0:
+            self.execute("DELETE FROM lyric_offsets WHERE path = ?", (key,))
+            return
+        self.execute(
+            "INSERT INTO lyric_offsets(path, offset_ms) VALUES(?, ?)"
+            " ON CONFLICT(path) DO UPDATE SET offset_ms = excluded.offset_ms",
+            (key, value),
+        )
+
     # ------------------------------------------------------------ 红心顺序
 
     def replace_liked_order(self, uid: int, bases: Sequence[str]) -> None:
@@ -307,6 +342,16 @@ def _selftest() -> int:
         check("红心顺序整体替换", db.liked_order(7), ["乙 - 二"])
         db.replace_liked_order(7, [])
         check("清空后视为无缓存", db.liked_order(7), None)
+
+        check("歌词偏移默认", db.lyric_offset("/music/a.flac"), 0)
+        db.set_lyric_offset("/music/a.flac", 800)
+        check("歌词偏移写入", db.lyric_offset("/music/a.flac"), 800)
+        check("歌词偏移按文件隔离", db.lyric_offset("/music/b.flac"), 0)
+        db.set_lyric_offset("/music/a.flac", -500)
+        check("歌词偏移覆盖", db.lyric_offset("/music/a.flac"), -500)
+        db.set_lyric_offset("/music/a.flac", 0)
+        check("归零删除记录", db.query_one(
+            "SELECT COUNT(*) AS n FROM lyric_offsets")["n"], 0)
 
         db.close()
         reopened = LibraryDB(path)

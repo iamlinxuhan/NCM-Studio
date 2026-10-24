@@ -3,12 +3,17 @@
 播放页和桌面歌词窗都需要同一份歌词。以前两者各自请求、各自解析，切歌时会
 重复读文件、重复打接口；这里集中缓存并按歌曲标识复用。
 
-偏移量单独存配置（毫秒）。正值表示歌词**晚出现**，即用
+偏移量单位是毫秒。正值表示歌词**晚出现**，即用
 ``播放位置 - offset/1000`` 去匹配歌词时间轴。
+
+本地歌曲的偏移按文件记在曲库数据库（``library.db`` 的 ``lyric_offsets``）：
+同一首歌下次播放自动恢复，换歌单或重新扫描都不丢。在线歌曲没有稳定的本地
+文件，仍用配置里的全局偏移。
 """
 
 from __future__ import annotations
 
+import sqlite3
 from collections import OrderedDict
 from pathlib import Path
 
@@ -55,6 +60,10 @@ class LyricsService(QObject):
         self._placeholder = "点一首歌，这里会显示歌词。"
         self._generation = 0
         self._task: BackgroundTask | None = None
+        #: 当前歌曲的本地路径；为空表示用全局偏移（在线歌曲 / 还没选歌）
+        self._offset_path: str | None = None
+        #: 最近一次按文件保存是否成功；写库失败时提示不能谎称「已记住」
+        self._offset_saved = True
 
         try:
             self._offset_ms = int(self.cfg.get("player.lyric_offset", 0) or 0)
@@ -91,6 +100,16 @@ class LyricsService(QObject):
     def offset_seconds(self) -> float:
         return self._offset_ms / 1000.0
 
+    @property
+    def offset_is_per_song(self) -> bool:
+        """当前偏移是否按本地文件记住（在线歌曲用全局配置）。"""
+        return self._offset_path is not None
+
+    @property
+    def offset_saved(self) -> bool:
+        """最近一次对本地歌曲的偏移调整是否成功写进曲库。"""
+        return self._offset_saved
+
     def display_position(self, position: float | None) -> float:
         """把 mpv 位置换算成歌词时间轴上的位置。"""
         try:
@@ -115,6 +134,7 @@ class LyricsService(QObject):
         self._key = key
         self._parsed = None
         self._task = None
+        self._apply_offset_scope(song)
 
         if song is None:
             self._emit(None, "点一首歌，这里会显示歌词。")
@@ -173,17 +193,71 @@ class LyricsService(QObject):
 
     # ------------------------------------------------------------ 偏移
 
-    def set_offset(self, milliseconds: int) -> None:
+    @staticmethod
+    def _local_path(song: Song | None) -> str:
+        return str(getattr(song, "path", "") or "")
+
+    @staticmethod
+    def _clamp(value) -> int:
         try:
-            value = int(milliseconds)
+            number = int(value)
         except (TypeError, ValueError):
-            return
-        value = max(-30000, min(30000, value))
+            return 0
+        return max(-30000, min(30000, number))
+
+    def _configured_offset(self) -> int:
+        return self._clamp(self.cfg.get("player.lyric_offset", 0) or 0)
+
+    def _apply_offset_scope(self, song: Song | None) -> None:
+        """切歌时换成这首歌该用的偏移。
+
+        本地文件按路径记，换歌单、重扫都不丢；在线歌曲没有稳定的本地文件，
+        继续用配置里的全局值。
+        """
+        path = self._local_path(song)
+        self._offset_path = path or None
+        self._offset_saved = True
+        self._set_offset_value(
+            self._read_song_offset(path) if path else self._configured_offset()
+        )
+
+    def _read_song_offset(self, path: str) -> int:
+        library = getattr(self.window, "library", None)
+        if library is None:
+            return 0
+        try:
+            return self._clamp(library.lyric_offset(path))
+        except (sqlite3.Error, OSError, ValueError):
+            return 0
+
+    def _save_song_offset(self, path: str, value: int) -> bool:
+        library = getattr(self.window, "library", None)
+        if library is None:
+            return False
+        try:
+            library.set_lyric_offset(path, value)
+        except (sqlite3.Error, OSError, ValueError):
+            return False
+        return True
+
+    def _set_offset_value(self, value: int) -> None:
+        value = self._clamp(value)
         if value == self._offset_ms:
             return
         self._offset_ms = value
-        self.cfg.set("player.lyric_offset", value)
-        self._save_timer.start()
+        self.offsetChanged.emit(value)
+
+    def set_offset(self, milliseconds: int) -> None:
+        value = self._clamp(milliseconds)
+        if value == self._offset_ms:
+            return
+        self._offset_ms = value
+        if self._offset_path:
+            # 本地歌曲：立刻落库。一次点击就两三个字节，不值得再排一个定时器。
+            self._offset_saved = self._save_song_offset(self._offset_path, value)
+        else:
+            self.cfg.set("player.lyric_offset", value)
+            self._save_timer.start()
         self.offsetChanged.emit(value)
 
     def nudge_offset(self, delta_ms: int) -> None:

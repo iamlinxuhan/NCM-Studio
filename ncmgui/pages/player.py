@@ -725,6 +725,9 @@ class PlayerPage(BasePage):
         later = menu.addAction("歌词延后 0.5 秒")
         reset = menu.addAction("偏移归零")
         reset.setEnabled(offset != 0)
+        if self.lyrics_service.offset_is_per_song:
+            hint = menu.addAction("本地歌曲：偏移按文件记住")
+            hint.setEnabled(False)
         menu.addSeparator()
         desktop = menu.addAction("桌面歌词…")
         desktop.setCheckable(True)
@@ -736,19 +739,32 @@ class PlayerPage(BasePage):
             self._copy_lyrics()
         elif chosen is earlier:
             self.lyrics_service.nudge_offset(-500)
-            self.toast(f"歌词偏移 {self.lyrics_service.offset_ms / 1000:+.1f} 秒")
+            self._toast_offset()
         elif chosen is later:
             self.lyrics_service.nudge_offset(500)
-            self.toast(f"歌词偏移 {self.lyrics_service.offset_ms / 1000:+.1f} 秒")
+            self._toast_offset()
         elif chosen is reset:
             self.lyrics_service.set_offset(0)
-            self.toast("歌词偏移已归零")
+            self._toast_offset(reset=True)
         elif chosen is desktop:
             hook = getattr(self.window, "toggle_desktop_lyrics", None)
             if callable(hook):
                 hook()
             else:
                 self.toast("当前环境不支持桌面歌词")
+
+    def _toast_offset(self, *, reset: bool = False) -> None:
+        if reset:
+            text = "歌词偏移已归零"
+        else:
+            text = f"歌词偏移 {self.lyrics_service.offset_ms / 1000:+.1f} 秒"
+        if self.lyrics_service.offset_is_per_song:
+            saved = self.lyrics_service.offset_saved
+            if reset:
+                text += "，本曲单独记录已清除" if saved else "，但没能清除本曲记录"
+            else:
+                text += "，已记住这首歌" if saved else "，但没能写入曲库"
+        self.toast(text)
 
     def _copy_lyrics(self) -> None:
         lines = self.lyrics_service.lines
