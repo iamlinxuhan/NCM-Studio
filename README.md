@@ -1,7 +1,8 @@
 # NCM Studio
 
-**网易云音乐的第三方桌面客户端**：PyQt6 编写，支持 Windows / Linux / macOS。
-内置 `ncmctl` 与 mpv，下载即用，不需要额外安装 Python 或命令行工具。
+**网易云音乐的第三方桌面客户端**：基于 [`ncmctl`](https://github.com/chaunsin/netease-cloud-music) 构建，
+PyQt6 编写，支持 Windows / Linux / macOS。内置 `ncmctl` 与 mpv，下载即用，
+不需要额外安装 Python 或命令行工具。
 
 <p align="center">
   <a href="https://github.com/iamlinxuhan/NCM-Studio/releases/latest"><img src="https://img.shields.io/github/v/release/iamlinxuhan/NCM-Studio?style=flat-square&label=release" alt="最新版本"></a>
