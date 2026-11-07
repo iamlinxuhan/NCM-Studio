@@ -310,11 +310,16 @@ class LikedPage(BasePage):
         self.search.textChanged.connect(lambda _text: self._search_timer.start())
         layout.addWidget(self.search, 1)
 
+        # 红心页保留自己的档位：从这一页开始的队列按它取链，发现、搜索等
+        # 页面则统一用「设置 → 在线音质」。留空表示跟随全局设置。
         self.level_combo = QComboBox()
         for label, value in ncmctl.DOWNLOAD_LEVELS:
             self.level_combo.addItem(label, value)
-        set_combo_data(self.level_combo, self.playback.level)
-        self.level_combo.setToolTip("流播音质。改动对下一首生效，不影响正在播放的这一首。")
+        set_combo_data(self.level_combo, self._liked_level())
+        self.level_combo.setToolTip(
+            "红心页专属音质：只影响从本页开始的播放。发现、搜索等页面用"
+            "「设置 → 在线音质」。改动对下一首生效。"
+        )
         layout.addWidget(self.level_combo)
 
         self.refresh_btn = ghost_button("刷新")
@@ -527,6 +532,9 @@ class LikedPage(BasePage):
             return
 
         songs = self.model.songs()
+        # 从红心页开始的队列用自己的档位；换成别的页面的队列时再切回全局。
+        self.playback.set_level_scope("liked")
+        self.playback.set_level(self._liked_level())
         # 队列不是这份红心歌单（例如刚才在播本地音乐）时，先换回来
         if [item.id for item in self.playback.queue] != [item.id for item in songs]:
             self.playback.set_queue(songs, row)
@@ -543,8 +551,24 @@ class LikedPage(BasePage):
         # 因为点一下就是「开始出声」
         self.model.set_paused(state != STATE_PLAYING)
 
+    # ---------------------------------------------------------------- 音质
+
+    def _liked_level(self) -> str:
+        """红心页自己的档位；没设置过就跟随「设置 → 在线音质」。"""
+        value = str(self.cfg.get("player.liked_level", "") or "")
+        return value or str(self.cfg.get("player.level", "exhigh") or "exhigh")
+
     def _on_level_changed(self, _index: int) -> None:
-        self.playback.set_level(combo_data(self.level_combo, "exhigh"))
+        value = combo_data(self.level_combo, "exhigh")
+        self.cfg.set("player.liked_level", value)
+        # 只有当前队列本来就属于红心页时才立刻换档；正在从发现页播的队列
+        # 不应该被这里的改动带跑。
+        if self.playback.level_scope == "liked":
+            self.playback.set_level(value)
+        try:
+            self.cfg.save()
+        except OSError:
+            pass
 
     def local_path(self, song: Song) -> Path | None:
         """给 controller 用：这首歌在下载目录里有对应的文件吗。"""

@@ -73,6 +73,16 @@ _READ_CHUNK = 65536
 #: 匹配「可能被分块读取截断」的转义序列尾部
 _PARTIAL_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*|\][^\x07\x1b]*)?$")
 
+#: 光标上移，例如 ``\x1b[6A``。多行进度条（ncmctl 的 pb pool）靠它把光标
+#: 移回进度块首行再重画，行尾却是货真价实的 ``\n`` —— 直接按行追加会让每一
+#: 帧都留在日志里，终端里的「原地刷新」就变成满屏重复。
+_CURSOR_UP_RE = re.compile(r"\x1b\[(\d*)A")
+
+#: ``_strip_stream`` 与 ``_consume`` 之间传递重绘请求的私有标记。日志里不可能
+#: 出现 NUL，不会被误认。
+_REWIND_TOKEN = "\x00UP{}\x00"
+_TOKEN_RE = re.compile(r"\x00UP(\d+)\x00|([\r\n])")
+
 #: 伪终端的尺寸（行、列）。``pty.openpty()`` 给的是 0x0，ConPTY 默认 24x80，
 #: pb 这种进度条库会据此算出宽度 —— 太窄会把文件名截成省略号，0 则整条渲染
 #: 成空白。窗口本身能不能显示这么多列无所谓，反正输出是流式读走的。
@@ -355,6 +365,7 @@ class JobRunner(QObject):
     * ``started()``                进程真正跑起来了
     * ``output(str)``              一整行输出（含空行）
     * ``progress(str)``            ``\\r`` 刷新的一行，界面应当覆盖上一行
+    * ``rewind(int)``              接下来 n 行要原地替换最后 n 行（多行进度块重绘）
     * ``finished(int, float)``     退出码与耗时（秒）；被信号杀死时退出码为负
     * ``failed(str)``              连启动都没成功，或进程异常
     """
@@ -362,6 +373,7 @@ class JobRunner(QObject):
     started = pyqtSignal()
     output = pyqtSignal(str)
     progress = pyqtSignal(str)
+    rewind = pyqtSignal(int)
     finished = pyqtSignal(int, float)
     failed = pyqtSignal(str)
 
@@ -547,31 +559,41 @@ class JobRunner(QObject):
     # ------------------------------------------------------------------ 输出
 
     def _strip_stream(self, text: str) -> str:
-        """清除 ANSI 序列；对可能被分块截断的转义序列留到下一块再处理。"""
+        """清除 ANSI 序列；对可能被分块截断的转义序列留到下一块再处理。
+
+        光标上移不能直接丢掉：它是「重画上面几行」的唯一信号。先换成私有
+        标记，交给 ``_consume`` 发成 ``rewind``，其余转义照常剥掉。
+        """
         text = self._ansi_carry + text
         self._ansi_carry = ""
         match = _PARTIAL_ESCAPE_RE.search(text)
         if match:
             self._ansi_carry = text[match.start():]
             text = text[:match.start()]
+        text = _CURSOR_UP_RE.sub(
+            lambda m: _REWIND_TOKEN.format(int(m.group(1) or 1)), text)
         return ncmctl.strip_ansi(text)
 
     def _consume(self, text: str) -> None:
-        """按 ``\\n`` / ``\\r`` 切分。
+        """按 ``\\n`` / ``\\r`` / 光标上移切分流。
 
-        ``\\n`` 结尾的一段是正式日志行；``\\r`` 结尾的一段是进度刷新。
-        以 ``\\r`` 分隔的进度条最终会以一个 ``\\n`` 收尾，那一版会成为正式行。
+        ``\\n`` 结尾的一段是正式日志行；``\\r`` 结尾的一段是单行进度刷新；
+        光标上移（``rewind``）表示接下来 n 行要覆盖最后 n 行 —— pb pool 的
+        多行进度块就是这么重画的，每一版行尾都有 ``\\n``，不单独处理就会
+        在日志里留下一帧又一帧的重复进度条。
         """
         buf = self._partial + text
         self._partial = ""
         start = 0
-        for index, char in enumerate(buf):
-            if char == "\n":
-                self.output.emit(buf[start:index].rstrip())
-                start = index + 1
-            elif char == "\r":
-                segment = buf[start:index].rstrip()
+        for match in _TOKEN_RE.finditer(buf):
+            segment = buf[start:match.start()].rstrip()
+            if match.group(1) is not None:
                 if segment:
-                    self.progress.emit(segment)
-                start = index + 1
+                    self.output.emit(segment)
+                self.rewind.emit(max(1, int(match.group(1))))
+            elif match.group(2) == "\n":
+                self.output.emit(segment)
+            elif segment:
+                self.progress.emit(segment)
+            start = match.end()
         self._partial = buf[start:]

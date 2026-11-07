@@ -10,6 +10,7 @@ import time
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -82,7 +83,6 @@ class DiscoverPage(BasePage):
 
     def build(self) -> None:
         self.actions = self.window.actions
-        self._fm_task = None
         self._build_search_bar()
         self._build_quick_tiles()
         self._build_hero()
@@ -128,19 +128,33 @@ class DiscoverPage(BasePage):
         self.content.addWidget(pill)
 
     def _build_quick_tiles(self) -> None:
-        row = QHBoxLayout()
-        row.setSpacing(10)
+        # 六个入口排成两行三列；单行六个在窄窗口里会把说明文字挤没
+        grid = QGridLayout()
+        grid.setSpacing(10)
         entries = (
             ("◈", "每日推荐", "每天 6 点更新", self._open_daily),
-            ("◉", "私人 FM", "为你不停推荐", self._play_fm),
+            ("◎", "私人雷达", "每天按口味推荐", self._open_radar),
+            ("▲", "排行榜", "飙升 / 新歌 / 热歌", self._open_charts),
+            ("◉", "私人 FM", "为你不停推荐", lambda: self.window.show_page("roam")),
             ("♡", "我喜欢的音乐", "红心歌单", lambda: self.window.show_page("liked")),
             ("⟲", "最近播放", "接着上次听", lambda: self.window.show_page("history")),
         )
-        for glyph, title, subtitle, slot in entries:
+        for index, (glyph, title, subtitle, slot) in enumerate(entries):
             tile = QuickTile(glyph, title, subtitle)
             tile.clicked.connect(slot)
-            row.addWidget(tile, 1)
-        self.content.addLayout(row)
+            grid.addWidget(tile, index // 3, index % 3)
+        self.content.addLayout(grid)
+
+    def _open_radar(self) -> None:
+        # 私人雷达本质上是一个每天更新的官方歌单，直接复用歌单详情页
+        if not self.window.is_logged_in():
+            self.toast("登录后才能查看私人雷达。")
+            self.window.show_page("account")
+            return
+        self.window.open_detail("playlist", 3136952023)
+
+    def _open_charts(self) -> None:
+        self.window.show_page("charts")
 
     def _greeting_text(self) -> str:
         hour = time.localtime().tm_hour
@@ -185,27 +199,6 @@ class DiscoverPage(BasePage):
             return
         if not self._daily_table_visible:
             self._toggle_daily_table()
-
-    def _play_fm(self) -> None:
-        if not self.require_login("私人 FM"):
-            return
-        if self._fm_task is not None and self._fm_task.is_running:
-            return
-        client = self.window.client
-        task = BackgroundTask(lambda: client.personal_fm(), parent=self)
-        self._fm_task = task
-        task.done.connect(self._on_fm_loaded)
-        task.failed.connect(lambda message: self.toast(f"私人 FM 加载失败：{message}"))
-        self.toast("正在加载私人 FM…")
-        task.start()
-
-    def _on_fm_loaded(self, songs) -> None:
-        songs = list(songs or [])
-        if not songs:
-            self.toast("私人 FM 暂时没有返回歌曲。")
-            return
-        self.actions.play_all(songs)
-        self.toast(f"私人 FM：{len(songs)} 首")
 
     def _build_hero(self) -> None:
         card = Card("每日推荐", "每天 6 点更新，按你的口味挑 30 首。")

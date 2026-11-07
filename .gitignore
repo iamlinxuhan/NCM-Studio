@@ -39,6 +39,10 @@ signing-key*.pem
 *.log
 /tmp-shots/
 
+# 用 scripts/browser-hook 抓下来的真实接口响应：里面有账号、歌单与评论原文，
+# 只用于本地比对，绝不入库
+/ncm-hook-*.json
+
 # 本地推广视频脚本：依赖本机字体、录屏素材与 ffmpeg/NVENC，
 # 只用于制作演示视频，不入库、不参与打包
 /promo_build.py

@@ -1,7 +1,7 @@
 ; NCM Studio 的 Windows 安装包（Inno Setup 6）。
 ;
 ; 构建（CI 与本地相同）：
-;   iscc /DAppVersion=3.0.12 packaging\ncm-studio.iss
+;   iscc /DAppVersion=4.0.0 packaging\ncm-studio.iss
 ;
 ; 产物：dist\ncm-studio-windows-x86_64-setup.exe
 ;

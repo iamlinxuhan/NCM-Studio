@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # 允许直接 `python main.py` 而不必先安装成包
@@ -34,6 +36,7 @@ from PyQt6.QtGui import (  # noqa: E402
     QPainter,
     QPixmap,
 )
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
@@ -42,6 +45,65 @@ from ncmgui.config import Config, config_dir, default_music_dir  # noqa: E402
 from ncmgui.lyrics import TimedLine, Word  # noqa: E402
 from ncmgui.resources import ICON_PATH  # noqa: E402
 from ncmgui.window import MainWindow  # noqa: E402
+
+
+def _instance_socket_name() -> str:
+    """单实例通信号的名称，按配置目录派生，换配置目录互不干扰。"""
+    digest = hashlib.sha1(str(config_dir()).encode("utf-8")).hexdigest()[:12]
+    return f"{APP_ID}-{digest}"
+
+
+def _activate_running_instance(name: str, attempts: int = 10) -> bool:
+    """请已经在跑的实例把主窗口调出来。
+
+    任务栏/启动器在程序运行时再点一次，系统会重新拉起一个进程；旧行为是弹一句
+    「已经在运行」就把新进程退掉，主窗口最小化或藏到托盘时用户根本回不去。
+    现在改成通过本地套接字通知原进程显示窗口。连不上说明原进程没在监听
+    （旧版本或正在启动），交给调用方兜底。
+    """
+    for index in range(attempts):
+        socket = QLocalSocket()
+        socket.connectToServer(name)
+        if socket.waitForConnected(200):
+            socket.write(b"activate")
+            socket.flush()
+            socket.waitForBytesWritten(300)
+            socket.disconnectFromServer()
+            return True
+        socket.abort()
+        if index + 1 < attempts:
+            time.sleep(0.1)
+    return False
+
+
+def _start_activation_server(name: str, window_getter):
+    """抢到实例锁后监听激活请求；返回的 server 需要一直持有。"""
+    server = QLocalServer()
+    if not server.listen(name):
+        return None
+
+    def _activate() -> None:
+        window = window_getter()
+        if window is None:
+            # 主窗口还在构造（监听早于它），稍后再试
+            QTimer.singleShot(300, _activate)
+            return
+        window.activate_from_launcher()
+
+    def _on_connection() -> None:
+        got = False
+        while True:
+            connection = server.nextPendingConnection()
+            if connection is None:
+                break
+            connection.disconnectFromServer()
+            connection.deleteLater()
+            got = True
+        if got:
+            _activate()
+
+    server.newConnection.connect(_on_connection)
+    return server
 
 
 def _icon_ink(icon: QIcon) -> QColor | None:
@@ -85,6 +147,9 @@ def _self_test(window: MainWindow) -> int:
         "tools",
         "account",
         "settings",
+        "mv",
+        "me",
+        "charts",
     }
     missing = expected - set(window.pages)
     if missing:
@@ -101,8 +166,9 @@ def _self_test(window: MainWindow) -> int:
     nav_keys = [item[0] for item in NAV_ITEMS]
     if list(window._nav_buttons) != nav_keys:
         problems.append("侧边栏按钮与 NAV_ITEMS 不一致")
+    extra_keys = {key for key, *_ in EXTRA_PAGES}
     for key in window.pages:
-        if PAGE_NAV.get(key, key) not in window._nav_buttons:
+        if key not in extra_keys and PAGE_NAV.get(key, key) not in window._nav_buttons:
             problems.append(f"页面 {key} 没有对应的侧边栏入口")
         if key not in window._nav_index:
             problems.append(f"页面 {key} 没有 stack 索引")
@@ -984,11 +1050,18 @@ def main(argv: list[str] | None = None) -> int:
     # 同一份配置、曲库和播放器只允许一个实例使用：两个实例同时写 SQLite、
     # 写配置或下载同一批文件会互相覆盖。自检/截图可以并行，不参与抢锁。
     _instance_lock = None
+    _activation_server = None
+    _socket_name = _instance_socket_name()
+    # 主窗口构造期间就可能有第二次启动连进来，用可变容器占位
+    _window_ref: list = [None]
     if not self_test and not screenshot_dir:
         _instance_lock = QLockFile(str(config_dir() / "ncm-studio.lock"))
         # 只按「持锁进程是否还活着」判断失效；程序被挂起再久也不抢锁
         _instance_lock.setStaleLockTime(0)
         if not _instance_lock.tryLock(100):
+            if _activate_running_instance(_socket_name):
+                # 原实例已经把主窗口调出来了，本进程安静退出
+                return 0
             QMessageBox.information(
                 None,
                 APP_NAME,
@@ -996,6 +1069,10 @@ def main(argv: list[str] | None = None) -> int:
                 "同一时间只允许一个实例，避免配置、曲库和下载互相覆盖。",
             )
             return 0
+        # 持锁成功说明没有活着的实例，清掉上次异常退出留下的套接字文件
+        QLocalServer.removeServer(_socket_name)
+        _activation_server = _start_activation_server(
+            _socket_name, lambda: _window_ref[0])
 
     # 自动更新是原地替换内容，文件名不会自己变。用户文件名里如果带着版本号，
     # 这里把它对齐到当前版本，并同步改掉 .desktop 的 Exec —— 否则会出现
@@ -1005,6 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
         updater.sync_appimage_name()
 
     window = MainWindow(cfg)
+    _window_ref[0] = window
     if window.start_maximized:
         window.showMaximized()
     else:

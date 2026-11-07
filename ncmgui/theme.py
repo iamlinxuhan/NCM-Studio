@@ -339,6 +339,17 @@ QWidget#NavGroup {
     padding: 14px 16px 4px 16px;
 }
 
+/* 侧栏分组分隔线：只占一条像素，靠上下留白分组，不用标题也能看清 */
+
+QWidget#NavSeparatorHolder {
+    background: transparent;
+}
+
+QFrame#NavSeparator {
+    background: $BORDER;
+    border: none;
+}
+
 /* 侧边栏与账号页的账号卡片 */
 
 QFrame#ProfileCard {
@@ -468,6 +479,49 @@ QLabel#CardTitle {
 
 QLabel#CardSubtitle {
     color: $TEXT_DIM;
+    font-size: 12px;
+}
+
+/* 用户主页头部：等级、VIP、关注/粉丝这些信息不能再用 11px 的 Hint，
+   否则和大号昵称放在一起会显得缩成一团 */
+
+QLabel#UserMeta {
+    color: $TEXT_DIM;
+    font-size: 14px;
+}
+
+QLabel#UserSignature {
+    color: $TEXT_MUTE;
+    font-size: 13px;
+}
+
+QLabel#UserName {
+    color: $TEXT;
+    font-size: 26px;
+    font-weight: 700;
+}
+
+QLabel#UserCount {
+    color: $TEXT_DIM;
+    font-size: 17px;
+}
+
+QLabel#VipBadge {
+    color: $AMBER;
+    background: $AMBER_WASH;
+    border: 1px solid $AMBER_EDGE;
+    border-radius: 9px;
+    padding: 1px 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QLabel#LevelBadge {
+    color: $TEXT_DIM;
+    background: $PANEL_HI;
+    border: 1px solid $BORDER;
+    border-radius: 9px;
+    padding: 1px 8px;
     font-size: 12px;
 }
 

@@ -106,6 +106,40 @@ class ConsoleView(QPlainTextEdit):
         cursor.insertText(text, fmt)
         self._autoscroll()
 
+    def replace_last_lines(self, rows: list[tuple[str, str]]) -> None:
+        """把最后若干行原地替换成新内容（多行进度块重绘）。
+
+        pb 的并行进度块每帧先 ``\\x1b[nA`` 把光标移回块首，再逐行重画 ——
+        那些行尾是真正的 ``\\n``。只按行追加的话，终端里的「原地刷新」就变成
+        日志里一层层的残影。``rows`` 是 ``(文本, 颜色)`` 列表，长度就是重绘的
+        行数；历史不够长时就覆盖多少算多少。
+        """
+        if not rows:
+            return
+        document = self.document()
+        cursor = QTextCursor(document)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        for _ in range(len(rows) - 1):
+            if not cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock):
+                break
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(
+            QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor
+        )
+        cursor.removeSelectedText()
+
+        # 删掉尾部之后光标停在一个空块上，第一行直接写进去；
+        # 再 insertBlock 会多出一个空行
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        for index, (text, color) in enumerate(rows):
+            if index:
+                cursor.insertBlock()
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color or theme.CONSOLE_TEXT))
+            cursor.insertText(text, fmt)
+        self._progress_active = False
+        self._autoscroll()
+
     def append_progress(self, text: str, color: str | None = None) -> None:
         """进度刷新：覆盖最后一行，而不是不断追加。"""
         document = self.document()
@@ -185,6 +219,9 @@ class ConsolePanel(QWidget):
         #: 可选的「行变换器」。返回改写后的整行就按标记色显示，返回 None
         #: 表示这行跟它无关、走默认配色。下载页用它给 VIP 的进度行打标记。
         self._tagger: Callable[[str], str | None] | None = None
+        #: 多行进度块重绘：``rewind(n)`` 之后要收集 n 行，整块替换最后 n 行
+        self._rewind_left = 0
+        self._rewind_rows: list[tuple[str, str]] = []
 
         # ------------------------------------------------------------ 顶部栏
         self.title_label = QLabel(title)
@@ -240,7 +277,7 @@ class ConsolePanel(QWidget):
         # ------------------------------------------------------------ 连接
         self.stop_button.clicked.connect(self._on_stop)
         self.copy_button.clicked.connect(self._copy_command)
-        self.clear_button.clicked.connect(self.view.clear_log)
+        self.clear_button.clicked.connect(self._on_clear)
         self.export_button.clicked.connect(self._export)
         self.close_button.clicked.connect(self.closeRequested.emit)
 
@@ -282,6 +319,7 @@ class ConsolePanel(QWidget):
         runner.started.connect(self._on_started)
         runner.output.connect(self._on_output)
         runner.progress.connect(self._on_progress)
+        runner.rewind.connect(self._on_rewind)
         runner.finished.connect(self._on_finished)
         runner.failed.connect(self._on_failed)
 
@@ -303,14 +341,20 @@ class ConsolePanel(QWidget):
         # 进度条实际是走 output 过来的（pb 打的是 "\r<行>\n"），所以这里也要过
         # 一遍标注器 —— 下载时的 VIP 标记主要就是在这条路径上加的
         marked = self._tagger(text) if self._tagger else None
-        if marked is not None:
-            self._raw.append(marked)
-            self.view.append_line(marked, theme.CONSOLE_AMBER)
+        display = marked if marked is not None else text
+        color = theme.CONSOLE_AMBER if marked is not None else classify(text)
+        if self._rewind_left > 0:
+            self._rewind_rows.append((display, color))
+            self._rewind_left -= 1
+            if self._rewind_left == 0:
+                self._flush_rewind()
             return
-        self._raw.append(text)
-        self.view.append_line(text, classify(text))
+        self._raw.append(display)
+        self.view.append_line(display, color)
 
     def _on_progress(self, text: str) -> None:
+        # 单行 \r 刷新和整块重绘不要交叉，先把没落地的进度块放下去
+        self._flush_rewind()
         text = self._scrub(text)
         marked = self._tagger(text) if self._tagger else None
         if marked is not None:
@@ -318,12 +362,38 @@ class ConsolePanel(QWidget):
             return
         self.view.append_progress(text)
 
+    def _on_rewind(self, count: int) -> None:
+        """接下来 count 行要覆盖最后 count 行（pb 多行进度块重绘）。"""
+        # 上一帧没收满就来了新的，先把已有的落地，免得后面的正常日志被吞
+        self._flush_rewind()
+        self._rewind_left = max(1, int(count))
+
+    def _flush_rewind(self) -> None:
+        rows, self._rewind_rows = self._rewind_rows, []
+        self._rewind_left = 0
+        if not rows:
+            return
+        self.view.replace_last_lines(rows)
+        # 只把最后一版写进导出日志，中间帧是终端上的临时画面：
+        # 先把上一帧留下的那几行从 _raw 里删掉，再写这一版
+        if len(self._raw) >= len(rows):
+            del self._raw[-len(rows):]
+        self._raw.extend(text for text, _ in rows)
+
+    def _on_clear(self) -> None:
+        self._rewind_left = 0
+        self._rewind_rows = []
+        self.view.clear_log()
+
     def _on_failed(self, message: str) -> None:
+        self._flush_rewind()
         message = self._scrub(message)
         self._raw.append(message)
         self.view.append_line(message, theme.CONSOLE_RED)
 
     def _on_finished(self, code: int, seconds: float) -> None:
+        # 最后一帧如果没凑满行数（进程在重绘中途退出），先把画面落地
+        self._flush_rewind()
         self._tick.stop()
         self.stop_button.setEnabled(False)
         self.stdin_bar.setVisible(False)
@@ -348,6 +418,7 @@ class ConsolePanel(QWidget):
 
     def _on_stop(self) -> None:
         if self.runner and self.runner.is_running:
+            self._flush_rewind()
             self.stop_button.setEnabled(False)
             self.stop_button.setText("停止中…")
             self.view.append_line("─ 正在请求停止…", theme.CONSOLE_AMBER)
@@ -356,6 +427,7 @@ class ConsolePanel(QWidget):
     def _send_stdin(self) -> None:
         text = self.stdin_bar.text()
         if self.runner and self.runner.is_running:
+            self._flush_rewind()
             self.runner.send_line(text)
             if self._sensitive_input:
                 # 只留「送进去了」这个事实，不留内容。导出日志用的 _raw 也

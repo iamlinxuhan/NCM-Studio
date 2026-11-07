@@ -4,15 +4,35 @@
 ``WindowStaysOnTopHint`` 生效，因此设置里明确标成「可能不置顶」，而不是
 假装所有合成器都支持。
 
+**默认是一层淡灰色半透明底**（不是全透明，也不是黑框）：压在白壁纸或深色
+代码窗口上都能一眼找到歌词层，又不刺眼。想要完全盖住背景时用右键菜单打开
+「不透明背景」。
+
+逐字效果与播放页一致：``QTextLayout`` 之外用一条横向 alpha 渐变做遮罩，
+幕布边缘落在字内部时也是连续渐变；普通 LRC 没有字时间时用
+:func:`ncmgui.lyrics.words_for` 均摊出伪逐字，动画不会因为换了歌单就消失。
+
 位置、尺寸、字号、锁定状态写进 ``player.desktop_lyrics``。锁定只禁止拖动，
 不做点击穿透 —— 真正的穿透需要 layer-shell，Qt 跨平台 API 给不了；与其让
-窗口变成一块点不动的区域，不如保留右键菜单可以解锁。
+窗口变成一块点不动的区域，不如保留右键菜单可以解锁。右上角常驻一个关闭按钮。
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPen
+from dataclasses import replace
+
+from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QImage,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from .. import lyrics, theme
@@ -21,6 +41,18 @@ from ..playback import STATE_PLAYING
 
 #: 幕布推进间隔。和播放页的逐字定时器一致
 TICK_MS = 33
+
+#: 桌面歌词的配色**不跟着应用主题走**：背景是透明/壁纸，浅色主题的 TEXT
+#: 是深灰，压上去几乎看不见。固定成“白字 + 青色幕布 + 黑色描边”在哪都清楚。
+UNPLAYED_COLOR = QColor(255, 255, 255, 214)
+PLAYED_COLOR = QColor(53, 214, 255)
+OUTLINE_COLOR = QColor(0, 0, 0, 190)
+TRANSLATION_COLOR = QColor(255, 255, 255, 170)
+CLOSE_COLOR = QColor(255, 255, 255, 170)
+CLOSE_HOVER_COLOR = QColor(255, 255, 255, 235)
+
+#: 幕布软边宽度：字号倍数，和播放页 LyricLineWidget 保持一致
+CURTAIN_BAND = 0.8
 
 
 class DesktopLyricsWindow(QWidget):
@@ -49,6 +81,7 @@ class DesktopLyricsWindow(QWidget):
             options = {}
         self._locked = bool(options.get("locked", False))
         self._opaque = bool(options.get("opaque", False))
+        self._auto_start = bool(options.get("auto_start", False))
         self._translation = bool(options.get("translation", True))
         try:
             self._font_size = max(14, min(64, int(options.get("font_size", 26))))
@@ -69,6 +102,8 @@ class DesktopLyricsWindow(QWidget):
         self._anchor: tuple[float, float] | None = None
         self._drag_offset: QPoint | None = None
         self._drag_moved = False
+        self._close_hover = False
+        self._close_pressed = False
 
         self._ticker = QTimer(self)
         self._ticker.setInterval(TICK_MS)
@@ -142,6 +177,7 @@ class DesktopLyricsWindow(QWidget):
     def _persist(self) -> None:
         options = {
             "enabled": self.isVisible(),
+            "auto_start": self._auto_start,
             "locked": self._locked,
             "x": self.x(),
             "y": self.y(),
@@ -176,7 +212,13 @@ class DesktopLyricsWindow(QWidget):
         current = self.playback.current
         if song_key(song) != song_key(current):
             return
-        self._lines = list(parsed.lines) if parsed is not None else []
+        # 普通 LRC 只有行级时间。这里也补一份均摊的“伪逐字”，否则
+        # lyrics.curtain_char() 因为没有 words 直接返回 0，幕布永远不动，
+        # 表现就是“根本没有逐字歌词”。
+        self._lines = [
+            line if line.words else replace(line, words=lyrics.words_for(line))
+            for line in (parsed.lines if parsed is not None else [])
+        ]
         self._placeholder = placeholder or (current.name if current is not None else "桌面歌词")
         self._reposition()
         self.update()
@@ -232,18 +274,25 @@ class DesktopLyricsWindow(QWidget):
             return self._lines[self._index]
         return None
 
+    def _close_rect(self) -> QRectF:
+        return QRectF(self.width() - 32.0, 6.0, 26.0, 26.0)
+
     def paintEvent(self, _event) -> None:  # noqa: N802 - Qt 命名
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        # 默认是**淡灰色半透明底**，不是全透明：有一层很淡的浅灰才看得出
+        # 歌词层的范围，压在白壁纸或深色代码窗口上都不刺眼。
+        # 想要完全盖住背景时用右键菜单打开「不透明背景」。
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
-        dark = theme.is_dark()
         if self._opaque:
             background = QColor(theme.PANEL)
             background.setAlpha(238)
             border = QColor(theme.BORDER)
         else:
-            background = QColor(8, 12, 20, 150 if dark else 205)
-            border = QColor(255, 255, 255, 40 if dark else 120)
+            background = QColor(214, 219, 228, 96)
+            border = QColor(255, 255, 255, 52)
         painter.setPen(QPen(border, 1.0))
         painter.setBrush(background)
         painter.drawRoundedRect(rect, 14.0, 14.0)
@@ -257,83 +306,165 @@ class DesktopLyricsWindow(QWidget):
         font = QFont(self.font())
         font.setPixelSize(self._font_size)
         font.setBold(True)
-        painter.setFont(font)
         metrics = QFontMetrics(font)
-        text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, max(20, self.width() - 44))
-        text_rect = QRectF(22, 14 if translation else 0, self.width() - 44, self.height())
-        if not translation:
-            text_rect.setHeight(self.height())
-        else:
-            text_rect.setHeight(self.height() - 32)
+        limit = max(40, self.width() - 52)
+        shown = metrics.elidedText(text, Qt.TextElideMode.ElideRight, limit)
 
-        ink = QColor(theme.TEXT)
-        played = QColor(theme.CYAN)
-        unplayed = QColor(theme.TEXT)
-        unplayed.setAlpha(135)
+        main_height = self.height() - (34 if translation else 0)
+        area = QRectF(26.0, 0.0, max(20.0, self.width() - 52.0), float(main_height))
+        baseline = area.y() + (
+            area.height() + metrics.ascent() - metrics.descent()) / 2.0
+        text_width = float(metrics.horizontalAdvance(shown))
+        x = area.x() + (area.width() - text_width) / 2.0
 
-        # 文字阴影：透明背景上只靠颜色对比，压不住复杂壁纸
-        shadow = QColor(0, 0, 0, 160 if dark else 70)
-        for dx, dy in ((1, 1), (-1, 1), (0, 2)):
-            painter.setPen(shadow)
-            painter.drawText(text_rect.translated(dx, dy), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, text)
+        path = QPainterPath()
+        path.addText(QPointF(x, baseline), font, shown)
+        # 描边先画：中心线描边会被随后的填充盖掉一半，剩下的正好是外轮廓
+        pen = QPen(OUTLINE_COLOR, max(2.0, self._font_size * 0.10))
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.fillPath(path, UNPLAYED_COLOR)
 
-        painter.setPen(unplayed)
-        painter.drawText(
-            text_rect,
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-            text,
-        )
-
-        if line is not None:
-            fraction = self._played_fraction(line)
-            if fraction > 0:
-                painter.save()
-                clip = QRectF(text_rect)
-                clip.setWidth(text_rect.width() * fraction)
-                painter.setClipRect(clip)
-                painter.setPen(played)
-                painter.drawText(
-                    text_rect,
-                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-                    text,
-                )
-                painter.restore()
+        if line is not None and text:
+            curtain_x = self._curtain_x(line, x, text_width)
+            if curtain_x is not None:
+                self._paint_curtain(painter, path, curtain_x, font)
 
         if translation:
             small = QFont(font)
             small.setPixelSize(max(11, int(self._font_size * 0.62)))
             small.setBold(False)
-            painter.setFont(small)
-            painter.setPen(QColor(theme.TEXT_DIM))
-            painter.drawText(
-                QRectF(22, text_rect.bottom() - 2, self.width() - 44, 30),
-                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-                QFontMetrics(small).elidedText(
-                    translation, Qt.TextElideMode.ElideRight, max(20, self.width() - 44)
-                ),
-            )
+            small_metrics = QFontMetrics(small)
+            shown_translation = small_metrics.elidedText(
+                translation, Qt.TextElideMode.ElideRight, limit)
+            translation_rect = QRectF(
+                26.0, float(main_height) - 2.0, max(20.0, self.width() - 52.0), 30.0)
+            translation_path = QPainterPath()
+            tx = translation_rect.x() + (
+                translation_rect.width() - small_metrics.horizontalAdvance(shown_translation)
+            ) / 2.0
+            translation_baseline = translation_rect.y() + (
+                translation_rect.height() + small_metrics.ascent()
+                - small_metrics.descent()) / 2.0
+            translation_path.addText(
+                QPointF(tx, translation_baseline), small, shown_translation)
+            translation_pen = QPen(OUTLINE_COLOR, 2.0)
+            translation_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(translation_pen)
+            painter.drawPath(translation_path)
+            painter.fillPath(translation_path, TRANSLATION_COLOR)
 
-    def _played_fraction(self, line: lyrics.TimedLine) -> float:
+        self._paint_close(painter)
+        painter.end()
+
+    def _curtain_x(self, line: lyrics.TimedLine, x: float,
+                   width: float) -> float | None:
+        """幕布在当前行的横坐标；还没开始唱时返回 ``None``。"""
         total = max(1, len(line.text))
         try:
             char = lyrics.curtain_char(line, self._position)
         except (TypeError, ValueError):
-            return 0.0
-        return max(0.0, min(1.0, float(char) / total))
+            return None
+        ratio = max(0.0, min(1.0, float(char) / total))
+        if ratio <= 0.0:
+            return None
+        return x + width * ratio
+
+    def _paint_curtain(self, painter: QPainter, path: QPainterPath,
+                       curtain_x: float, font: QFont) -> None:
+        """把“已唱”颜色的字形按一条横向 alpha 渐变叠上去。
+
+        渐变（软边）落在幕布位置两侧，颜色变化发生在**字形内部**，这就是
+        逐字歌词的渐变效果；直接 setClipRect 只能得到一条硬边。
+        """
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        image = QImage(
+            max(1, int(round(self.width() * dpr))),
+            max(1, int(round(self.height() * dpr))),
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+
+        layer = QPainter(image)
+        layer.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        layer.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        layer.fillPath(path, PLAYED_COLOR)
+
+        band = max(10.0, font.pixelSize() * CURTAIN_BAND)
+        left = curtain_x - band
+        right = curtain_x + band
+        mask = QImage(image.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        mask.setDevicePixelRatio(dpr)
+        mask.fill(Qt.GlobalColor.transparent)
+        shade = QPainter(mask)
+        shade.setPen(Qt.PenStyle.NoPen)
+        gradient = QLinearGradient(left, 0.0, right, 0.0)
+        gradient.setColorAt(0.0, QColor(255, 255, 255, 255))
+        gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
+        shade.fillRect(
+            QRectF(0.0, 0.0, float(self.width()), float(self.height())), gradient)
+        shade.end()
+
+        layer.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_DestinationIn)
+        layer.drawImage(0, 0, mask)
+        layer.end()
+        painter.drawImage(0, 0, image)
+
+    def _paint_close(self, painter: QPainter) -> None:
+        rect = self._close_rect()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 80 if self._close_hover else 55))
+        painter.drawEllipse(rect)
+        font = QFont(self.font())
+        font.setPixelSize(15)
+        font.setBold(False)
+        painter.setFont(font)
+        painter.setPen(CLOSE_HOVER_COLOR if self._close_hover else CLOSE_COLOR)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "×")
 
     # ------------------------------------------------------------ 交互
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and not self._locked:
-            self._drag_offset = (
-                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            )
-            self._drag_moved = False
-            event.accept()
-            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._close_rect().contains(event.position()):
+                self._close_pressed = True
+                event.accept()
+                return
+            if not self._locked:
+                # Wayland 不允许客户端自己 move() 顶层窗口（合成器说了算），
+                # 只能请合成器执行一次交互式移动；X11 下也同样适用。
+                handle = self.windowHandle()
+                if handle is not None:
+                    try:
+                        if handle.startSystemMove():
+                            # 移动期间收不到鼠标事件，结束后补一次位置保存
+                            QTimer.singleShot(800, self._schedule_persist)
+                            event.accept()
+                            return
+                    except (AttributeError, RuntimeError):
+                        pass
+                # 合成器不支持时退回手动拖动（X11 / 部分桌面）
+                self._drag_offset = (
+                    event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                )
+                self._drag_moved = False
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        hover = self._close_rect().contains(event.position())
+        if hover != self._close_hover:
+            self._close_hover = hover
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor if hover
+                else Qt.CursorShape.ArrowCursor)
+            self.update()
         if self._drag_offset is not None and not self._locked:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             self._drag_moved = True
@@ -342,6 +473,12 @@ class DesktopLyricsWindow(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._close_pressed:
+            self._close_pressed = False
+            if self._close_rect().contains(event.position()):
+                self.hide_lyrics()
+            event.accept()
+            return
         if self._drag_offset is not None:
             self._drag_offset = None
             if self._drag_moved:
@@ -349,6 +486,20 @@ class DesktopLyricsWindow(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._close_hover:
+            self._close_hover = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
+        super().leaveEvent(event)
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        # startSystemMove() 的位移由合成器完成，Qt 侧只会收到新的坐标；
+        # 在这里排一次保存，下次启动才能回到同一个位置
+        super().moveEvent(event)
+        if self.isVisible():
+            self._schedule_persist()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -370,6 +521,9 @@ class DesktopLyricsWindow(QWidget):
         opaque = menu.addAction("不透明背景")
         opaque.setCheckable(True)
         opaque.setChecked(self._opaque)
+        auto_start = menu.addAction("启动时显示")
+        auto_start.setCheckable(True)
+        auto_start.setChecked(self._auto_start)
         menu.addSeparator()
         close = menu.addAction("关闭桌面歌词")
 
@@ -388,6 +542,9 @@ class DesktopLyricsWindow(QWidget):
             self._opaque = not self._opaque
             self._schedule_persist()
             self.update()
+        elif chosen is auto_start:
+            self._auto_start = auto_start.isChecked()
+            self._schedule_persist()
         elif chosen is close:
             self.hide_lyrics()
 
@@ -412,7 +569,10 @@ class DesktopLyricsWindow(QWidget):
     # ------------------------------------------------------------ 截图辅助
 
     def set_demo(self, lines, position: float = 0.0, placeholder: str = "") -> None:
-        self._lines = list(lines)
+        self._lines = [
+            line if line.words else replace(line, words=lyrics.words_for(line))
+            for line in lines
+        ]
         self._position = position
         self._placeholder = placeholder or "桌面歌词"
         self._index = lyrics.line_index_at(self._lines, position) if self._lines else -1

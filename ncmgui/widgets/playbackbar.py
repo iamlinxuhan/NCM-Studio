@@ -16,6 +16,7 @@ from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
+    QFontMetrics,
     QIcon,
     QMouseEvent,
     QPainter,
@@ -45,6 +46,7 @@ from ..playback import (
     mode_label,
 )
 from .card import ghost_button
+from ..workers import BackgroundTask
 
 #: 已喜欢时红心的颜色；网易云的红色太扎眼，这里用略柔和的玫红
 HEART_COLOR = "#ef476f"
@@ -345,6 +347,212 @@ def _heart_icon(liked: bool, enabled: bool = True) -> QIcon:
     return icon
 
 
+def _dislike_pixmap(color: QColor | None = None) -> QPixmap:
+    """不感兴趣：一颗带斜杠的心，和网页播放器底栏一致。
+
+    斜杠穿过心形时要把底下那一段心先擦成透明（留出缺口），否则两条线
+    糊在一起，缩到 26px 就看不出是一颗「被划掉的心」。
+    """
+    pixmap = QPixmap(40, 40)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(2.0, 2.0)
+
+        tint = QColor(theme.TEXT) if color is None else QColor(color)
+        path = QPainterPath(QPointF(10.0, 16.4))
+        path.cubicTo(QPointF(8.6, 15.1), QPointF(3.4, 11.7), QPointF(3.4, 7.7))
+        path.cubicTo(QPointF(3.4, 5.0), QPointF(5.4, 3.3), QPointF(7.5, 3.3))
+        path.cubicTo(QPointF(8.8, 3.3), QPointF(9.7, 4.1), QPointF(10.0, 4.8))
+        path.cubicTo(QPointF(10.3, 4.1), QPointF(11.2, 3.3), QPointF(12.5, 3.3))
+        path.cubicTo(QPointF(14.6, 3.3), QPointF(16.6, 5.0), QPointF(16.6, 7.7))
+        path.cubicTo(QPointF(16.6, 11.7), QPointF(11.4, 15.1), QPointF(10.0, 16.4))
+
+        painter.setPen(QPen(tint, 1.7, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap,
+                            Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+        start, end = QPointF(3.8, 16.2), QPointF(16.2, 3.8)
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_Clear)
+        painter.setPen(QPen(Qt.GlobalColor.transparent, 4.8,
+                            Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(start, end)
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setPen(QPen(tint, 1.7, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap))
+        painter.drawLine(start, end)
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _dislike_icon() -> QIcon:
+    icon = QIcon()
+    icon.addPixmap(_dislike_pixmap(), QIcon.Mode.Normal)
+    icon.addPixmap(_dislike_pixmap(_disabled_tint()), QIcon.Mode.Disabled)
+    return icon
+
+
+def _collect_pixmap(color: QColor | None = None) -> QPixmap:
+    """收藏到歌单：一个带加号的方框，和网页端的收藏图标一致。"""
+    pixmap = QPixmap(40, 40)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(2.0, 2.0)
+        tint = QColor(theme.TEXT) if color is None else QColor(color)
+        painter.setPen(QPen(tint, 1.6, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap,
+                            Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(3.6, 4.4, 12.8, 11.4), 2.2, 2.2)
+        painter.drawLine(QPointF(7.4, 10.1), QPointF(12.6, 10.1))
+        painter.drawLine(QPointF(10.0, 7.5), QPointF(10.0, 12.7))
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _collect_icon(enabled: bool = True) -> QIcon:
+    icon = QIcon()
+    icon.addPixmap(_collect_pixmap(), QIcon.Mode.Normal)
+    icon.addPixmap(_collect_pixmap(_disabled_tint()), QIcon.Mode.Disabled)
+    return icon
+
+
+def _draw_comment_bubble(painter: QPainter, color: QColor | None = None) -> None:
+    """在左上角 21×21 的范围内画评论气泡；调用方负责缩放和坐标原点。
+
+    形状跟网页播放器一致：圆气泡 + 左下角小尾巴，里面两道横线代表文字。
+    """
+    tint = QColor(theme.TEXT) if color is None else QColor(color)
+    painter.setPen(QPen(tint, 1.6, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap,
+                        Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QRectF(3.4, 2.8, 14.0, 13.2))
+    # 左下角的尖尾巴；两端落在圆上
+    tail = QPainterPath()
+    tail.moveTo(4.9, 13.5)
+    tail.lineTo(4.0, 17.4)
+    tail.lineTo(7.4, 15.1)
+    painter.drawPath(tail)
+    # 两道横线：上面短、下面长
+    painter.drawLine(QPointF(7.6, 8.3), QPointF(9.7, 8.3))
+    painter.drawLine(QPointF(7.6, 11.1), QPointF(12.4, 11.1))
+
+
+def _comment_pixmap(color: QColor | None = None) -> QPixmap:
+    """评论：一个带小尾巴的气泡，里面三个点。"""
+    pixmap = QPixmap(40, 40)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(2.0, 2.0)
+        _draw_comment_bubble(painter, color)
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _comment_count_text(total: int) -> str:
+    """评论数按网页端的写法显示：一万以上缩成「4w+」。"""
+    total = int(total or 0)
+    if total >= 10000:
+        return f"{total // 10000}w+"
+    return str(total)
+
+
+#: 评论按钮里数字的字号（逻辑像素）
+_COMMENT_COUNT_FONT = 10
+#: 带上数字后气泡稍微放大一点，图标和角标都看得清
+_COMMENT_BUBBLE = 26
+
+
+def _comment_button_pixmap(text: str = "", color: QColor | None = None) -> QPixmap:
+    """气泡和评论数画在同一张图里，数字压在气泡右上角。
+
+    网页播放器里数字不是单独一项，而是像角标一样嵌在气泡右上方；分开成
+    两个控件时字号、基线很难对齐，画在一起后点击区域也只有一个。
+    """
+    font = QFont()
+    font.setPixelSize(_COMMENT_COUNT_FONT)
+    metrics = QFontMetrics(font)
+    text_width = metrics.horizontalAdvance(text) if text else 0
+    text_height = metrics.height() if text else 0
+    bubble = _COMMENT_BUBBLE
+    if text:
+        # 数字从气泡中段起笔，压在右上角；底部留同样的透明边，气泡才会
+        # 和旁边的心形、收藏图标在同一条水平线上
+        text_x = bubble // 2
+        text_dy = 3
+        width = max(bubble, text_x + text_width + 1)
+        bubble_y = max(0, text_height - 8)
+        height = bubble_y * 2 + bubble
+    else:
+        width, height, bubble_y, text_dy = bubble, bubble, 0, 0
+
+    pixmap = QPixmap(width * 2, height * 2)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(2.0, 2.0)
+        painter.save()
+        painter.translate(0, bubble_y)
+        painter.scale(bubble / 21.0, bubble / 21.0)
+        _draw_comment_bubble(painter, color)
+        painter.restore()
+        if text:
+            # 和网页端一样，数字盖住气泡右上角：先把文字这一小块擦成透明，
+            # 再写字。用透明擦除而不是填底色，鼠标悬停变底色时也不会露馅。
+            ink = metrics.tightBoundingRect(text)
+            ink_top = metrics.ascent() + ink.top() + text_dy
+            ink_bottom = metrics.ascent() + ink.bottom() + text_dy
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillRect(
+                QRectF(text_x - 1, ink_top - 0.5,
+                       width - text_x + 2, ink_bottom - ink_top + 1.5),
+                Qt.GlobalColor.transparent,
+            )
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setFont(font)
+            painter.setPen(QColor(theme.TEXT_DIM) if color is None else QColor(color))
+            painter.drawText(
+                QRectF(text_x, text_dy, text_width + 1, text_height),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                text,
+            )
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _comment_button_size(text: str = "") -> QSize:
+    pixmap = _comment_button_pixmap(text)
+    return QSize(pixmap.width() // 2, pixmap.height() // 2)
+
+
+def _comment_icon(text: str = "", enabled: bool = True) -> QIcon:
+    icon = QIcon()
+    icon.addPixmap(_comment_button_pixmap(text), QIcon.Mode.Normal)
+    icon.addPixmap(
+        _comment_button_pixmap(text, _disabled_tint()), QIcon.Mode.Disabled)
+    return icon
+
+
 def _disabled_tint() -> QColor:
     """禁用图标用的颜色。
 
@@ -551,6 +759,10 @@ class PlaybackBar(QWidget):
 
         self._song = None
         self._scrubbing = False
+        #: 当前歌曲的评论数（懒加载，只用于按钮提示）
+        self._comment_song_id = 0
+        self._comment_count = 0
+        self._comment_task = None
 
         self.setObjectName("PlaybackBar")
         self.setFixedHeight(70)
@@ -577,29 +789,80 @@ class PlaybackBar(QWidget):
         layout.addWidget(self.now_playing)
         layout.addSpacing(2)
 
+        # 歌曲动作图标排成一组，组内只留 2px：按钮本身已经是 32px 的点击
+        # 区域，再吃主布局的 10px 间距，看上去就像四处漏风。
+        icon_row = QHBoxLayout()
+        icon_row.setContentsMargins(0, 0, 0, 0)
+        icon_row.setSpacing(2)
+
         # 红心：喜欢时涂红，未喜欢只有轮廓；本地/流媒体歌曲没有这个概念，
         # 直接隐藏。保留占位，否则切歌时播放键会左右跳。
         self.like_btn = ghost_button("", compact=True)
         self.like_btn.setProperty("transport", "flat")
-        self.like_btn.setFixedSize(30, 30)
-        self.like_btn.setIconSize(QSize(21, 21))
+        self.like_btn.setFixedSize(32, 32)
+        self.like_btn.setIconSize(QSize(26, 26))
         self.like_btn.setIcon(_heart_icon(False, False))
         self.like_btn.clicked.connect(self._toggle_like)
         like_policy = self.like_btn.sizePolicy()
         like_policy.setRetainSizeWhenHidden(True)
         self.like_btn.setSizePolicy(like_policy)
-        layout.addWidget(self.like_btn)
+        icon_row.addWidget(self.like_btn)
+
+        # 收藏 = 收藏到歌单，和红心（喜欢）是两件事。网页播放器里也是
+        # 心形旁边一个方框加号。
+        self.collect_btn = ghost_button("", compact=True)
+        self.collect_btn.setProperty("transport", "flat")
+        self.collect_btn.setFixedSize(32, 32)
+        self.collect_btn.setIconSize(QSize(26, 26))
+        self.collect_btn.setIcon(_collect_icon())
+        self.collect_btn.clicked.connect(self._collect)
+        collect_policy = self.collect_btn.sizePolicy()
+        collect_policy.setRetainSizeWhenHidden(True)
+        self.collect_btn.setSizePolicy(collect_policy)
+        icon_row.addWidget(self.collect_btn)
+
+        # 评论入口放在收藏旁边，和网页播放器一致。气泡和评论数画在同一张
+        # 图里（一万以上缩写为「4w+」），整个按钮只有一处点击区域。
+        self.comment_btn = ghost_button("", compact=True)
+        self.comment_btn.setProperty("transport", "flat")
+        self.comment_btn.setIcon(_comment_icon())
+        self.comment_btn.setToolTip("查看评论")
+        self.comment_btn.clicked.connect(self._open_comments)
+        comment_policy = self.comment_btn.sizePolicy()
+        comment_policy.setRetainSizeWhenHidden(True)
+        self.comment_btn.setSizePolicy(comment_policy)
+        icon_row.addWidget(self.comment_btn)
+        self._apply_comment_count()
+
+        # 不感兴趣：只在漫游时出现，心形加一道斜杠。点开由服务端给菜单
+        # （推荐重复 / 推荐不感兴趣 / 屏蔽歌手），和网页播放器同一位置。
+        self.dislike_btn = ghost_button("", compact=True)
+        self.dislike_btn.setProperty("transport", "flat")
+        self.dislike_btn.setFixedSize(32, 32)
+        self.dislike_btn.setIconSize(QSize(26, 26))
+        self.dislike_btn.setIcon(_dislike_icon())
+        self.dislike_btn.setToolTip("不感兴趣")
+        self.dislike_btn.clicked.connect(self._dislike)
+        # 不保留隐藏占位：它只在漫游里出现，普通歌单也占 32px 的话，评论
+        # 和上一首之间会空出一大块。进出漫游时让播放键挪一下可以接受。
+        icon_row.addWidget(self.dislike_btn)
+        layout.addLayout(icon_row)
+        layout.addSpacing(2)
 
         # 三个都是扁平的小图标，播放键只比上一首/下一首略大一点
-        self.prev_btn = self._transport_button("prev", size=30)
+        self.prev_btn = self._transport_button("prev", size=32, icon_size=26)
         self.prev_btn.clicked.connect(self.playback.previous)
-        self.play_btn = self._transport_button("play", size=32, icon_size=25)
+        self.play_btn = self._transport_button("play", size=34, icon_size=26)
         self.play_btn.clicked.connect(self.playback.toggle)
-        self.next_btn = self._transport_button("next", size=30)
+        self.next_btn = self._transport_button("next", size=32, icon_size=26)
         self.next_btn.clicked.connect(lambda: self.playback.next(manual=True))
-        layout.addWidget(self.prev_btn)
-        layout.addWidget(self.play_btn)
-        layout.addWidget(self.next_btn)
+        transport_row = QHBoxLayout()
+        transport_row.setContentsMargins(0, 0, 0, 0)
+        transport_row.setSpacing(2)
+        transport_row.addWidget(self.prev_btn)
+        transport_row.addWidget(self.play_btn)
+        transport_row.addWidget(self.next_btn)
+        layout.addLayout(transport_row)
         layout.addSpacing(4)
 
         self.time_label = QLabel("--:-- / --:--")
@@ -632,8 +895,8 @@ class PlaybackBar(QWidget):
 
         self.volume_btn = ghost_button("", compact=True)
         self.volume_btn.setProperty("transport", "flat")
-        self.volume_btn.setFixedSize(34, 30)
-        self.volume_btn.setIconSize(QSize(20, 20))
+        self.volume_btn.setFixedSize(34, 32)
+        self.volume_btn.setIconSize(QSize(26, 26))
         self.volume_btn.clicked.connect(lambda: self._toggle_volume_popup())
         layout.addWidget(self.volume_btn)
 
@@ -655,8 +918,8 @@ class PlaybackBar(QWidget):
         """无边框的自绘图标按钮，悬停时才浮出底色。"""
         button = ghost_button("", compact=True)
         button.setProperty("transport", "flat")
-        button.setFixedSize(34, 30)
-        button.setIconSize(QSize(20, 20))
+        button.setFixedSize(34, 32)
+        button.setIconSize(QSize(26, 26))
         button.setIcon(_control_icon(kind))
         button.setToolTip(tip)
         return button
@@ -689,6 +952,7 @@ class PlaybackBar(QWidget):
         self.mode_btn.setIcon(_control_icon(self.playback.mode))
         self.volume_btn.setIcon(QIcon(_speaker_pixmap(self.playback.volume)))
         self.queue_btn.setIcon(_control_icon("queue"))
+        self._apply_comment_count()
         self._sync_like()
 
     # ---------------------------------------------------------------- 状态
@@ -697,6 +961,7 @@ class PlaybackBar(QWidget):
         self._song = song
         self.now_playing.set_song(song)
         self._sync_like()
+        self._load_comment_count(song)
 
         cached = None
         if song is not None and self.covers is not None:
@@ -737,9 +1002,99 @@ class PlaybackBar(QWidget):
         self.like_btn.setIcon(_heart_icon(liked, enabled))
         self.like_btn.setToolTip(tip)
 
+        if hasattr(self, "collect_btn"):
+            can_collect = self._is_netease_song(song)
+            self.collect_btn.setVisible(can_collect)
+            self.collect_btn.setEnabled(can_collect
+                                        and self.window.is_logged_in())
+            self.collect_btn.setToolTip(
+                "收藏到歌单" if self.window.is_logged_in()
+                else "登录后可收藏到歌单")
+
+        if hasattr(self, "comment_btn"):
+            # 看评论不需要登录，公开接口就能读
+            can_comment = self._is_netease_song(song)
+            self.comment_btn.setVisible(can_comment)
+            self.comment_btn.setEnabled(can_comment)
+
+        self._sync_dislike()
+
+    def _sync_dislike(self) -> None:
+        """「不感兴趣」只属于漫游：当前歌不在漫游队列里就隐藏。"""
+        if not hasattr(self, "dislike_btn"):
+            return
+        roam = getattr(self.window, "pages", {}).get("roam")
+        is_roam = getattr(roam, "is_current_song", None)
+        in_roam = bool(
+            self._is_netease_song(self._song)
+            and callable(is_roam) and is_roam(self._song))
+        logged_in = self.window.is_logged_in()
+        self.dislike_btn.setVisible(in_roam)
+        self.dislike_btn.setEnabled(in_roam and logged_in)
+        self.dislike_btn.setToolTip(
+            "不感兴趣" if logged_in else "登录网易云后可不感兴趣")
+
+    def _dislike(self) -> None:
+        if self._song is not None and self.dislike_btn.isEnabled():
+            self.window.actions.dislike(self._song, self.dislike_btn)
+
     def _toggle_like(self) -> None:
         if self._is_netease_song(self._song):
             self.window.actions.toggle_like(self._song)
+
+    def _collect(self) -> None:
+        if self._is_netease_song(self._song):
+            self.window.actions.add_to_playlist(self._song)
+
+    def _open_comments(self) -> None:
+        if self._is_netease_song(self._song):
+            self.window.actions.comments(self._song)
+
+    def _load_comment_count(self, song) -> None:
+        """取当前歌曲的评论数，显示在评论图标右侧。
+
+        网页播放器每次切歌都会请求一次评论计数；这里同样异步做，失败就
+        不显示数字，不打扰播放。
+        """
+        self._comment_song_id = 0
+        self._comment_count = 0
+        self._apply_comment_count()
+        if not self._is_netease_song(song):
+            return
+        song_id = int(song.id)
+        self._comment_song_id = song_id
+        client = self.window.client
+        if self._comment_task is not None and self._comment_task.is_running:
+            self._comment_task.cancel()
+
+        def work():
+            _comments, total, _more = client.comments(song_id, page=1, limit=1)
+            return total
+
+        task = BackgroundTask(work, parent=self)
+        self._comment_task = task
+
+        def done(total) -> None:
+            if self._comment_song_id != song_id:
+                return
+            self._comment_count = int(total or 0)
+            self._apply_comment_count()
+
+        task.done.connect(done)
+        task.failed.connect(lambda _message: None)
+        task.start()
+
+    def _apply_comment_count(self) -> None:
+        """把评论数画进评论按钮；没有数字时只显示气泡。"""
+        text = _comment_count_text(self._comment_count) if self._comment_count else ""
+        size = _comment_button_size(text)
+        self.comment_btn.setIconSize(size)
+        # 左右各留 4px，悬停底色不会贴着气泡
+        self.comment_btn.setFixedSize(size.width() + 8, max(30, size.height() + 2))
+        self.comment_btn.setIcon(_comment_icon(text))
+        self.comment_btn.setToolTip(
+            f"查看评论（{self._comment_count} 条）"
+            if self._comment_count else "查看评论")
 
     def _on_cover_ready(self, song_id: int, pixmap: QPixmap) -> None:
         # 切歌很快时，上一首的封面可能后到
@@ -810,6 +1165,8 @@ class PlaybackBar(QWidget):
         self.prev_btn.setEnabled(has_queue)
         self.next_btn.setEnabled(has_queue)
         self.play_btn.setEnabled(self._song is not None or has_queue)
+        # 漫游队列换了（补货 / 不感兴趣）后按钮可能该出现或消失
+        self._sync_dislike()
 
     # ---------------------------------------------------------------- 演示
 

@@ -38,16 +38,24 @@ from .library import LibraryDB
 from .lyrics_service import LyricsService
 from .pages.account import AccountPage
 from .pages.base import TabbedPage
+from .pages.charts import ChartsPage
+from .pages.comments import CommentsPage
 from .pages.detail import DetailHost
 from .pages.discover import DiscoverPage
 from .pages.favorites import FavoritesPage
+from .pages.following import FollowingPage
 from .pages.groups import AdvancedPage, HistoryStatsPage, TransferPage
 from .pages.liked import LikedPage
 from .pages.local import LocalPage
+from .pages.mv import MvPage
+from .pages.mvplayer import MvPlayerPage
 from .pages.player import PlayerPage
+from .pages.podcast import PodcastPage
+from .pages.roam import RoamPage
 from .pages.search import SearchPage
 from .pages.settings import SettingsPage
 from .pages.streaming import StreamingPage
+from .pages.user import UserPage
 from .playback import PlaybackController
 from .scrobble import ScrobbleReporter
 from .streaming import StreamingRegistry
@@ -70,6 +78,10 @@ else:
 #: 「搜索」则并进发现页（见 ``EXTRA_PAGES`` 与 ``PAGE_NAV``）。
 NAV_ITEMS = (
     ("discover", "✦", "发现", DiscoverPage),
+    ("podcast", "◌", "播客", PodcastPage),
+    ("mv", "▷", "MV", MvPage),
+    ("roam", "∞", "漫游", RoamPage),
+    ("following", "◍", "关注", FollowingPage),
     ("liked", "♡", "我喜欢的音乐", LikedPage),
     ("favorites", "★", "收藏", FavoritesPage),
     ("local", "♪", "本地曲库", LocalPage),
@@ -81,10 +93,18 @@ NAV_ITEMS = (
     ("settings", "⚙", "设置", SettingsPage),
 )
 
+#: 侧栏分组：键表示「这一项之后画一条浅色分隔线」。和网页端一样按用途
+#: 分成发现 / 我的音乐 / 曲库与来源 / 工具与设置，十几项才不会糊成一片。
+NAV_SEPARATORS_AFTER = {"following", "favorites", "streaming"}
+
 #: 不在侧边栏出现、但仍需放进 stack 的页面。搜索由发现页顶部的
 #: 搜索框进入，内容区直接换成搜索结果
 EXTRA_PAGES = (
     ("search", "⌕", "搜索", SearchPage),
+    #: 个人中心：点侧栏顶部的账号卡进入。账号页仍保留在侧栏，负责登录与安全
+    ("me", "◈", "个人中心", UserPage),
+    #: 排行榜：从发现页的「排行榜」入口进入
+    ("charts", "▲", "排行榜", ChartsPage),
 )
 
 #: 页面键 -> 侧边栏按键。标签子页与搜索页都借父项的选中状态，
@@ -100,6 +120,20 @@ PAGE_NAV = {
     "proxy": "advanced",
     "tools": "advanced",
 }
+
+
+def _nav_separator() -> QWidget:
+    """侧栏分组之间的浅色细线，左右留白，不贴着侧栏边缘。"""
+    holder = QWidget()
+    holder.setObjectName("NavSeparatorHolder")
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(16, 9, 16, 9)
+    row.setSpacing(0)
+    line = QFrame()
+    line.setObjectName("NavSeparator")
+    line.setFixedHeight(1)
+    row.addWidget(line)
+    return holder
 
 
 class MainWindow(QMainWindow):
@@ -122,6 +156,12 @@ class MainWindow(QMainWindow):
         self._login_task: BackgroundTask | None = None
         #: 从播放页返回时回到的控件（可能是详情页，不是导航页）
         self._player_return_widget: QWidget | None = None
+        #: 从评论页返回时回到的控件
+        self._comments_return_widget: QWidget | None = None
+        #: 从评论/播放页点开详情（如用户主页）时，返回后要回到的控件
+        self._detail_return_widget: QWidget | None = None
+        #: 从 MV 播放页返回时要回到的控件
+        self._mv_return_widget: QWidget | None = None
         #: 截图/自检时置真，切页面不触发联网加载
         self.defer_page_loads = False
         #: 托盘「退出」会置真，绕过「关闭到托盘」的拦截
@@ -193,6 +233,9 @@ class MainWindow(QMainWindow):
         self.tray = TrayIcon(self)
         self.tray_available = self.tray.start()
         QTimer.singleShot(0, self._restore_desktop_lyrics)
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_application_state)
 
         self._refresh_login_ui()
         self._poll_login()
@@ -269,11 +312,10 @@ class MainWindow(QMainWindow):
         brand_layout.addWidget(name)
         brand_layout.addWidget(sub)
 
-        # 账号卡直接展示头像、昵称与 UID；点一下进账号页。
-        # 比原来只有「已登录」三个字的状态标签更有用，也顺手把侧边栏顶部
-        # 从纯文字变成有层次的区域
+        # 账号卡直接展示头像、昵称与 UID；点一下进个人中心（自己的用户主页）。
+        # 登录、Cookie 之类的账号操作仍然走侧栏的「账号」页。
         self.profile_card = ProfileCard(self, compact=True)
-        self.profile_card.clicked.connect(lambda: self.show_page("account"))
+        self.profile_card.clicked.connect(lambda: self.show_page("me"))
         profile_row = QHBoxLayout()
         profile_row.setContentsMargins(0, 12, 0, 0)
         profile_row.addWidget(self.profile_card, 1)
@@ -321,6 +363,9 @@ class MainWindow(QMainWindow):
             self._nav_buttons[key] = button
             nav_layout.addWidget(button)
 
+            if key in NAV_SEPARATORS_AFTER:
+                nav_layout.addWidget(_nav_separator())
+
             page = page_cls(self)
             self.pages[key] = page
             self.stack.addWidget(page)
@@ -347,11 +392,19 @@ class MainWindow(QMainWindow):
         self.player_page = PlayerPage(self)
         self.stack.addWidget(self.player_page)
 
-        # 详情页也是一个非导航栈；歌单/专辑/歌手都在这里打开
+        # 评论区也不是导航项：从播放条的评论按钮进入，返回时回到原页面
+        self.comments_page = CommentsPage(self)
+        self.comments_page.backRequested.connect(self.return_from_comments)
+        self.stack.addWidget(self.comments_page)
+
+        # MV 播放页同样不是导航项：点 MV 封面进入，视频画面嵌在内容区
+        self.mv_player_page = MvPlayerPage(self)
+        self.mv_player_page.backRequested.connect(self.return_from_mv)
+        self.stack.addWidget(self.mv_player_page)
+
+        # 详情页也是一个非导航栈；歌单/专辑/歌手/用户主页都在这里打开
         self.detail_host = DetailHost(self)
-        self.detail_host.emptied.connect(
-            lambda: self.show_page(self._last_page_key or "account")
-        )
+        self.detail_host.emptied.connect(self._return_from_detail)
         self.stack.addWidget(self.detail_host)
 
         if "discover" in self._nav_buttons:
@@ -561,16 +614,25 @@ class MainWindow(QMainWindow):
         index = self._nav_index.get(key)
         if index is None:
             return
-        # 从详情页切到导航页：整叠详情作废
+        # 从详情页切到导航页：整叠详情作废；离开 MV 播放页时停止视频
         if self.stack.currentWidget() is self.detail_host:
             self.detail_host.clear()
+        if self.stack.currentWidget() is self.mv_player_page:
+            self.mv_player_page.stop()
         self._last_page_key = key
+        self._detail_return_widget = None
         self.stack.setCurrentIndex(index)
-        # 子页与搜索页借父项的按钮，侧边栏始终有一项处于选中状态
+        # 子页与搜索页借父项的按钮，侧边栏始终有一项处于选中状态；
+        # 个人中心没有对应按钮，切过去时清空选中，避免停在上一项上
         nav_key = PAGE_NAV.get(key, key)
         button = self._nav_buttons.get(nav_key)
         if button is not None:
             button.setChecked(True)
+        else:
+            self._nav_group.setExclusive(False)
+            for item in self._nav_buttons.values():
+                item.setChecked(False)
+            self._nav_group.setExclusive(True)
         host = self._tab_hosts.get(key)
         if host is not None:
             host.select_tab(key)
@@ -586,8 +648,16 @@ class MainWindow(QMainWindow):
                 pass
 
     def open_detail(self, kind: str, item_id: int) -> None:
-        """打开歌单/专辑/歌手详情。所有列表页都走这个入口。"""
+        """打开歌单/专辑/歌手/用户详情。所有列表页都走这个入口。"""
         current = self.stack.currentWidget()
+        if current is self.mv_player_page:
+            self.mv_player_page.stop()
+        # 从评论页、播放页点开详情时，返回要回到这两个非导航页；
+        # 其它情况清掉记录，避免回到很久以前的页面
+        if current in (self.comments_page, self.player_page):
+            self._detail_return_widget = current
+        else:
+            self._detail_return_widget = None
         for key, page in self.pages.items():
             if page is current:
                 self._last_page_key = key
@@ -599,6 +669,31 @@ class MainWindow(QMainWindow):
         self._nav_group.setExclusive(True)
         self.stack.setCurrentWidget(self.detail_host)
         self.detail_host.open(kind, int(item_id))
+
+    def _return_from_detail(self) -> None:
+        """详情栈清空后回到来处：评论页、播放页，或之前停留的导航页。"""
+        widget = self._detail_return_widget
+        self._detail_return_widget = None
+        if (widget is not None and widget is not self.detail_host
+                and self.stack.indexOf(widget) >= 0):
+            self.stack.setCurrentWidget(widget)
+            if widget is self.comments_page or widget is self.player_page:
+                return
+            for key, page in self.pages.items():
+                if page is widget:
+                    button = self._nav_buttons.get(PAGE_NAV.get(key, key))
+                    if button is not None:
+                        button.setChecked(True)
+                    self._last_page_key = key
+                    break
+            hook = getattr(widget, "on_show", None)
+            if callable(hook) and not self.defer_page_loads:
+                try:
+                    hook()
+                except RuntimeError:
+                    pass
+            return
+        self.show_page(self._last_page_key or "discover")
 
     def toggle_queue_panel(self) -> None:
         """播放条的播放列表按钮：展开队列，再点一次收起。
@@ -614,6 +709,8 @@ class MainWindow(QMainWindow):
     def open_player_page(self, queue: bool | None = None) -> None:
         """切到播放页；``queue`` 为真时顺带展开播放队列。"""
         current = self.stack.currentWidget()
+        if current is self.mv_player_page:
+            self.mv_player_page.stop()
         if current is not self.player_page:
             self._player_return_widget = current
         for key, page in self.pages.items():
@@ -664,13 +761,117 @@ class MainWindow(QMainWindow):
                     return
         self.show_page(self._last_page_key or "account")
 
+    def open_comments(self, song) -> None:
+        """打开评论区。评论是内容区的一个页面，不是弹窗，边听边翻。"""
+        current = self.stack.currentWidget()
+        if current is self.mv_player_page:
+            self.mv_player_page.stop()
+        if current is not self.comments_page:
+            self._comments_return_widget = current
+        for key, page in self.pages.items():
+            if page is current:
+                self._last_page_key = key
+                break
+
+        # 评论区同样不是导航项，侧栏不能有任何一项显示为选中
+        self._nav_group.setExclusive(False)
+        for button in self._nav_buttons.values():
+            button.setChecked(False)
+        self._nav_group.setExclusive(True)
+
+        self.comments_page.load(song)
+        self.stack.setCurrentWidget(self.comments_page)
+
+    def open_mv(self, mv, url: str) -> None:
+        """在内容区播放 MV。返回时回到打开它的页面。"""
+        current = self.stack.currentWidget()
+        if current is not self.mv_player_page:
+            self._mv_return_widget = current
+        # 视频页不是导航项，但保留当前侧栏选中项没有意义，统一清空
+        self._nav_group.setExclusive(False)
+        for button in self._nav_buttons.values():
+            button.setChecked(False)
+        self._nav_group.setExclusive(True)
+        self.mv_player_page.load(mv, url)
+        self.stack.setCurrentWidget(self.mv_player_page)
+        hook = getattr(self.mv_player_page, "on_show", None)
+        if callable(hook) and not self.defer_page_loads:
+            try:
+                hook()
+            except RuntimeError:
+                pass
+
+    def return_from_mv(self) -> None:
+        self.mv_player_page.stop()
+        widget = self._mv_return_widget
+        self._mv_return_widget = None
+        if (widget is not None and widget not in (
+                self.mv_player_page, self.detail_host, self.comments_page,
+                self.player_page)
+                and self.stack.indexOf(widget) >= 0):
+            self.stack.setCurrentWidget(widget)
+            for key, page in self.pages.items():
+                if page is widget:
+                    button = self._nav_buttons.get(PAGE_NAV.get(key, key))
+                    if button is not None:
+                        button.setChecked(True)
+                    self._last_page_key = key
+                    hook = getattr(page, "on_show", None)
+                    if callable(hook) and not self.defer_page_loads:
+                        try:
+                            hook()
+                        except RuntimeError:
+                            pass
+                    return
+        self.show_page(self._last_page_key or "mv")
+
+    def return_from_comments(self) -> None:
+        widget = self._comments_return_widget
+        if (widget is not None and widget is not self.comments_page
+                and self.stack.indexOf(widget) >= 0):
+            self.stack.setCurrentWidget(widget)
+            if widget is self.detail_host:
+                self.detail_host.on_show()
+                return
+            if widget is self.player_page:
+                hook = getattr(self.player_page, "on_show", None)
+                if callable(hook) and not self.defer_page_loads:
+                    try:
+                        hook()
+                    except RuntimeError:
+                        pass
+                return
+            for key, page in self.pages.items():
+                if page is widget:
+                    button = self._nav_buttons.get(PAGE_NAV.get(key, key))
+                    if button is not None:
+                        button.setChecked(True)
+                    self._last_page_key = key
+                    hook = getattr(page, "on_show", None)
+                    if callable(hook) and not self.defer_page_loads:
+                        try:
+                            hook()
+                        except RuntimeError:
+                            pass
+                    return
+        self.show_page(self._last_page_key or "account")
+
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         key = event.key()
         modifiers = event.modifiers()
-        if key == Qt.Key.Key_Escape and self.stack.currentWidget() is self.player_page:
-            self.return_from_player()
-            event.accept()
-            return
+        if key == Qt.Key.Key_Escape:
+            if self.stack.currentWidget() is self.player_page:
+                self.return_from_player()
+                event.accept()
+                return
+            if self.stack.currentWidget() is self.comments_page:
+                self.return_from_comments()
+                event.accept()
+                return
+            if self.stack.currentWidget() is self.mv_player_page:
+                self.return_from_mv()
+                event.accept()
+                return
 
         # 应用内快捷键。用 keyPressEvent 而不是全局 QShortcut：输入框拿到
         # 空格/字母时应该正常输入，事件根本不冒泡到这里。
@@ -726,6 +927,37 @@ class MainWindow(QMainWindow):
         self._force_quit = True
         self.close()
 
+    def activate_from_launcher(self) -> None:
+        """任务栏/启动器再次点到本程序时的处理。
+
+        Wayland 下桌面歌词是常驻置顶的工具窗，主窗口被最小化或藏到托盘后，
+        合成器往往把「激活」交给那个不抢焦点的歌词窗，导致点了图标什么都没
+        发生。这里统一把主窗口露出来；本来就在前台则按任务栏惯例最小化。
+        """
+        if not self.isVisible() or self.isMinimized():
+            self.show_normal()
+            return
+        if self.isActiveWindow():
+            self.showMinimized()
+            return
+        self.show_normal()
+
+    def _on_application_state(self, state) -> None:
+        """应用被激活时把最小化/藏起来的主窗口露出来。
+
+        Wayland 下面点任务栏图标，合成器往往把「激活」交给常驻置顶的桌面歌词
+        窗；那个窗口不抢焦点，看上去就是点了没反应。这里在应用获得激活时补一
+        次显示；如果鼠标正压在歌词窗上（用户是在拖歌词），就不打扰。
+        """
+        if state != Qt.ApplicationState.ApplicationActive:
+            return
+        if self.isVisible() and not self.isMinimized():
+            return
+        lyrics = getattr(self, "desktop_lyrics", None)
+        if lyrics is not None and lyrics.isVisible() and lyrics.underMouse():
+            return
+        self.show_normal()
+
     def toggle_desktop_lyrics(self, force: bool | None = None) -> None:
         if not hasattr(self, "desktop_lyrics"):
             return
@@ -741,10 +973,15 @@ class MainWindow(QMainWindow):
             pass
 
     def _restore_desktop_lyrics(self) -> None:
-        """上次退出时开着就恢复；自检/截图不弹额外的窗口。"""
+        """启动时默认不显示桌面歌词，只有右键菜单勾了「启动时显示」才恢复。
+
+        之前按上次退出时的可见状态自动恢复，结果每次打开 GUI 都会额外弹出一个
+        置顶窗口，主界面反而被挡住。``enabled`` 现在只表示当前是否可见。
+        自检/截图不弹额外的窗口。
+        """
         if self.defer_page_loads:
             return
-        if self.cfg.get("player.desktop_lyrics.enabled", False):
+        if self.cfg.get("player.desktop_lyrics.auto_start", False):
             self.desktop_lyrics.open_lyrics()
 
     def _on_desktop_lyrics_closed(self) -> None:
@@ -1240,6 +1477,10 @@ class MainWindow(QMainWindow):
         try:
             self.media_controls.shutdown()
         except Exception:  # noqa: BLE001 - 系统媒体服务不可用不能挡住退出
+            pass
+        try:
+            self.mv_player_page.stop()
+        except Exception:  # noqa: BLE001 - 视频停不掉也不能挡住退出
             pass
         try:
             self.playback.shutdown()

@@ -1,22 +1,45 @@
 # NCM Studio
 
-基于 [`ncmctl`](https://github.com/chaunsin/netease-cloud-music) 的第三方音乐播放器，PyQt6 编写，支持 **Windows / Linux / macOS**。
+**网易云音乐的第三方桌面客户端**：PyQt6 编写，支持 Windows / Linux / macOS。
+内置 `ncmctl` 与 mpv，下载即用，不需要额外安装 Python 或命令行工具。
+
+<p align="center">
+  <a href="https://github.com/iamlinxuhan/NCM-Studio/releases/latest"><img src="https://img.shields.io/github/v/release/iamlinxuhan/NCM-Studio?style=flat-square&label=release" alt="最新版本"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-2f6fed?style=flat-square" alt="支持平台">
+  <img src="https://img.shields.io/badge/license-AGPL--3.0-35b37e?style=flat-square" alt="许可证">
+</p>
 
 `ncmctl` 本身功能很全，但纯命令行用起来门槛不低：参数散落在各个子命令里，输出目录要手敲，
 二维码登录得盯着终端。这个程序把这些都收敛成侧边栏导航 + 表单 + 实时终端输出，
 重点解决**输出文件夹的可视化选择**和**长任务 / 扫码登录的可视化反馈**；
-在此之上还补了播放页、歌词、本地曲库和队列，日常听歌可以完全留在界面里。
+在此之上还补了播放页、桌面歌词、本地曲库、MV / 播客 / 漫游与队列，日常听歌可以完全留在界面里。
 侧边栏可以在深色 / 亮色主题之间切换，选择会记进配置文件，下次启动保持原样。
 
-![发现页（顶部可直接搜索）](docs/screenshots/01-discover.png)
+<p align="center">
+  <img src="docs/screenshots/hero-discover.png" alt="发现页：每日推荐、推荐歌单、排行榜与私人 FM" width="100%">
+</p>
 
-![本地曲库](docs/screenshots/04-local.png)
+<p align="center">
+  <img src="docs/screenshots/hero-me.png" alt="个人中心：头像、关注与粉丝、创建的歌单、听歌排行" width="49.4%">
+  <img src="docs/screenshots/hero-charts.png" alt="排行榜：官方榜、曲风榜与特色榜" width="49.4%">
+</p>
 
-![播放页：黑胶唱片与歌词](docs/screenshots/11-player.png)
+<p align="center">
+  <img src="docs/screenshots/hero-mvlist.png" alt="MV：推荐与搜索" width="49.4%">
+  <img src="docs/screenshots/hero-mv.png" alt="MV 播放器：在应用内直接播放与全屏" width="49.4%">
+</p>
 
-![流媒体服务器](docs/screenshots/07-streaming.png)
+<p align="center">
+  <img src="docs/screenshots/hero-lyrics.png" alt="桌面歌词：逐字渐变幕布与译文" width="100%">
+</p>
 
-![下载与云盘](docs/screenshots/06-transfer.png)
+<p align="center">
+  <img src="docs/screenshots/demo-lyrics.gif" alt="桌面歌词逐字动画演示" width="68%">
+</p>
+
+<p align="center">
+  <sub>动图演示 · 桌面歌词的逐字渐变幕布，跟着播放进度推进</sub>
+</p>
 
 ## 功能覆盖
 
@@ -26,6 +49,11 @@ ncmctl 的全部子命令都在界面里有对应入口：
 | --- | --- | --- |
 | 账号 | `login qrcode` / `phone` / `cookie` / `cookiecloud`、`logout` | 四种登录方式；扫码登录会在界面里显示二维码；「账号安全」卡显示凭据权限、令牌是否就绪与听歌同步状态，不展示任何凭据原文 |
 | 发现 | 网易云 `/api/*` | 每日推荐、推荐歌单、新碟、推荐歌手；顶部搜索框直接搜歌曲 / 专辑 / 歌手 / 歌单，结果替换发现内容；推荐位按天缓存，切页不重复请求 |
+| 播客 | 网易云 `/api/*` | 播客、有声书与电台节目；推荐与「我的播客」两个 Tab，订阅 / 自建播客都能浏览；节目按 ID 记住进度，下次接着播，倍速与音频信息照常可用 |
+| MV | 网易云 `/api/*` | 推荐与搜索，点封面直接在内容区播放；进度 / 音量 / 全屏都能用，全屏时角上有退出按钮，ESC 也能退出 |
+| 漫游 | 网易云 `/api/*` | 私人 FM 式连续播放，队列快空时自动向服务端补货；「不感兴趣」可选原因并同时拉黑歌手 |
+| 关注 | 网易云 `/api/*` | 关注的人的动态流：分享的歌曲、歌单、评论压成卡片，歌曲直接播放，卡片上即可关注 / 取关 |
+| 个人中心 / 排行榜 | 网易云 `/api/*` | 点侧栏头像进个人中心（歌单、听歌排行），点别人头像进对方主页；排行榜左侧分组、右侧直接试听，可一键打开对应歌单 |
 | 我喜欢的音乐 | 网易云 `/api/*` + 随包 mpv | 红心歌单直接走程序内接口客户端（不再多起一次 ncmctl 进程），列表、点一首即流播；播放页、歌词、队列、四种播放顺序 |
 | 收藏 | 网易云 `/api/*` | 收藏的歌单 / 专辑 / 歌手三个 Tab，点进去看详情，可直接取消收藏 |
 | 本地曲库 | 随包 mpv | 扫描下载目录或任意文件夹；歌曲 / 文件夹 / 本地歌手 / 本地专辑四个 Tab，支持本地歌单 |
@@ -244,6 +272,17 @@ compatibility; download tag writing is not implemented"，实测下完的 flac �
   播放同一个文件自动恢复，重新扫描、换歌单都不丢；在线歌曲没有稳定的本地文件，
   仍用配置里的全局偏移。选「偏移归零」会删掉这一首的记录。
 
+### 桌面歌词
+
+播放页歌词菜单和托盘菜单都可以打开独立的桌面歌词窗：无边框、置顶、不抢焦点，
+逐字幕布和翻译与播放页完全一致（同一份歌词缓存，不重复请求）。右键菜单可以
+锁定位置、调大 / 调小字号、开关翻译与不透明背景、设置「启动时显示」或直接关闭；
+位置、尺寸和这些开关都会写进配置，下次打开原样恢复。
+
+**默认不随程序启动**，需要时再打开。Wayland 下客户端不能自己搬顶层窗口，拖动走的是
+合成器的交互式移动，置顶也不保证被所有合成器支持（GNOME/Mutter 可能忽略），
+设置页对此有说明，而不是假装所有桌面都一样。
+
 ## 封面
 
 **ncmctl 同样不下载封面。** 封面地址就在解析结果的 `al.picUrl` 里，下载正常
@@ -418,8 +457,11 @@ macOS 的 Now Playing 目前还没有接入；那边的耳机按键暂时不会�
   词与词之间的空隙按空隙时长匀速过渡。每 30ms 只重绘当前行的遮罩，不重建排版。
 - **用户自己滚歌词后暂停自动跟随 3 秒**，免得刚往回翻两句就被拽回去。
 
-音质档位与下载页相同（标准 / 较高 / 极高 / 无损 / Hi-Res），实际拿到的档位可能
-低于所选 —— 接口以降级后的结果为准，界面会按接口返回的 `level` 播放。
+音质档位与下载页相同（标准 / 较高 / 极高 / 无损 / Hi-Res）。档位分两处：发现、
+搜索、歌单等页面统一用「设置 → 播放器（mpv）→ 在线音质」；红心页保留自己的
+下拉框，只影响从红心页开始的播放，没单独设置过就跟随全局。档位跟着队列走，
+改完从下一首开始生效。实际拿到的档位可能低于所选 —— 接口以降级后的结果为准，
+界面会按接口返回的 `level` 播放。
 
 ## 自动更新本程序
 
@@ -584,7 +626,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=3.0.13 packaging\ncm-studio.iss
+iscc /DAppVersion=4.0.0 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \

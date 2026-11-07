@@ -183,7 +183,8 @@ a = Analysis(
         "PyQt6.QtWebEngineWidgets",
         "PyQt6.QtWebEngine",
         "PyQt6.QtBluetooth",
-        "PyQt6.QtMultimedia",
+        # QtMultimedia 不能排除：MV 播放页（ncmgui/pages/mvplayer.py）在
+        # window.py 里是静态导入的，打包版缺了它启动就会 ImportError
         "PyQt6.QtSql",
         "PyQt6.QtTest",
         "tkinter",

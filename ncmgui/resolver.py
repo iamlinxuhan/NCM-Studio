@@ -176,6 +176,9 @@ class Song:
     source: str = ""
     #: 流媒体服务器里的原始 ID（字符串）。网易云与本地文件为空
     stream_id: str = ""
+    #: 漫游推荐来源标记（接口的 ``alg``）。漫游里「不感兴趣 / 下一首」把
+    #: 它原样回传给服务端；普通歌单、本地文件为空串
+    alg: str = ""
 
     @property
     def base(self) -> str:

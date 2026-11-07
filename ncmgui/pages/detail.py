@@ -19,8 +19,14 @@ from PyQt6.QtWidgets import (
 
 from ..widgets.card import ghost_button
 from .collection import CollectionPage
+from .user import UserPage
 
-KIND_LABELS = {"playlist": "歌单", "album": "专辑", "artist": "歌手"}
+KIND_LABELS = {
+    "playlist": "歌单",
+    "album": "专辑",
+    "artist": "歌手",
+    "user": "用户",
+}
 
 
 class DetailHost(QWidget):
@@ -31,7 +37,7 @@ class DetailHost(QWidget):
     def __init__(self, window) -> None:
         super().__init__()
         self.window = window
-        self._pages: list[CollectionPage] = []
+        self._pages: list[QWidget] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -58,9 +64,13 @@ class DetailHost(QWidget):
     def open(self, kind: str, item_id: int) -> None:
         if kind not in KIND_LABELS or not item_id:
             return
-        page = CollectionPage(self.window)
-        page.backRequested.connect(self.back)
-        page.load(kind, int(item_id))
+        if kind == "user":
+            page: QWidget = UserPage(self.window)
+            page.load(int(item_id))
+        else:
+            page = CollectionPage(self.window)
+            page.backRequested.connect(self.back)
+            page.load(kind, int(item_id))
         self._pages.append(page)
         self.stack.addWidget(page)
         self.stack.setCurrentWidget(page)

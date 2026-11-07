@@ -236,7 +236,12 @@ def _defaults() -> dict[str, Any]:
         # local_dir 留空表示「本地音乐默认打开下载目录」（download.output）。
         "player": {
             "mpv_path": "",
+            # 全局在线音质：发现、搜索、歌单等页面开始播放时使用
             "level": "exhigh",
+            # 红心页专属音质；空字符串表示跟随 level
+            "liked_level": "",
+            # 上次队列的档位来源（liked / global），由播放器维护
+            "queue_scope": "global",
             "volume": 70,
             "mode": "loop",
             # 会员歌曲只返回 30 秒试听片段。默认拒绝播放，避免用户以为听到了
@@ -272,6 +277,8 @@ def _defaults() -> dict[str, Any]:
             # 桌面歌词窗。locked 时鼠标事件穿透/不可拖动；位置 -1 表示居中
             "desktop_lyrics": {
                 "enabled": False,
+                # 启动时是否自动显示桌面歌词。默认关闭，想看再从播放页/托盘打开
+                "auto_start": False,
                 "locked": False,
                 "x": -1,
                 "y": -1,
@@ -305,6 +312,9 @@ def _defaults() -> dict[str, Any]:
             "git_proxy": "",
             "check_on_start": True,
         },
+        # 播客进度记忆：节目歌曲 ID -> 上次播放到的秒数。播客动辄一小时，
+        # 下次进来接着播比从头开始合理
+        "podcast": {"positions": {}},
         "crypto": {"output": ""},
         "curl": {"output": "", "kind": "weapi", "timeout": "15s"},
         "proxy": {"listen": "127.0.0.1:9000", "max_body": "1MB"},

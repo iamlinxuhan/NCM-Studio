@@ -142,6 +142,10 @@ class PlaybackController(QObject):
         self._paused = False
         self._volume = player.clamp_volume(cfg.get("player.volume", 70))
         self._level = str(cfg.get("player.level", "exhigh") or "exhigh")
+        #: 当前队列的音质来源：``"liked"`` 用红心页自己的档位，其余一律用
+        #: 「设置 → 在线音质」。档位跟着队列走，不跟着窗口走 —— 从发现页开始
+        #: 播的队列，不能因为用户随后打开红心页换了档位就跟着变。
+        self._level_scope = "global"
         #: 当前这首歌**实际**拿到的音质：本地文件是「无损 44.1kHz/16bit」
         #: 这样的描述，流媒体是接口返回的档位值（可能低于请求值）。
         #: 空串表示还不确定 —— 取链还没回来，或者本地文件头读不出来。
@@ -676,6 +680,22 @@ class PlaybackController(QObject):
         """改动对下一首生效，不影响正在播放的这一首。"""
         self._level = str(level or "exhigh")
 
+    @property
+    def level_scope(self) -> str:
+        """当前队列的档位来源（``"liked"`` / ``"global"``）。"""
+        return self._level_scope
+
+    def set_level_scope(self, scope: str) -> None:
+        """标记当前队列的档位来源。只改归属，不动具体档位。"""
+        self._level_scope = "liked" if scope == "liked" else "global"
+
+    def _level_for_scope(self, scope: str) -> str:
+        if scope == "liked":
+            value = str(self.cfg.get("player.liked_level", "") or "")
+            if value:
+                return value
+        return str(self.cfg.get("player.level", "exhigh") or "exhigh")
+
     def set_mode(self, mode: str) -> None:
         value = normalize_mode(mode)
         if value == self._mode:
@@ -885,7 +905,10 @@ class PlaybackController(QObject):
 
     def save_config(self) -> None:
         self.cfg.set("player.volume", int(self._volume))
-        self.cfg.set("player.level", self._level)
+        # 不写 ``player.level``：它现在是「设置 → 在线音质」的专属键，由设置页
+        # 维护。红心页的档位写到 ``player.liked_level``。播放器只记住当前队列
+        # 属于哪一边，下次启动时按那边重新取档位。
+        self.cfg.set("player.queue_scope", self._level_scope)
         self.cfg.set("player.mode", self._mode)
         self.cfg.set("player.speed", float(self._speed))
         self.cfg.set("player.pitch", float(self._pitch))
@@ -917,6 +940,7 @@ class PlaybackController(QObject):
             "quality": song.quality,
             "source": song.source,
             "stream_id": song.stream_id,
+            "alg": song.alg,
         }
 
     @staticmethod
@@ -972,6 +996,7 @@ class PlaybackController(QObject):
             quality=str(data.get("quality") or ""),
             source=source,
             stream_id=str(data.get("stream_id") or ""),
+            alg=str(data.get("alg") or ""),
         )
 
     def _restore_queue(self) -> None:
@@ -989,6 +1014,11 @@ class PlaybackController(QObject):
         if not songs:
             return
         self._queue = songs
+        # 队列来源跟着队列一起恢复：上次从红心页播的，这次仍用红心页的档位；
+        # 其余情况用设置里的全局档位。
+        scope = str(self.cfg.get("player.queue_scope", "global") or "global")
+        self._level_scope = "liked" if scope == "liked" else "global"
+        self._level = self._level_for_scope(self._level_scope)
         try:
             index = int(self.cfg.get("player.queue_index", -1))
         except (TypeError, ValueError):
@@ -1020,6 +1050,7 @@ class PlaybackController(QObject):
         self.cfg.set("player.queue", [self._song_to_dict(song) for song in self._queue])
         self.cfg.set("player.queue_index", -1 if self._index is None else int(self._index))
         self.cfg.set("player.position", float(self._position))
+        self.cfg.set("player.queue_scope", self._level_scope)
         try:
             self.cfg.save()
         except OSError:

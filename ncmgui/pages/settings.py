@@ -15,7 +15,7 @@ from ..config import config_dir
 from ..netutil import ProxyError, normalize_proxy
 from ..scrobble import PAUSE_MESSAGE
 from ..widgets.card import accent_button, danger_button, ghost_button
-from ..widgets.form import FormCard
+from ..widgets.form import FormCard, combo_data
 from ..workers import BackgroundTask
 from .base import BasePage
 
@@ -141,6 +141,18 @@ class SettingsPage(BasePage):
         self.mpv_detected.setObjectName("Hint")
         self.mpv_detected.setWordWrap(True)
         card.add_widget(self.mpv_detected)
+
+        # 全局的在线播放档位。以前这个下拉放在红心页工具栏里，可它影响的是
+        # 所有在线播放（发现、搜索、歌单、漫游……），从别的页进来的人根本
+        # 找不到。设置项就该待在设置页。
+        self.play_level = card.add_combo(
+            "在线音质",
+            ncmctl.DOWNLOAD_LEVELS,
+            str(self.cfg.get("player.level", "exhigh") or "exhigh"),
+            hint="发现、搜索、歌单等页面开始播放时使用；红心页有自己的下拉，"
+                 "不受这里影响。改完对下一首生效。非会员或歌曲没有该档位时"
+                 "服务端会自动降级，播放页顶部显示的是实际拿到的音质。",
+        )
 
         self.allow_trial = card.add_switch(
             "允许播放会员歌曲的试听片段",
@@ -837,6 +849,12 @@ class SettingsPage(BasePage):
     def save_config(self) -> None:
         self.cfg.set("ncmctl_path", self.binary_path.path())
         self.cfg.set("player.mpv_path", self.mpv_path.path())
+        level = combo_data(self.play_level, "exhigh")
+        self.cfg.set("player.level", level)
+        # 只影响由发现、搜索等页面开始的队列；正在播的红心队列有自己的档位，
+        # 不能被这里的改动带跑。切换也只对下一首的取链生效，不打断当前这首。
+        if self.window.playback.level_scope == "global":
+            self.window.playback.set_level(level)
         self.cfg.set("player.allow_trial", self.allow_trial.isChecked())
         scrobble_enabled = self.scrobble.isChecked()
         if bool(self.cfg.get("player.scrobble", False)) != scrobble_enabled:

@@ -19,17 +19,31 @@ from .errors import AntiCheatRequired, ApiError, AuthRequired
 from .models import (
     Album,
     Artist,
+    ChartGroup,
     CloudSong,
     Comment,
+    DislikeReason,
+    Mv,
     Playlist,
+    Podcast,
+    Program,
     SearchPage,
+    UserNote,
+    UserProfile,
     album_from_api,
     artist_from_api,
+    chart_groups_from_api,
     cloud_song_from_api,
     comment_from_api,
+    dislike_reason_from_api,
+    mv_from_api,
     playlist_from_api,
+    podcast_from_api,
+    program_from_api,
     song_from_api,
     songs_from_api,
+    user_from_api,
+    user_notes_from_api,
 )
 from .transport import Transport
 
@@ -238,9 +252,133 @@ class ApiClient:
         return [artist_from_api(item) for item in (payload.get("artists") or [])
                 if isinstance(item, dict)]
 
-    def personal_fm(self) -> list:
-        payload = self.transport.get("/api/v1/radio/get")
+    def charts(self) -> list[ChartGroup]:
+        """排行榜分类与榜单列表。
+
+        网页端「排行榜」页用的是 ``toplist/detail/v2``：分组里既有可直接
+        打开的歌单榜（``targetType=PLAYLIST``），也有 H5 榜单，后者在
+        :func:`chart_from_api` 里被过滤掉。
+        """
+        payload = self.transport.weapi("/weapi/toplist/detail/v2", {})
+        return chart_groups_from_api(payload)
+
+    # ---------------------------------------------------------------- MV
+
+    def mv_recommend(self, limit: int = 24) -> list[Mv]:
+        """「音乐视频」默认页：网易云独家推荐。"""
+        payload = self.transport.weapi(
+            "/weapi/mv/exclusive/rcmd", {"limit": max(1, int(limit))})
+        return [mv for mv in (
+            mv_from_api(item if isinstance(item, dict) else None)
+            for item in (payload.get("data") or [])
+        ) if mv is not None]
+
+    def mv_search(self, keyword: str, limit: int = 30,
+                  offset: int = 0) -> list[Mv]:
+        payload = self.transport.post(
+            "/api/cloudsearch/pc",
+            {"s": str(keyword or ""), "type": 1004,
+             "limit": max(1, int(limit)), "offset": max(0, int(offset))},
+        )
+        result = payload.get("result") or {}
+        return [mv for mv in (
+            mv_from_api(item if isinstance(item, dict) else None)
+            for item in (result.get("mvs") or [])
+        ) if mv is not None]
+
+    def mv_detail(self, mv_id: int) -> Mv:
+        payload = self.transport.weapi("/weapi/mv/detail", {"id": int(mv_id)})
+        data = payload.get("data") or {}
+        mv = mv_from_api(data)
+        if mv is None:
+            raise ApiError("这个 MV 不存在或已下架")
+        return mv
+
+    def mv_url(self, mv_id: int, quality: int = 1080) -> tuple[str, int]:
+        """取 MV 播放地址。返回 ``(url, fee)``；``fee`` 非 0 说明要会员。"""
+        payload = self.transport.weapi(
+            "/weapi/song/enhance/play/mv/url",
+            {"id": int(mv_id), "r": int(quality)},
+        )
+        data = payload.get("data") or {}
+        url = str(data.get("url") or "")
+        if not url:
+            raise ApiError("这个 MV 暂时没有可播放的地址（可能需要会员或已下架）")
+        return url, int(data.get("fee") or 0)
+
+    def personal_fm(self, limit: int = 3) -> list:
+        """漫游 / 私人 FM 的一批歌曲。
+
+        网页播放器的「漫游」走 weapi，未登录时退回明文接口。一次只返回
+        3 首左右，队列快放完时要及时补一批。
+        """
+        if self.logged_in:
+            payload = self.transport.weapi(
+                "/weapi/v1/radio/get", {"limit": max(1, int(limit))})
+        else:
+            payload = self.transport.get("/api/v1/radio/get")
         return songs_from_api(payload.get("data") or [])
+
+    def fm_skip(self, song_id: int, seconds: float = 0) -> None:
+        """漫游里「下一首」。告诉服务端这首歌听了多久就跳了。"""
+        self.need_login()
+        self.transport.weapi(
+            "/weapi/v1/radio/skip",
+            {"songId": int(song_id), "time": max(0, int(seconds))},
+            write=True,
+        )
+
+    def fm_trash(self, song_id: int, seconds: float = 0,
+                 alg: str = "RT") -> None:
+        """漫游里「不感兴趣」。服务端会把这首歌排除出后续推荐。
+
+        ``alg`` 是这首歌在 ``radio/get`` 响应里的推荐来源标记。网页播放器
+        原样回传；拿不到时沿用旧客户端的 ``RT``，服务端一样接受。
+        """
+        self.need_login()
+        self.transport.weapi(
+            "/weapi/radio/trash/add",
+            {"songId": int(song_id), "alg": str(alg or "RT"),
+             "time": max(0, int(seconds))},
+            write=True,
+        )
+
+    def dislike_reasons(self, song_id: int) -> list[DislikeReason]:
+        """漫游「不感兴趣」菜单：推荐重复、推荐不感兴趣、屏蔽歌手。
+
+        网页端把歌曲包装成 ``resources`` 里的一个 JSON 字符串再加密提交；
+        这里照抄同样的形状，少了它会返回空列表。
+        """
+        self.need_login()
+        sid = str(int(song_id))
+        resource = json.dumps(
+            {"resourceId": sid, "resourceType": 4,
+             "targetUrl": "", "encId": sid},
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        payload = self.transport.weapi(
+            "/weapi/personalized/dislike/reason",
+            {"resources": [resource], "scene": "", "page": "userfm"},
+        )
+        reasons: list[DislikeReason] = []
+        for item in (payload.get("data") or []):
+            reason = dislike_reason_from_api(
+                item if isinstance(item, dict) else None)
+            if reason is not None:
+                reasons.append(reason)
+        return reasons
+
+    def blacklist_artist(self, artist_id: int) -> None:
+        """「屏蔽歌手」：把歌手加入音乐黑名单，后续推荐不再出现。"""
+        self.need_login()
+        artist_id = int(artist_id)
+        if artist_id <= 0:
+            return
+        self.transport.weapi(
+            "/weapi/music-blacklist/add",
+            {"contentType": "artist", "contentIdList": [artist_id]},
+            write=True,
+        )
 
     # ------------------------------------------------------------ 歌单/专辑/歌手
 
@@ -363,6 +501,42 @@ class ApiClient:
                     if isinstance(item, dict)]
         return comments, int(payload.get("total") or 0), bool(payload.get("more"))
 
+    @staticmethod
+    def song_thread_id(song_id: int) -> str:
+        """歌曲评论区的 threadId。网页端所有评论接口都用这个格式。"""
+        return f"R_SO_4_{int(song_id)}"
+
+    def add_comment(self, song_id: int, content: str, *,
+                    reply_to: int = 0) -> Comment:
+        """发一条歌曲评论；``reply_to`` 非 0 时发成楼中楼回复。"""
+        self.need_login()
+        text = (content or "").strip()
+        if not text:
+            raise ApiError("评论内容不能为空")
+        data: dict[str, Any] = {
+            "threadId": self.song_thread_id(song_id),
+            "content": text,
+        }
+        if reply_to:
+            data["commentId"] = int(reply_to)
+        payload = self.transport.weapi(
+            "/weapi/resource/comments/add", data, write=True)
+        raw = payload.get("comment") or {}
+        if not raw:
+            raise ApiError("评论没有发出去，服务端没有返回评论内容")
+        return comment_from_api(raw)
+
+    def like_comment(self, comment_id: int, thread_id: str,
+                     on: bool = True) -> None:
+        """给评论点赞 / 取消点赞。"""
+        self.need_login()
+        self.transport.weapi(
+            "/weapi/v1/comment/like",
+            {"threadId": thread_id, "commentId": int(comment_id),
+             "like": bool(on)},
+            write=True,
+        )
+
     # -------------------------------------------------------------- 用户
 
     def user_playlists(self, uid: int | None = None) -> list[Playlist]:
@@ -403,6 +577,190 @@ class ApiClient:
                                      {"limit": limit, "offset": offset})
         return [artist_from_api(item) for item in (payload.get("data") or [])
                 if isinstance(item, dict)]
+
+    # -------------------------------------------------------------- 关注
+
+    def user_detail(self, uid: int | None = None) -> dict:
+        """用户资料。未指定 ``uid`` 时取当前账号。"""
+        uid = int(uid or self._uid)
+        if not uid:
+            raise AuthRequired("还没有拿到账号 UID，请先登录")
+        payload = self.transport.weapi(f"/weapi/w/v1/user/detail/{uid}", {})
+        return payload.get("profile") or payload
+
+    def user_profile(self, uid: int | None = None) -> UserProfile:
+        """用户主页头部资料（昵称、等级、关注/粉丝数、是否已关注）。"""
+        uid = int(uid or self._uid)
+        if not uid:
+            raise AuthRequired("还没有拿到账号 UID，请先登录")
+        payload = self.transport.weapi(f"/weapi/w/v1/user/detail/{uid}", {})
+        profile = user_from_api(payload)
+        if profile is None:
+            raise ApiError("这个用户不存在或资料不可见")
+        return profile
+
+    def user_play_record(self, uid: int | None = None, *,
+                         week: bool = False) -> list[tuple[Any, int]]:
+        """听歌排行：``week=True`` 是最近一周，否则是全部时间。
+
+        返回 ``[(Song, 播放次数)]``。对方关闭公开听歌记录时接口返回空列表。
+        """
+        uid = int(uid or self._uid)
+        if not uid:
+            raise AuthRequired("还没有拿到账号 UID，请先登录")
+        payload = self.transport.weapi(
+            "/weapi/v1/play/record", {"uid": uid, "type": 1 if week else 0})
+        rows = payload.get("weekData" if week else "allData") or []
+        result: list[tuple[Any, int]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            song = song_from_api(row.get("song"))
+            if song is not None:
+                result.append((song, int(row.get("playCount") or 0)))
+        return result
+
+    # -------------------------------------------------------------- 用户主页
+
+    def user_notes(self, uid: int | None = None, limit: int = 20,
+                   lasttime: int = 0) -> tuple[list[UserNote], bool, int]:
+        """用户发过的笔记 / 动态。返回 ``(notes, more, lasttime)``。"""
+        uid = int(uid or self._uid)
+        if not uid:
+            raise AuthRequired("还没有拿到账号 UID，请先登录")
+        payload = self.transport.weapi(
+            f"/weapi/event/get/{uid}",
+            {"limit": max(1, int(limit)), "lasttime": max(0, int(lasttime))},
+        )
+        return (
+            user_notes_from_api(payload),
+            bool(payload.get("more")),
+            int(payload.get("lasttime") or 0),
+        )
+
+    def user_radios(self, uid: int | None = None) -> list[Podcast]:
+        """用户在播客里创建的电台；别人的主页也能看公开的那些。"""
+        uid = int(uid or self._uid)
+        if not uid:
+            raise AuthRequired("还没有拿到账号 UID，请先登录")
+        payload = self.transport.weapi(
+            "/weapi/djradio/get/byuser/v1",
+            {"userId": uid, "offset": 0, "limit": 100},
+        )
+        return [
+            podcast for podcast in (
+                podcast_from_api(item)
+                for item in (payload.get("djRadios") or [])
+                if isinstance(item, dict)
+            )
+            if podcast is not None
+        ]
+
+    def following_feed(self, limit: int = 20,
+                       cursor: str = "") -> tuple[list[dict], bool, str]:
+        """关注动态流。返回 ``(events, more, cursor)``。
+
+        网页端历史动态用 ``event/pc/history/feed/get``，返回的事件里
+        ``json`` 是一段 JSON 字符串（分享歌曲/歌单/评论等），页面自己解析。
+        """
+        self.need_login()
+        data: dict[str, Any] = {"limit": max(1, int(limit))}
+        if cursor:
+            data["cursor"] = str(cursor)
+        payload = self.transport.weapi("/weapi/event/pc/history/feed/get", data)
+        body = payload.get("data") or {}
+        events = [item for item in (body.get("events") or [])
+                  if isinstance(item, dict)]
+        return events, bool(body.get("more")), str(body.get("cursor") or "")
+
+    def following_users(self, uid: int | None = None, limit: int = 50,
+                        offset: int = 0) -> list[dict]:
+        """某个用户关注的人。"""
+        uid = int(uid or self._uid)
+        if not uid:
+            raise AuthRequired("还没有拿到账号 UID，请先登录")
+        payload = self.transport.weapi(
+            f"/weapi/user/getfollows/{uid}",
+            {"limit": max(1, int(limit)), "offset": max(0, int(offset))},
+        )
+        return [item for item in (payload.get("follow") or [])
+                if isinstance(item, dict)]
+
+    def follow_user(self, uid: int, on: bool = True) -> None:
+        """关注 / 取消关注一个用户。"""
+        self.need_login()
+        action = "follow" if on else "delfollow"
+        self.transport.weapi(f"/weapi/user/{action}/{int(uid)}", {},
+                             write=True)
+
+    # -------------------------------------------------------------- 播客
+
+    def podcast_home(self) -> list[dict]:
+        """播客首页的推荐区块（原始结构，页面按 block 渲染）。"""
+        payload = self.transport.weapi("/weapi/voice/homepage/block/page", {})
+        body = payload.get("data") or {}
+        return [item for item in (body.get("blocks") or [])
+                if isinstance(item, dict)]
+
+    def _podcast_list(self, path: str, limit: int,
+                      offset: int = 0) -> list[Podcast]:
+        payload = self.transport.weapi(path, {"limit": max(1, int(limit)),
+                                              "offset": max(0, int(offset))})
+        body = payload.get("data") or {}
+        items = body.get("data") if isinstance(body, dict) else None
+        if items is None:
+            items = payload.get("djRadios") or []
+        result: list[Podcast] = []
+        for item in items:
+            podcast = podcast_from_api(item if isinstance(item, dict) else None)
+            if podcast is not None:
+                result.append(podcast)
+        return result
+
+    def subscribed_podcasts(self, limit: int = 200) -> list[Podcast]:
+        """我的播客 → 订阅。"""
+        self.need_login()
+        return self._podcast_list(
+            "/weapi/social/my/subscribed/voicelist/v1", limit)
+
+    def created_podcasts(self, limit: int = 200) -> list[Podcast]:
+        """我的播客 → 我创建的。"""
+        self.need_login()
+        return self._podcast_list(
+            "/weapi/social/my/created/voicelist/v1", limit)
+
+    def subscribed_radios(self, limit: int = 100) -> list[Podcast]:
+        """传统电台订阅（``djradio/get/subed``）。"""
+        self.need_login()
+        return self._podcast_list("/weapi/djradio/get/subed", limit)
+
+    def my_podcasts(self, limit: int = 200) -> list[Podcast]:
+        """订阅的播客 + 我创建的播客，按 ID 去重。"""
+        merged: dict[int, Podcast] = {}
+        for loader in (self.subscribed_podcasts, self.created_podcasts,
+                       self.subscribed_radios):
+            try:
+                for podcast in loader(limit):
+                    merged.setdefault(podcast.id, podcast)
+            except ApiError:
+                continue
+        return list(merged.values())
+
+    def podcast_programs(self, radio_id: int, limit: int = 50,
+                         offset: int = 0,
+                         asc: bool = False) -> tuple[list[Program], bool, int]:
+        """某个播客的节目列表。返回 ``(programs, more, total)``。"""
+        payload = self.transport.weapi(
+            "/weapi/dj/program/byradio",
+            {"radioId": int(radio_id), "limit": max(1, int(limit)),
+             "offset": max(0, int(offset)), "asc": bool(asc)},
+        )
+        programs = [program_from_api(item)
+                    for item in (payload.get("programs") or [])
+                    if isinstance(item, dict)]
+        programs = [program for program in programs if program is not None]
+        total = int(payload.get("count") or payload.get("total") or 0)
+        return programs, bool(payload.get("more")), total
 
     # -------------------------------------------------------------- 云盘
 
