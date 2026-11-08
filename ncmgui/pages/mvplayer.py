@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PyQt6.QtMultimedia import (
+    QAudioDevice,
+    QAudioOutput,
+    QMediaDevices,
+    QMediaPlayer,
+)
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
     QApplication,
@@ -64,6 +69,38 @@ def _quiet_ffmpeg() -> None:
 
 
 _quiet_ffmpeg()
+
+
+def _device_id(device: QAudioDevice) -> str:
+    return bytes(device.id().data()).decode("utf-8", "replace")
+
+
+def _match_audio_device(name: str) -> QAudioDevice | None:
+    """把 mpv 的 ``audio-device`` 名字映射成 Qt 的 ``QAudioDevice``。
+
+    mpv 枚举出来的名字带 ``pipewire/`` / ``pulse/`` 这类后端前缀，Qt 用的
+    是去掉前缀后的 id；Windows 上一边是 wasapi 的 GUID、另一边也是 GUID，
+    按 id 匹配不上时再退回设备描述。空值和 ``pipewire`` 这类后端默认名都
+    表示「跟随系统默认设备」。
+    """
+    devices = QMediaDevices.audioOutputs()
+    if not devices:
+        return None
+    wanted = str(name or "").strip()
+    if wanted in ("", "auto", "pipewire", "pulse", "alsa"):
+        return QMediaDevices.defaultAudioOutput()
+    aliases = {wanted}
+    if "/" in wanted:
+        aliases.add(wanted.split("/", 1)[1])
+    folded = {item.casefold() for item in aliases}
+    for device in devices:
+        ident = _device_id(device)
+        if ident in aliases or ident.casefold() in folded:
+            return device
+    for device in devices:
+        if device.description().casefold() == wanted.casefold():
+            return device
+    return None
 
 
 def _clock(milliseconds: int) -> str:
@@ -165,6 +202,18 @@ class MvPlayerPage(BasePage):
         self.media = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.audio.setVolume(self.volume.value() / 100)
+        # QAudioOutput 只在创建时挑一次设备，之后系统默认设备变了（比如
+        # 连上蓝牙耳机）它不会跟着切，结果歌在耳机里、MV 还在扬声器上。
+        # 跟着播放器当前设备走，并在设备列表变化时重新解析。
+        # 注：这个版本的 Qt 没有 defaultAudioOutputChanged，所以默认设备
+        # 的切换靠 audioOutputsChanged 和每次起播前的同步兜住。
+        self._output_device_id = ""
+        self._media_devices = QMediaDevices(self)
+        self._media_devices.audioOutputsChanged.connect(self._sync_output_device)
+        playback = getattr(self.window, "playback", None)
+        if playback is not None:
+            playback.audioInfoChanged.connect(self._sync_output_device)
+        self._sync_output_device()
         self.media.setAudioOutput(self.audio)
         self.media.setVideoOutput(self.video)
         self.media.positionChanged.connect(self._on_position)
@@ -200,6 +249,8 @@ class MvPlayerPage(BasePage):
         if not self._url:
             self.status.setText("这个 MV 没有可播放的地址。")
             return
+        # 起播前再确认一次：从上次播放到现在，默认设备可能已经换了
+        self._sync_output_device()
         self.media.setSource(QUrl(self._url))
         self.media.play()
 
@@ -235,6 +286,22 @@ class MvPlayerPage(BasePage):
 
     def _set_volume(self, value: int) -> None:
         self.audio.setVolume(max(0, min(100, value)) / 100)
+
+    def _sync_output_device(self, *_args) -> None:
+        """让 MV 的声音跟着播放器当前选中的输出设备。"""
+        playback = getattr(self.window, "playback", None)
+        name = str(getattr(playback, "audio_device", "") or "")
+        device = _match_audio_device(name)
+        if device is None or device.isNull():
+            # 显式配置的设备可能刚被拔掉；退回系统默认，比继续走旧设备好
+            device = QMediaDevices.defaultAudioOutput()
+        if device is None or device.isNull():
+            return
+        ident = _device_id(device)
+        if ident == self._output_device_id:
+            return
+        self._output_device_id = ident
+        self.audio.setDevice(device)
 
     def _toggle_fullscreen(self) -> None:
         self.video.setFullScreen(not self.video.isFullScreen())
