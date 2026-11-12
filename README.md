@@ -466,7 +466,10 @@ macOS 的 Now Playing 目前还没有接入；那边的耳机按键暂时不会�
 
 ## 自动更新本程序
 
-「设置 → 更新本程序」固定在设置页最上方，会读 GitHub 的最新 Release，和当前版本比较：
+「设置 → 更新本程序」固定在设置页最上方，默认先读个人站点
+（`www.linxuhan.top/NCM-Studio/version.json`）的最新版本号，安装包与校验文件
+从 `dl.linxuhan.top` 的 Cloudflare 镜像下载；站点不可用时自动回退 GitHub。
+也可以在「更新源」里手动固定为个人站点或 GitHub：
 
 - **每次启动检查**（可关）。发现新版会直接弹窗列出新版本与安装包大小，让你当场
   选择「下载并安装」或「稍后再说」；检查失败则静默跳过，不打扰启动；
@@ -482,7 +485,8 @@ macOS 的 Now Playing 目前还没有接入；那边的耳机按键暂时不会�
   「名字写着 3.0.0、内容是 3.0.3」或菜单项失效。文件名不带版本号则保持不变；
   如果目标文件名已被其他文件占用（比如用户自己下载过同版本），**保持原文件名、不覆盖**；
 - 源码运行时不能替换（没有可替换的产物），按钮是灰的，只提示 `git pull`；
-- 下载和检查都可以走「GitHub 代理」，留空用系统代理，填 `direct` 强制直连。
+- 「GitHub 代理」只作用于 `api.github.com` / `github.com`；个人站点和下载镜像
+  始终直连，国内不必为它们额外挂代理。留空走系统代理，填 `direct` 强制直连。
 
 > 自动更新只做「下载 → 校验 → 验证签名 → 替换 → 重启」。任何一步失败都会保留
 > 现有版本，并给出 Release 页链接供手动下载。
@@ -627,7 +631,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.0.1 packaging\ncm-studio.iss
+iscc /DAppVersion=4.0.2 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \

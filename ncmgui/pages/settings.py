@@ -370,7 +370,8 @@ class SettingsPage(BasePage):
     def _build_app_update_card(self) -> None:
         card = FormCard(
             "更新本程序",
-            "从 GitHub Release 读取最新版本，下载后校验 SHA-256，再替换当前程序并重启。"
+            "优先从个人站点检查版本与下载（国内更快），失败再回退 GitHub。"
+            "下载后校验 SHA-256 与发布签名，再替换当前程序并重启。"
             "源码运行时只能手动 git pull。",
         )
 
@@ -401,20 +402,33 @@ class SettingsPage(BasePage):
         self.app_check_btn.clicked.connect(lambda: self.check_updates())
         self.app_install_btn = accent_button("下载并安装")
         self.app_install_btn.clicked.connect(self._install_app_update)
-        self.app_release_btn = ghost_button("打开 Release 页")
+        self.app_release_btn = ghost_button("打开下载页")
         self.app_release_btn.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE))
+            lambda: QDesktopServices.openUrl(QUrl(updater.SITE_PAGE))
         )
         card.add_row_of(
             self.app_check_btn, self.app_install_btn, self.app_release_btn
         )
 
+        self.app_source = card.add_combo(
+            "更新源",
+            [
+                ("自动：个人站点优先，失败回退 GitHub", "auto"),
+                ("个人站点（dl.linxuhan.top）", "site"),
+                ("GitHub", "github"),
+            ],
+            str(self.cfg.get("update.source", "auto") or "auto"),
+            hint="个人站点走 Cloudflare 镜像，国内通常比 GitHub 快；自动模式"
+                 "只在站点检查或下载失败时才回退。安装包仍会校验 SHA-256 与"
+                 "发布签名，换源不影响完整性。",
+        )
+
         self.app_proxy = card.add_line(
             "GitHub 代理", value=self.cfg.get("update.git_proxy", ""),
             placeholder="留空走系统代理；填 direct 强制直连",
-            hint="检查更新和下载安装包都走这个设置。HTTP 代理转发 HTTPS 时走 "
-                 "CONNECT 隧道，TLS 仍端到端加密，但代理能看到目标域名 —— "
-                 "请只在可信网络使用。",
+            hint="只用于 api.github.com 与 github.com；个人站点和下载镜像"
+                 "始终直连。HTTP 代理转发 HTTPS 时走 CONNECT 隧道，TLS 仍"
+                 "端到端加密，但代理能看到目标域名 —— 请只在可信网络使用。",
         )
         self.app_check_on_start = card.add_switch(
             "每次启动检查更新",
@@ -462,13 +476,16 @@ class SettingsPage(BasePage):
         if self._update_task is not None and self._update_task.is_running:
             return
         proxy = self.app_proxy.text().strip()
+        source = str(self.app_source.currentData() or "auto")
         self.cfg.set("update.git_proxy", proxy)
+        self.cfg.set("update.source", source)
         self.app_status.setText("正在检查更新…")
         self.app_progress.setVisible(False)
         self._app_asset = None
         self._sync_app_buttons()
 
-        task = BackgroundTask(lambda: updater.fetch_release(proxy), parent=self)
+        task = BackgroundTask(
+            lambda: updater.fetch_release(proxy, source=source), parent=self)
         self._update_task = task
         task.done.connect(lambda release: self._on_release(release, silent, prompt))
         task.failed.connect(lambda message: self._on_check_failed(message, silent))
@@ -589,7 +606,7 @@ class SettingsPage(BasePage):
                     )
                 self._start_install()
         elif box.clickedButton() is open_btn:
-            QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE))
+            QDesktopServices.openUrl(QUrl(updater.SITE_PAGE))
 
     def _install_app_update(self) -> None:
         release, asset, target = self._release, self._app_asset, self._target
@@ -601,7 +618,7 @@ class SettingsPage(BasePage):
                 self,
                 "无法自动安装",
                 "当前运行方式不支持自动替换。<br><br>"
-                f"请到 <a href='{updater.RELEASES_PAGE}'>{updater.RELEASES_PAGE}</a> 手动下载。",
+                f"请到 <a href='{updater.SITE_PAGE}'>{updater.SITE_PAGE}</a> 手动下载。",
             )
             return
 
@@ -632,6 +649,9 @@ class SettingsPage(BasePage):
             return
 
         proxy = self.app_proxy.text().strip()
+        source = str(self.app_source.currentData() or "auto")
+        self.cfg.set("update.git_proxy", proxy)
+        self.cfg.set("update.source", source)
         new = target.with_name(target.name + ".new")
         part = new.with_name(new.name + ".part")
 
@@ -647,7 +667,7 @@ class SettingsPage(BasePage):
         holder: dict[str, BackgroundTask] = {}
 
         def work():
-            checksums = updater.fetch_checksums(release, proxy)
+            checksums = updater.fetch_checksums(release, proxy, source=source)
             expected = checksums.get(asset.name, "")
             if not expected:
                 raise updater.UpdateError(
@@ -655,7 +675,7 @@ class SettingsPage(BasePage):
                 )
             task = holder["task"]
             updater.download(
-                asset.url,
+                updater.asset_urls(release, asset, source),
                 part,
                 lambda done, total: task.percent.emit(
                     int(done * 100 / total) if total > 0 else -1
@@ -736,7 +756,7 @@ class SettingsPage(BasePage):
             self,
             "安装更新失败",
             f"{message}<br><br>当前版本仍可继续使用。"
-            f"也可以到 <a href='{updater.RELEASES_PAGE}'>{updater.RELEASES_PAGE}</a> 手动下载。",
+            f"也可以到 <a href='{updater.SITE_PAGE}'>{updater.SITE_PAGE}</a> 手动下载。",
         )
 
     # ---------------------------------------------------------------- 更新
@@ -867,4 +887,5 @@ class SettingsPage(BasePage):
         self.cfg.set("debug", self.debug.isChecked())
         self.cfg.set("update.proxy", self.update_proxy.text().strip())
         self.cfg.set("update.git_proxy", self.app_proxy.text().strip())
+        self.cfg.set("update.source", str(self.app_source.currentData() or "auto"))
         self.cfg.set("update.check_on_start", self.app_check_on_start.isChecked())

@@ -1,8 +1,10 @@
-"""从 GitHub Releases 检查并安装本程序的新版本。
+"""检查并安装本程序的新版本。
 
-流程刻意分成四步，任何一步失败都不会动到正在运行的程序：
+默认先读个人站点上的版本号、从 Cloudflare 下载镜像取文件（国内更快），
+站点不可用时回退 GitHub Releases。流程刻意分成四步，任何一步失败都不会
+动到正在运行的程序：
 
-1. 读 ``releases/latest``（GitHub 会自动跳过草稿与预发布）；
+1. 读个人站点的 ``version.json``（失败则读 GitHub ``releases/latest``）；
 2. 下载对应平台的资产到**目标同目录**的 ``.new`` 文件；
 3. 用 Release 里的 ``SHA256SUMS`` 校验 —— **拿不到校验文件就拒绝安装**；
    校验和本身还要用 ``SHA256SUMS.sig`` 验证 —— 两个文件来自同一个 Release，
@@ -29,7 +31,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,9 +45,20 @@ from . import VERSION
 REPO = "iamlinxuhan/NCM-Studio"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
+GITHUB_DOWNLOAD = f"https://github.com/{REPO}/releases/download"
 SUMS_ASSET = "SHA256SUMS"
 #: ``SHA256SUMS`` 的 Ed25519 分离签名（原始 64 字节）。
 SIG_ASSET = "SHA256SUMS.sig"
+
+#: 个人站点。版本检查走这里的小 JSON，安装包走 Cloudflare Worker 的下载
+#: 镜像 —— 国内访问比 api.github.com / github.com 稳定得多。
+SITE_PAGE = "https://www.linxuhan.top/NCM-Studio/"
+SITE_VERSION = f"{SITE_PAGE}version.json"
+MIRROR_BASE = "https://dl.linxuhan.top/NCM-Studio"
+
+#: tag / 文件名要能安全地拼进 URL，规则与 Cloudflare Worker 保持一致。
+_SAFE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 #: 更新链的信任根：32 字节 Ed25519 公钥的 base64。
 #:
@@ -368,10 +383,24 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _read(url: str, proxy: str = "", timeout: float = 10.0) -> bytes:
+def _proxy_for(url: str, proxy: str) -> str:
+    """GitHub 才走用户配置的代理，个人站点与下载镜像强制直连。
+
+    「GitHub 代理」这个设置本来就是为 api.github.com / github.com 准备的；
+    国内访问 dl.linxuhan.top 反而直连更快，绕到代理上只会更慢。
+    """
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if host == "github.com" or host.endswith(".github.com") \
+            or host.endswith(".githubusercontent.com"):
+        return proxy
+    return "direct"
+
+
+def _read_one(url: str, proxy: str = "", timeout: float = 10.0,
+              label: str = "GitHub") -> bytes:
     request = urllib.request.Request(url, headers=_headers())
     try:
-        opener = _opener(proxy)
+        opener = _opener(_proxy_for(url, proxy))
     except ValueError as exc:
         raise UpdateError(f"代理设置无效：{exc}") from exc
     try:
@@ -379,21 +408,103 @@ def _read(url: str, proxy: str = "", timeout: float = 10.0) -> bytes:
             return response.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 403:
-            raise UpdateError(
-                "GitHub 拒绝了这次请求（可能是访问太频繁被限流）。稍后再试，"
-                "或在「设置 → 更新本程序」里填一个 GitHub 代理。"
-            ) from exc
+            hint = (
+                "稍后再试，或在「设置 → 更新本程序」里填一个 GitHub 代理。"
+                if label == "GitHub" else "稍后再试。"
+            )
+            raise UpdateError(f"{label} 拒绝了这次请求（可能是被限流）。{hint}") from exc
         if exc.code == 404:
-            raise UpdateError("仓库或 Release 不存在（404）。") from exc
-        raise UpdateError(f"GitHub 返回 HTTP {exc.code}。") from exc
+            raise UpdateError(f"{label} 返回 404（文件或版本不存在）。") from exc
+        raise UpdateError(f"{label} 返回 HTTP {exc.code}。") from exc
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
-        raise UpdateError(f"连不上 GitHub：{reason}") from exc
+        raise UpdateError(f"连不上 {label}：{reason}") from exc
 
 
-def fetch_release(proxy: str = "", timeout: float = 10.0) -> Release:
-    """读最新的正式 Release。"""
-    payload = _read(API_LATEST, proxy, timeout)
+def _read_any(urls: Iterable[str], proxy: str = "", timeout: float = 10.0,
+              label: str = "更新源") -> bytes:
+    """按顺序尝试多个地址，返回第一个成功的内容。"""
+    errors: list[str] = []
+    for url in urls:
+        try:
+            return _read_one(url, proxy, timeout, label)
+        except UpdateError as exc:
+            errors.append(str(exc))
+    if not errors:
+        raise UpdateError(f"没有可用的 {label}。")
+    raise UpdateError(errors[-1] if len(errors) == 1 else "；".join(errors))
+
+
+def mirror_url(tag: str, name: str) -> str:
+    """个人站点的下载镜像地址；tag / 文件名不合法时返回空串。"""
+    tag = str(tag or "")
+    name = str(name or "")
+    if not _SAFE_TAG.match(tag) or not _SAFE_FILE.match(name):
+        return ""
+    return f"{MIRROR_BASE}/{tag}/{name}"
+
+
+def github_url(tag: str, name: str) -> str:
+    tag = str(tag or "")
+    name = str(name or "")
+    if not _SAFE_TAG.match(tag) or not _SAFE_FILE.match(name):
+        return ""
+    return f"{GITHUB_DOWNLOAD}/{tag}/{name}"
+
+
+def asset_urls(release: Release, asset: Asset, source: str = "auto") -> tuple[str, ...]:
+    """一个资产按偏好顺序排好的下载地址。
+
+    ``auto`` 先个人站点、失败再回退 GitHub；``site`` / ``github`` 只用指定源。
+    """
+    if source not in ("auto", "site", "github"):
+        source = "auto"
+    urls: list[str] = []
+    if source in ("auto", "site"):
+        urls.append(mirror_url(release.tag, asset.name))
+    if source in ("auto", "github"):
+        urls.append(asset.url or github_url(release.tag, asset.name))
+    return tuple(dict.fromkeys(url for url in urls if url))
+
+
+def parse_site_version(payload: bytes) -> str:
+    """解析个人站点的 ``version.json``，只认一个 tag 字段。"""
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise UpdateError("个人站点返回的版本信息不是合法 JSON。") from exc
+    tag = ""
+    if isinstance(data, dict):
+        tag = str(data.get("tag") or data.get("tag_name") or "").strip()
+    if not _SAFE_TAG.match(tag):
+        raise UpdateError("个人站点返回的版本号不合法。")
+    return tag
+
+
+def _release_from_site(tag: str) -> Release:
+    """站点只提供版本号，资产名是固定的，下载地址由两个来源现拼。"""
+    names = tuple(dict.fromkeys((*ASSETS.values(), SUMS_ASSET, SIG_ASSET)))
+    return Release(
+        tag=tag,
+        page_url=SITE_PAGE,
+        assets=tuple(Asset(name=name, url="") for name in names),
+    )
+
+
+def fetch_site_release(proxy: str = "", timeout: float = 10.0) -> Release:
+    """读个人站点上的 ``version.json``。
+
+    带时间戳查询参数绕过 Cloudflare 的静态缓存，否则刚发版时可能还读到旧值。
+    按分钟取整，既能让新版本一分钟内生效，也不会给缓存留下无限多的键。
+    """
+    url = f"{SITE_VERSION}?t={int(time.time() // 60)}"
+    tag = parse_site_version(_read_one(url, proxy, timeout, "个人站点"))
+    return _release_from_site(tag)
+
+
+def fetch_github_release(proxy: str = "", timeout: float = 10.0) -> Release:
+    """读 GitHub 最新的正式 Release。"""
+    payload = _read_one(API_LATEST, proxy, timeout)
     try:
         data = json.loads(payload.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
@@ -418,6 +529,36 @@ def fetch_release(proxy: str = "", timeout: float = 10.0) -> Release:
         page_url=str(data.get("html_url") or RELEASES_PAGE),
         assets=assets,
     )
+
+
+def fetch_release(proxy: str = "", timeout: float = 10.0,
+                  source: str = "auto") -> Release:
+    """读最新版本。
+
+    ``auto`` 先问个人站点，失败再回退 GitHub；``site`` / ``github`` 只用指定源。
+    站点只回一个版本号，拿到后资产名按 :data:`ASSETS` 固定拼出来 —— 真正的
+    完整性仍由 ``SHA256SUMS`` 的 Ed25519 签名保证，不依赖站点返回更多内容。
+    """
+    if source not in ("auto", "site", "github"):
+        source = "auto"
+    if source in ("auto", "site"):
+        try:
+            release = fetch_site_release(proxy, timeout)
+        except UpdateError:
+            if source == "site":
+                raise
+        else:
+            # 站点只负责「有没有新版」这一小步。确认有新版本后，再从 GitHub
+            # 补一次说明和文件大小；补不到就用手上这份，下载仍可继续。
+            if source == "auto" and is_newer(release.tag, VERSION):
+                try:
+                    github = fetch_github_release(proxy, timeout)
+                except UpdateError:
+                    return release
+                if release.version <= github.version:
+                    return github
+            return release
+    return fetch_github_release(proxy, timeout)
 
 
 def parse_checksums(text: str) -> dict[str, str]:
@@ -482,7 +623,8 @@ def verify_signature(
         ) from exc
 
 
-def fetch_checksums(release: Release, proxy: str = "", timeout: float = 10.0) -> dict[str, str]:
+def fetch_checksums(release: Release, proxy: str = "", timeout: float = 10.0,
+                    source: str = "auto") -> dict[str, str]:
     """下载、验签并解析这个 Release 的 ``SHA256SUMS``。
 
     缺校验和、缺签名、签名不符都抛 :class:`UpdateError` —— 不验签不安装。
@@ -500,8 +642,10 @@ def fetch_checksums(release: Release, proxy: str = "", timeout: float = 10.0) ->
             "已拒绝自动安装。请到 Release 页面手动下载。"
         )
 
-    payload = _read(sums_asset.url, proxy, timeout)
-    signature = _read(sig_asset.url, proxy, timeout)
+    payload = _read_any(asset_urls(release, sums_asset, source), proxy, timeout,
+                        "校验文件")
+    signature = _read_any(asset_urls(release, sig_asset, source), proxy, timeout,
+                          "签名文件")
     verify_signature(payload, signature)
 
     try:
@@ -526,29 +670,22 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def download(
+def _download_one(
     url: str,
     dest: Path,
-    on_progress: Callable[[int, int], None] | None = None,
-    proxy: str = "",
-    timeout: float = 30.0,
+    on_progress: Callable[[int, int], None] | None,
+    proxy: str,
+    timeout: float,
 ) -> None:
-    """把 ``url`` 流式写到 ``dest``。
-
-    ``on_progress(已下载字节, 总字节)``；服务端没给 ``Content-Length`` 时总字节是
-    ``-1``。写的是调用方给的路径（通常是 ``.part``），完成后由调用方改名。
-    """
-    dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers=_headers())
     try:
-        opener = _opener(proxy)
+        opener = _opener(_proxy_for(url, proxy))
     except ValueError as exc:
         raise UpdateError(f"代理设置无效：{exc}") from exc
+    total, done = -1, 0
     try:
         with opener.open(request, timeout=timeout) as response:
             total = int(response.headers.get("Content-Length") or -1)
-            done = 0
             with dest.open("wb") as handle:
                 while True:
                     chunk = response.read(CHUNK)
@@ -568,9 +705,45 @@ def download(
     finally:
         if on_progress is not None:
             try:
-                on_progress(done if "done" in locals() else 0, total if "total" in locals() else -1)
+                on_progress(done, total)
             except Exception:  # noqa: BLE001 - 回调不该影响下载结果
                 pass
+
+
+def download(
+    url: str | Iterable[str],
+    dest: Path,
+    on_progress: Callable[[int, int], None] | None = None,
+    proxy: str = "",
+    timeout: float = 30.0,
+) -> None:
+    """把 ``url``（或一组备用地址）流式写到 ``dest``。
+
+    多个地址按顺序尝试，前一个失败就删掉半截文件再换下一个 —— ``auto``
+    模式下个人站点打不开时会自动落到 GitHub。
+
+    ``on_progress(已下载字节, 总字节)``；服务端没给 ``Content-Length`` 时总字节是
+    ``-1``。写的是调用方给的路径（通常是 ``.part``），完成后由调用方改名。
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    urls = [url] if isinstance(url, str) else [item for item in url if item]
+    errors: list[str] = []
+    for item in urls:
+        try:
+            _download_one(item, dest, on_progress, proxy, timeout)
+            return
+        except UpdateError as exc:
+            errors.append(str(exc))
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+    if not urls:
+        raise UpdateError("没有可用的下载地址。")
+    raise UpdateError(
+        errors[-1] if len(errors) == 1 else "；".join(errors)
+    )
 
 
 def verify(path: Path, expected: str) -> None:
@@ -1050,6 +1223,42 @@ def _selftest() -> int:
     check("按名字找资产", release.asset("a") is not None, True)
     check("不存在的资产", release.asset("b"), None)
     check("资产大小", release.asset("a").size_mb if release.asset("a") else "", "1.0 MB")
+
+    # ---- 更新源：个人站点优先、GitHub 回退
+    check("镜像地址", mirror_url("v1.2.3", "a.AppImage"),
+          "https://dl.linxuhan.top/NCM-Studio/v1.2.3/a.AppImage")
+    check("镜像地址拒绝非法 tag", mirror_url("v1/2", "a"), "")
+    check("GitHub 下载地址", github_url("v1.2.3", "a.AppImage"),
+          "https://github.com/iamlinxuhan/NCM-Studio/releases/download/"
+          "v1.2.3/a.AppImage")
+    check("站点版本解析", parse_site_version(b'{"tag":"v9.9.9"}'), "v9.9.9")
+    for bad in (b"not json", b'{"tag":"../x"}', b'{"tag":""}'):
+        try:
+            parse_site_version(bad)
+        except UpdateError:
+            check("非法站点版本必须拒绝", True, True)
+        else:
+            check("非法站点版本必须拒绝", False, True)
+
+    site = _release_from_site("v9.9.9")
+    site_asset = site.asset(ASSETS["linux"])
+    check("自动模式先镜像", asset_urls(site, site_asset, "auto")[0],
+          mirror_url("v9.9.9", ASSETS["linux"]))
+    check("自动模式回退 GitHub", asset_urls(site, site_asset, "auto")[-1],
+          github_url("v9.9.9", ASSETS["linux"]))
+    check("只用站点", asset_urls(site, site_asset, "site"),
+          (mirror_url("v9.9.9", ASSETS["linux"]),))
+    check("只用 GitHub", asset_urls(site, site_asset, "github"),
+          (github_url("v9.9.9", ASSETS["linux"]),))
+
+    # 一组下载地址里第一个失败时，自动落到第二个
+    with tempfile.TemporaryDirectory(prefix="ncmgui-updater-") as tmp:
+        root = Path(tmp)
+        good = root / "good.bin"
+        good.write_bytes(b"payload")
+        dest = root / "out.bin"
+        download([(root / "missing.bin").as_uri(), good.as_uri()], dest)
+        check("下载回退到第二个地址", dest.read_bytes(), b"payload")
 
     if failures:
         print(f"更新自检失败 {len(failures)} 项：")

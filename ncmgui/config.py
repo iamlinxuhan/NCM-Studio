@@ -310,6 +310,7 @@ def _defaults() -> dict[str, Any]:
         # 自动更新。git_proxy 为空走系统代理，direct 表示直连
         "update": {
             "git_proxy": "",
+            "source": "auto",
             "check_on_start": True,
         },
         # 播客进度记忆：节目歌曲 ID -> 上次播放到的秒数。播客动辄一小时，
