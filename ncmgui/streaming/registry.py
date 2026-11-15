@@ -280,10 +280,15 @@ class StreamingRegistry(QObject):
         if server is None:
             raise StreamError("服务器不存在，可能已被删除")
         cover = ""
+        cover_headers: tuple[tuple[str, str], ...] = ()
+        adapter = self.adapter(server_id)
         try:
-            cover = self.adapter(server_id).cover_url(track.cover_id)
+            cover = adapter.cover_url(track.cover_id)
+            if cover and hasattr(adapter, "cover_headers"):
+                cover_headers = tuple(adapter.cover_headers())
         except StreamError:
             cover = ""
+            cover_headers = ()
         return Song(
             id=song_id_for(server_id, track.id),
             name=track.name,
@@ -291,6 +296,7 @@ class StreamingRegistry(QObject):
             album=track.album,
             duration=max(0, int(track.duration)) * 1000,
             pic_url=cover,
+            pic_headers=cover_headers,
             source=server["kind"],
             stream_id=f"{server_id}:{track.id}",
         )

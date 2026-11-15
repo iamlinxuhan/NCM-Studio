@@ -178,7 +178,8 @@ class MainWindow(QMainWindow):
         self.covers = CoverStore(self)
         self.image_store = ImageStore(
             self,
-            fetcher=lambda url: fetch_image(url, self._api_proxy()),
+            fetcher=lambda url, headers=None: fetch_image(
+                url, self._api_proxy(), headers=headers),
         )
         self.client = ApiClient(
             cfg.get("home", ""),

@@ -88,17 +88,25 @@ def _opener(proxy: str = ""):
     return urllib.request.build_opener()
 
 
-def fetch(url: str, proxy: str = "", timeout: float = 10.0) -> bytes:
-    """下载一张图片。失败时抛 ``RuntimeError``，消息可以直接给人看。"""
+def fetch(
+    url: str,
+    proxy: str = "",
+    timeout: float = 10.0,
+    headers: dict[str, str] | tuple[tuple[str, str], ...] | None = None,
+) -> bytes:
+    """下载一张图片。失败时抛 ``RuntimeError``，消息可以直接给人看。
+
+    ``headers`` 用于需要认证头的封面（Jellyfin/Emby 的 Token 放在请求头里，
+    不拼进 URL）。
+    """
     if not url:
         raise RuntimeError("没有封面地址")
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": f"ncm-studio/{VERSION}",
-            "Referer": "https://music.163.com/",
-        },
-    )
+    request_headers = {
+        "User-Agent": f"ncm-studio/{VERSION}",
+        "Referer": "https://music.163.com/",
+    }
+    request_headers.update(dict(headers or {}))
+    request = urllib.request.Request(url, headers=request_headers)
     try:
         opener = _opener(proxy)
     except ValueError as exc:
@@ -302,7 +310,7 @@ class CoverStore(QObject):
         *,
         size: int = DEFAULT_SIZE,
         capacity: int = DEFAULT_CACHE,
-        fetcher: Callable[[str], bytes] | None = None,
+        fetcher: Callable[..., bytes] | None = None,
     ) -> None:
         super().__init__(parent)
         self._size = int(size)
@@ -365,7 +373,11 @@ class CoverStore(QObject):
             # 本地文件不联网：同名图片或内嵌封面，读不到就不显示
             task = BackgroundTask(lambda: _read_local_artwork(local), parent=self)
         else:
-            task = BackgroundTask(lambda: self._fetcher(url), parent=self)
+            headers = tuple(getattr(song, "pic_headers", ()) or ())
+            task = BackgroundTask(
+                lambda: self._fetcher(url, headers=dict(headers)),
+                parent=self,
+            )
         self._tasks.add(task)
 
         def done(data: object) -> None:

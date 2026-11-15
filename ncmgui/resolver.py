@@ -165,6 +165,9 @@ class Song:
     duration: int = 0
     #: 专辑封面地址（接口 ``al.picUrl``）。列表页与播放页用来显示封面
     pic_url: str = ""
+    #: 下载封面时要附带的请求头。Jellyfin/Emby 用它放 Token，避免把凭据
+    #: 写进 URL（URL 会进日志、代理与服务器访问记录）。不写入队列配置。
+    pic_headers: tuple[tuple[str, str], ...] = ()
     #: 本地文件路径。只有「本地音乐」队列会填，流媒体歌曲为空串
     path: str = ""
     #: 本地文件的音质描述，如「无损 44.1kHz/16bit」「极高 320 kbps」。

@@ -45,6 +45,9 @@ class ScanResult:
     updated: int = 0
     removed: int = 0
     cancelled: bool = False
+    #: 达到 ``SCAN_LIMIT`` 被截断。截断时不能清理「没见到」的文件，
+    #: 否则会按一次不完整的枚举删掉大量正常索引。
+    truncated: bool = False
     seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
 
@@ -190,8 +193,9 @@ def scan(
                 break
             files.append(path)
             if len(files) >= limit:
+                result.truncated = True
                 break
-        if result.cancelled or len(files) >= limit:
+        if result.cancelled or result.truncated:
             break
 
     if cancel is not None and cancel():
@@ -283,7 +287,10 @@ def scan(
             apply(writes)
             writes.clear()
 
-        if not result.cancelled and (cancel is None or not cancel()):
+        # 截断的枚举是「没看完」，不是「文件没了」；这时清理会让一次
+        # 超限扫描删掉没枚举到的整批索引与歌单关联
+        if (not result.cancelled and not result.truncated
+                and (cancel is None or not cancel())):
             # 只清理本次扫描目录下的失踪文件；用户的其他收藏不受影响
             stale = [
                 row["id"] for key, row in existing.items()
@@ -395,6 +402,15 @@ def _selftest() -> int:
 
         cancelled = scan(db, [music], cancel=lambda: True)
         check("取消标记", cancelled.cancelled, True)
+
+        # 达到 SCAN_LIMIT 时枚举是不完整的，绝不能按 seen 清理失踪记录
+        (music / "丁 - 第四首.mp3").write_bytes(b"x")
+        scan(db, [music])
+        before = db.query_one("SELECT COUNT(*) AS n FROM tracks")["n"]
+        truncated = scan(db, [music], limit=1)
+        check("截断标记", truncated.truncated, True)
+        check("截断不清理索引", db.query_one(
+            "SELECT COUNT(*) AS n FROM tracks")["n"], before)
         db.close()
 
     if failures:

@@ -435,7 +435,8 @@ macOS 的 Now Playing 目前还没有接入；那边的耳机按键暂时不会�
 - 连接成功后的歌曲 / 专辑 / 歌手 / 歌单四个 Tab 都能双击播放；专辑、歌单再点
   进去看曲目，支持「播放全部」和「加入队列」；
 - Subsonic 的认证是 `token = md5(密码 + 随机盐)`，密码不会出现在 URL 里；
-  Jellyfin 用 API Key / AccessToken，同样只放在本机配置和播放地址的查询参数里；
+  Jellyfin / Emby 的 Token 通过 `X-Emby-Token` 请求头传递 —— 播放地址与封面
+  URL 里都不带 `api_key`，不会进 mpv 日志、代理记录或服务器访问日志；
 - 服务器地址、密码、Token 保存在 `config.json`（POSIX 下 `0600`），日志、控制台
   与截图都不会输出这些字段；
 - 播放时由主播放器统一取链，和网易云歌曲共用队列、歌词偏移、倍速、均衡器与
@@ -551,12 +552,17 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 ## 关于安全
 
 - 本程序**不保存**你的账号密码。登录凭据由 ncmctl 自己写在 `~/.ncmctl/` 下，本程序只读取状态用于显示。
-- 密码、CookieCloud 密码这类值会以命令行参数的形式传给 ncmctl，因而会出现在进程列表里 —— 这是 ncmctl 自身的接口限制。**介意的话请用扫码登录**，它不需要把任何凭据交给本程序。
+- 手机号登录的密码会以命令行参数的形式传给 ncmctl，因而会出现在进程列表里 —— 这是 ncmctl 自身的接口限制。**介意的话请用扫码登录或短信验证码**。
+- CookieCloud 的密码不再交给 ncmctl：本程序自己请求 `/get`、在内存里解密，
+  只把解密后的 Netscape 文件传给 `ncmctl login cookie --file`，密码不会进入
+  命令行、进程列表或日志。
 - 粘贴的 Cookie 会先写入本程序配置目录下的私有临时目录（目录 `0700`、文件 `0600`）再传给 `--file`，避免直接出现在进程参数中，用完即删；异常退出留下的残留会在下次启动时清掉。
 - CookieCloud 同步成功后会记录时间；1 小时内再次点击会先提醒，避免短时间内反复拉取浏览器 Cookie 触发风控。失败不会记录，可以立即重试。
 - 配置目录在 POSIX 上为 `0700`、配置文件为 `0600`，其他用户无法读取其中的路径、代理与账号标识。
+- 曲库扫描达到 50000 条上限时会标记为「截断」，此时**不做**失踪文件清理，
+  避免一次不完整的枚举删掉没扫到的索引与歌单关联。
 - 界面回显和「复制命令」里的密码、请求头、XEAPI 密钥会显示成 `******`；真实参数只交给 ncmctl，不写进日志。
-- 短信验证码通过控制台的 stdin 输入框送进 ncmctl：输入框是密码回显（只显示圆点），回显行和「导出日志」里只留「已隐藏」标记，不留原文；若终端把输入回显出来，后续输出里的同一串也会被抹掉。
+- 短信验证码在「账号」页的输入框里填写，经进程 stdin 送进 ncmctl：输入框是密码回显，不依赖作业控制台，也不会进入日志。
 - `--debug` 和「导出日志」可能包含请求头、响应体、Cookie 或 token。设置页在首次开启 `--debug` 时会明确警告，排查完请及时关闭。
 - 监控代理的 CA 证书/私钥、XEAPI Session Key 属于敏感配置，请只放在本机可信目录；代理转发 HTTPS 走 `CONNECT` 隧道，TLS 仍端到端加密，但代理能看到目标域名。
 - 登出、云盘上传、听歌任务、音乐合伙人、自更新这些会改动账号状态或不可逆的操作，执行前都有二次确认。
@@ -668,7 +674,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.0 packaging\ncm-studio.iss
+iscc /DAppVersion=4.7.1 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \

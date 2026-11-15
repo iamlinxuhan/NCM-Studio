@@ -383,9 +383,15 @@ class JellyfinAdapter(HttpMixin):
         # static=true 让服务器直接发原文件，避免不必要的转码；客户端解码交给 mpv
         url = (
             f"{self.base_url.rstrip('/')}/Audio/{track.id}/stream"
-            f"?static=true&api_key={self.token}"
+            "?static=true"
         )
-        return StreamSource(url=url, level="流媒体（原始文件）")
+        # Token 走请求头，不拼进 URL：URL 会出现在 mpv 日志、系统代理与
+        # 服务器访问记录里
+        return StreamSource(
+            url=url,
+            level="流媒体（原始文件）",
+            headers=(("X-Emby-Token", self.token),),
+        )
 
     def cover_url(self, cover_id: str, size: int = 300) -> str:
         if not cover_id:
@@ -394,8 +400,13 @@ class JellyfinAdapter(HttpMixin):
         height = max(64, min(1024, size))
         return (
             f"{self.base_url.rstrip('/')}/Items/{cover_id}/Images/Primary"
-            f"?maxHeight={height}&quality=90&api_key={self.token}"
+            f"?maxHeight={height}&quality=90"
         )
+
+    def cover_headers(self) -> tuple[tuple[str, str], ...]:
+        """封面请求头。与播放一样，Token 只放在头里。"""
+        self._ensure_auth()
+        return (("X-Emby-Token", self.token),)
 
 
 def _selftest() -> int:
@@ -452,9 +463,14 @@ def _selftest() -> int:
 
     source = adapter.stream_url(track)
     check("播放地址含 static", "static=true" in source.url, True)
-    check("播放地址含 api_key", "api_key=tok" in source.url, True)
+    check("播放地址不含 api_key", "api_key" in source.url, False)
+    check("播放 Token 走请求头",
+          dict(source.headers).get("X-Emby-Token"), "tok")
     cover = adapter.cover_url("a1", 400)
     check("封面地址含 maxHeight", "maxHeight=400" in cover, True)
+    check("封面地址不含 api_key", "api_key" in cover, False)
+    check("封面 Token 走请求头",
+          dict(adapter.cover_headers()).get("X-Emby-Token"), "tok")
 
     if failures:
         print(f"Jellyfin 自检失败 {len(failures)} 项：")

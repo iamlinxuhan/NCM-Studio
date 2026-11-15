@@ -117,6 +117,8 @@ jobs:
           python -m ncmgui.streaming.subsonic
           python -m ncmgui.streaming.jellyfin
           python -m ncmgui.streaming.registry
+          # CookieCloud：CryptoJS 兼容解密、Netscape 导出
+          python -m ncmgui.cookiecloud
           # MV 数据流：Range 分块、随机访问、断流续传
           python -m ncmgui.mvstream
           # MV 下载：文件名清理、断点续传、批量下载

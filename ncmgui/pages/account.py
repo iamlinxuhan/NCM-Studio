@@ -30,8 +30,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import config, ncmctl
+from .. import config, cookiecloud, ncmctl
 from ..widgets.card import Chip, accent_button, danger_button, ghost_button
+from ..workers import BackgroundTask
 from ..widgets.profilecard import ProfileCard
 from ..widgets.form import FormCard
 from .base import BasePage
@@ -67,6 +68,8 @@ class AccountPage(BasePage):
         self._qr_shown = False
         #: 等待输入短信验证码的手机号登录作业
         self._phone_runner = None
+        #: 正在拉取 CookieCloud 的后台任务
+        self._cc_task: BackgroundTask | None = None
         #: 尚未删除的 Cookie 临时文件。正常路径随作业结束删除；退出或作业
         #: 没能启动时由 shutdown() 兜底。
         self._pending_temp: set[str] = set()
@@ -655,8 +658,8 @@ class AccountPage(BasePage):
         self.cc_uuid = card.add_line("UUID", value=self.cfg.get("login.cc_uuid", ""))
         self.cc_password = card.add_line(
             "密码", placeholder="CookieCloud 端的密码", password=True,
-            hint="⚠️ 密码会作为命令行参数传递，可能被同机其他用户、进程监控工具或"
-                 "系统日志读取。若条件允许，请优先使用扫码登录、短信登录或 Cookie 导入。",
+            hint="密码由本程序在内存里用于解密，不会出现在命令行参数、"
+                 "进程列表或日志中。",
         )
         self.cc_server = card.add_line(
             "服务器", value=self.cfg.get("login.cc_server", "http://127.0.0.1:8088"),
@@ -668,6 +671,10 @@ class AccountPage(BasePage):
         run = accent_button("同步并登录")
         run.clicked.connect(self._login_cookiecloud)
         card.add_row_of(run)
+        self.cc_status = QLabel("")
+        self.cc_status.setObjectName("Hint")
+        self.cc_status.setWordWrap(True)
+        card.add(self.cc_status)
         self.content.addWidget(card)
 
     def _login_cookiecloud(self) -> None:
@@ -701,21 +708,48 @@ class AccountPage(BasePage):
             if box.exec() != QMessageBox.StandardButton.Ok:
                 return
 
+        if self._cc_task is not None and self._cc_task.is_running:
+            self.warn("正在同步 CookieCloud，请稍候。")
+            return
         self.save_config()
-        argv = ncmctl.build_login_cookiecloud(
-            uuid,
-            password,
-            server=self.cc_server.text().strip(),
-            headers=self.cc_headers.text().strip(),
-            opts=self.opts(),
+        server = self.cc_server.text().strip()
+        headers = self.cc_headers.text().strip()
+        self.cc_status.setText("正在从 CookieCloud 拉取 Cookie…")
+
+        # 密码只在内存里参与解密，不拼命令、不落盘、不进日志
+        task = BackgroundTask(
+            lambda: cookiecloud.write_netscape(
+                server, uuid, password, headers=headers),
+            parent=self,
         )
+        self._cc_task = task
 
-        def done(_panel, code: int) -> None:
-            if code == 0:
-                self.cfg.set("login.cc_last", time.time())
-                self.cfg.save()
+        def done(path: str) -> None:
+            self._pending_temp.add(path)
+            argv = ncmctl.build_login_cookie(
+                file=path, fmt="netscape", opts=self.opts())
 
-        self.submit("CookieCloud 登录", argv, on_finish=done)
+            def finish(_panel, code: int) -> None:
+                self._discard_temp(path)
+                if code == 0:
+                    self.cfg.set("login.cc_last", time.time())
+                    self.cfg.save()
+                    self.cc_status.setText("同步成功，已登录。")
+                else:
+                    self.cc_status.setText(
+                        "登录失败：CookieCloud 里可能没有有效的网易云凭据。")
+
+            runner = self.submit("CookieCloud 登录", argv, on_finish=finish)
+            if runner is None:
+                self._discard_temp(path)
+                self.cc_status.setText("登录作业未能启动。")
+
+        def failed(message: str) -> None:
+            self.cc_status.setText(f"同步失败：{message}")
+
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
 
     # ------------------------------------------------------------------ 配置
 

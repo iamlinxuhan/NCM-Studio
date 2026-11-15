@@ -707,28 +707,6 @@ def build_login_cookie(
     return (opts or GlobalOpts()).apply(argv)
 
 
-def build_login_cookiecloud(
-    uuid: str,
-    password: str,
-    server: str = "",
-    timeout: str = "",
-    headers: str = "",
-    opts: GlobalOpts | None = None,
-) -> list[str]:
-    """``ncmctl login cookiecloud``：从 CookieCloud 服务器同步 Cookie 登录。"""
-    if not uuid.strip() or not password:
-        raise ValueError("CookieCloud 的 UUID 与密码都是必填项")
-
-    argv = ["login", "cookiecloud", "--uuid", uuid.strip(), "--password", password]
-    if server.strip():
-        argv += ["--server", server.strip()]
-    if timeout.strip():
-        argv += ["--timeout", timeout.strip()]
-    if headers.strip():
-        argv += ["--headers", headers.strip()]
-    return (opts or GlobalOpts()).apply(argv)
-
-
 def build_logout(
     clear_anonymous_token: bool = False,
     opts: GlobalOpts | None = None,
@@ -946,11 +924,6 @@ def _selftest() -> int:
         "login cookie 文件优先",
         build_login_cookie(file="/tmp/c.txt", content="MUSIC_U=x", fmt="header"),
         ["login", "cookie", "--format", "header", "--file", "/tmp/c.txt"],
-    )
-    check(
-        "login cookiecloud",
-        build_login_cookiecloud("u", "p", "", "", ""),
-        ["login", "cookiecloud", "--uuid", "u", "--password", "p"],
     )
     check("logout", build_logout(True), ["logout", "--clear-anonymous-token"])
     check("update", build_update(""), ["update"])
