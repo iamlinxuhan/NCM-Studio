@@ -32,6 +32,16 @@ from . import dsp, localmusic, player
 from .resolver import Resolver, Song
 from .workers import BackgroundTask
 
+
+def _target_scheme(target: str) -> str:
+    """目标里的 URL 协议；Windows 盘符路径（``C:\\x``）不算协议。"""
+    text = str(target or "")
+    if len(text) >= 2 and text[1] == ":" and text[0].isalpha():
+        return ""
+    from urllib.parse import urlsplit
+
+    return urlsplit(text).scheme.lower()
+
 # --------------------------------------------------------------------------- #
 # 播放顺序
 # --------------------------------------------------------------------------- #
@@ -1202,9 +1212,10 @@ class PlaybackController(QObject):
         self._load(url, source=source, headers=headers)
 
     def _load(self, target: str, source=None, headers=()) -> None:
-        if "://" in target:
-            # 网络地址只允许 http/https：file:// 等本地协议会让被控的
-            # 流媒体服务器或接口响应带播放器读本机文件
+        # source 非空说明地址来自网络（网易云 / 流媒体服务器），必须白名单；
+        # 本地播放（source 为空、target 是文件路径）才允许跳过。
+        # 不要用 "://" 判断：file:/etc/passwd、data:... 都不含 "://"。
+        if source is not None or _target_scheme(target):
             from .netutil import media_url
 
             try:

@@ -29,9 +29,15 @@ def media_url(url: str) -> str:
     text = str(url or "").strip()
     if not text:
         raise ValueError("媒体地址为空")
-    scheme = urlsplit(text).scheme.lower()
+    parts = urlsplit(text)
+    scheme = parts.scheme.lower()
     if scheme not in ("http", "https"):
         raise ValueError(f"不支持的媒体地址协议：{scheme or '无'}")
+    if parts.username or parts.password:
+        # 用户名密码会出现在播放器参数、代理与服务器访问日志里
+        raise ValueError("媒体地址不应包含用户名或密码")
+    if not parts.hostname:
+        raise ValueError("媒体地址缺少主机名")
     return text
 
 
@@ -85,7 +91,8 @@ def _selftest() -> int:
     # ---- 媒体地址白名单
     check("允许 http", media_url("http://x/a.mp4"), "http://x/a.mp4")
     check("允许 https", media_url("https://x/a"), "https://x/a")
-    for bad in ("file:///etc/passwd", "ftp://x/a", "data:text/plain,x", ""):
+    for bad in ("file:///etc/passwd", "ftp://x/a", "data:text/plain,x", "",
+                "http://user:pass@x/a", "http:///a"):
         try:
             media_url(bad)
         except ValueError:

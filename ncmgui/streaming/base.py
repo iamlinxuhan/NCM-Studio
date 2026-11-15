@@ -54,6 +54,10 @@ class StreamPlaylist:
     song_count: int = 0
 
 
+#: 单次 JSON 响应的上限。正常流媒体服务器远小于这个值。
+MAX_RESPONSE = 32 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class StreamSource:
     url: str
@@ -94,7 +98,9 @@ class HttpMixin:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
             with opener.open(request, timeout=self.timeout) as response:
-                body = response.read()
+                body = response.read(MAX_RESPONSE + 1)
+                if len(body) > MAX_RESPONSE:
+                    raise StreamError("服务器响应过大，已中止")
         except urllib.error.HTTPError as exc:
             detail = ""
             try:

@@ -376,10 +376,12 @@ class Transport:
                 raise RequestCancelled("请求已取消")
             try:
                 with opener.open(request, timeout=self.timeout) as response:
-                    raw = response.read()
+                    raw = response.read(MAX_RESPONSE + 1)
+                    if len(raw) > MAX_RESPONSE:
+                        raise NetworkError("接口响应过大，已中止")
                     set_cookies = response.headers.get_all("Set-Cookie") or []
             except urllib.error.HTTPError as exc:
-                raw = exc.read()
+                raw = exc.read(MAX_RESPONSE + 1)
                 set_cookies = exc.headers.get_all("Set-Cookie") or []
                 status = exc.code
             except (urllib.error.URLError, TimeoutError, OSError,

@@ -558,13 +558,13 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
   命令行、进程列表或日志。关闭窗口时会取消拉取任务，已生成的临时文件立即删除。
 - 自动更新的响应体与安装包都有大小上限：API/校验文件 16 MB，安装包以 Release
   声明的大小为准（兜底 2 GB）。签名能防篡改，大小上限防资源耗尽。
-- 媒体地址统一过白名单，只允许 `http` / `https`：`file://` 等本地协议会让被控的
-  接口响应或流媒体服务器把本机文件交给播放器。MV 播放、MV 下载、封面下载与
-  mpv 加载都走同一处校验。
+- 媒体地址统一过白名单，只允许 `http` / `https`：`file:/…`、`data:` 等本地协议
+  会让被控的接口响应或流媒体服务器把本机文件交给播放器。MV 播放、MV 下载、
+  封面下载与 mpv 加载都走同一处校验；带用户名密码的 URL 与缺主机的 URL 也拒绝。
 - 来自接口的文本（评论、昵称、签名、歌名歌手）在 `QLabel` 里按纯文本渲染，
   不会被当成 HTML 富文本，恶意评论无法伪装成系统提示或 UI 元素。
-- CookieCloud 响应上限 4 MB、单张封面 16 MB；异常服务返回超大内容时中止，
-  不会把内存吃光。
+- CookieCloud 响应上限 4 MB、单张封面 16 MB、网易云接口响应 64 MB、流媒体服务器
+  响应 32 MB；异常或被控的服务返回超大内容时中止，不会把内存吃光。
 - 粘贴的 Cookie 会先写入本程序配置目录下的私有临时目录（目录 `0700`、文件 `0600`）再传给 `--file`，避免直接出现在进程参数中，用完即删；异常退出留下的残留会在下次启动时清掉。
 - CookieCloud 同步成功后会记录时间；1 小时内再次点击会先提醒，避免短时间内反复拉取浏览器 Cookie 触发风控。失败不会记录，可以立即重试。
 - 配置目录在 POSIX 上为 `0700`、配置文件为 `0600`，其他用户无法读取其中的路径、代理与账号标识。
@@ -683,7 +683,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.3 packaging\ncm-studio.iss
+iscc /DAppVersion=4.7.4 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
