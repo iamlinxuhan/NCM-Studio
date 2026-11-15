@@ -120,8 +120,20 @@ def save_state(**updates) -> None:
         pass
 
 
-def needs_onboarding() -> bool:
-    return not bool(load_state().get("completed"))
+def needs_onboarding(first_run: bool | None = None) -> bool:
+    """是否需要首次引导。
+
+    ``first_run`` 由调用方在构造主窗口之前算好（``config.json`` 是否已存在）。
+    老用户升级上来时没有 ``onboarding.json``，不该突然被引导一遍：直接把
+    状态补成已完成。
+    """
+    state = load_state()
+    if state.get("completed"):
+        return False
+    if first_run is False:
+        save_state(completed=True, migrated=True, completed_at=int(time.time()))
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -355,9 +367,9 @@ class TourOverlay(QWidget):
     finished = pyqtSignal()
 
     def __init__(self, window) -> None:
-        # 盖在主窗口的中央区域上，而不是另开一个全屏顶层窗口：
-        # Wayland 不允许客户端自己摆顶层窗口，子控件才是 100% 贴合的做法
-        parent = window.centralWidget() or window
+        # 盖在整个主窗口上，而不是另开顶层窗口：Wayland 不允许客户端自己摆
+        # 顶层窗口，子控件才能和 GUI 严丝合缝
+        parent = window
         super().__init__(parent)
         self.window = window
         self._parent = parent
@@ -469,17 +481,17 @@ class TourOverlay(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        # 轻遮罩：真实界面仍然看得见，只是压暗一档
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
+        # 不压暗整窗：子控件没法把下层控件“挖”出来，压暗只会让被框住的
+        # 功能也看不清。改为只给目标描边 + 一圈柔光，界面保持原样。
         if self._hole is None:
             return
-        hole = self._hole.adjusted(-6, -6, 6, 6)
-        # 高亮区再叠一层浅色，视觉上比周围亮，配合描边指目标
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 26))
+        hole = self._hole.adjusted(-4, -4, 4, 4)
+        glow = QColor(theme.CYAN)
+        glow.setAlpha(45)
+        painter.setPen(QPen(glow, 10))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(hole, 10, 10)
         painter.setPen(QPen(QColor(theme.CYAN), 2))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(hole, 10, 10)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名

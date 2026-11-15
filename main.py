@@ -1045,6 +1045,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # 先读配置再应用主题：启动时就该是用户上次选的那一档，不能先闪一下暗色
     cfg = Config()
+    # 主窗口构造时会写配置，所以「是不是第一次运行」必须现在判断
+    first_run = not Path(cfg.path).exists()
     theme.apply_theme(app, cfg.get("ui.theme", "dark"))
 
     # 同一份配置、曲库和播放器只允许一个实例使用：两个实例同时写 SQLite、
@@ -1091,7 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
     # 首次启动：协议 → 初始设置 → 功能引导。自检与截图不弹这些对话框
     if not self_test and not screenshot_dir:
         from ncmgui import onboarding
-        if onboarding.needs_onboarding():
+        if onboarding.needs_onboarding(first_run):
             if not onboarding.run(window, app):
                 return 0
 
