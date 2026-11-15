@@ -54,6 +54,7 @@ hiddenimports: list = [
     "ncmgui.api.models",
     "ncmgui.library.db",
     "ncmgui.library.history",
+    "ncmgui.library.mvfavorites",
     "ncmgui.library.mvhistory",
     "ncmgui.library.playlists",
     "ncmgui.library.queries",
