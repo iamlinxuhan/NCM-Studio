@@ -48,9 +48,9 @@ VENDOR = ROOT / "vendor" / "mpv"
 #: 前置进 ``LD_LIBRARY_PATH``。
 LINUX_LIB_DIR = VENDOR / "lib"
 
-_WINDOWS_TAG = "2026-10-16-dde0671072"
-_WINDOWS_ASSET = "mpv-x86_64-20261016-git-dde0671072.7z"
-_WINDOWS_SHA256 = "4bac0ef03e79d24c10128a7d0a4cd8c51b7f0a55774f8080d6fe0889c82a5063"
+_WINDOWS_TAG = "2026-11-15-3d73d07e6c"
+_WINDOWS_ASSET = "mpv-x86_64-20261115-git-3d73d07e6c.7z"
+_WINDOWS_SHA256 = "7720b0d6471c3ac2dbf8fa0282fe88ca898e065b004f4324849481bf5139698a"
 _WINDOWS_URL = (
     "https://github.com/zhongfly/mpv-winbuild/releases/download/"
     f"{_WINDOWS_TAG}/{_WINDOWS_ASSET}"
