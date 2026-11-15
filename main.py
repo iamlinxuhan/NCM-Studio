@@ -1088,6 +1088,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         window.show()
 
+    # 首次启动：协议 → 初始设置 → 功能引导。自检与截图不弹这些对话框
+    if not self_test and not screenshot_dir:
+        from ncmgui import onboarding
+        if onboarding.needs_onboarding():
+            if not onboarding.run(window, app):
+                return 0
+
     if self_test:
         return _self_test(window)
     if screenshot_dir:

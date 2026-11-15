@@ -349,6 +349,8 @@ class MainWindow(QMainWindow):
         # 信息保持固定
         nav_widget = QWidget()
         nav_widget.setObjectName("NavList")
+        # 引导气泡要按位置高亮导航栏
+        self.nav_widget = nav_widget
         nav_layout = QVBoxLayout(nav_widget)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(0)

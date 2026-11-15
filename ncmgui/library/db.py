@@ -22,7 +22,7 @@ from typing import Any, Iterator, Sequence
 
 from ..config import config_dir
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def default_db_path() -> Path:
@@ -117,6 +117,19 @@ CREATE INDEX IF NOT EXISTS idx_mv_events_started
     ON mv_events(started_at);
 CREATE INDEX IF NOT EXISTS idx_mv_events_mv
     ON mv_events(mv_id);
+
+-- 本地 MV 收藏。官方明文接口只能收藏、不能取消，所以默认把收藏存在本地，
+-- 不依赖账号状态；用户可以在设置里切回官方收藏。
+CREATE TABLE IF NOT EXISTS mv_favorites (
+    mv_id       INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    artist      TEXT NOT NULL DEFAULT '',
+    cover_url   TEXT NOT NULL DEFAULT '',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    added_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mv_favorites_added
+    ON mv_favorites(added_at);
 
 -- 本地歌曲的歌词偏移（毫秒）。按文件路径记而不是歌曲 ID：重扫、换歌单、
 -- 文件从下载目录挪走后再加回来，路径对得上就能恢复。0 不写行。

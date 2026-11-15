@@ -107,6 +107,11 @@ if icon_png.is_file():
 else:
     warnings.warn(f"缺少图标 {icon_png}，窗口图标将不可用")
 
+# 首次启动的协议对话框要显示许可全文
+app_license = HERE / "LICENSE"
+if app_license.is_file():
+    datas.append((str(app_license), "ncmgui/assets"))
+
 # ── ncmctl ──────────────────────────────────────────────────────────────────
 # 放 binaries 而不是 datas：binaries 会被**无条件** chmod 0755，datas 则要看
 # 源文件本身有没有执行位。万一某次 checkout 或下载丢了权限位，datas 会静默退化

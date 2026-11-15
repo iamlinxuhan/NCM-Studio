@@ -322,6 +322,9 @@ def _defaults() -> dict[str, Any]:
             "sort": "name",
             "descending": False,
         },
+        # MV 收藏：local（本地曲库，可自由取消）/ official（官方账号，
+        # 明文接口只能加不能删）。默认本地，避免把用户账号写成单向状态。
+        "mv": {"favorite_mode": "local"},
         # 界面外观。theme 取值 dark / light，由侧边栏的「主题」键切换
         "ui": {"theme": "dark", "close_to_tray": False},
         # 主窗口大小。用户缩放过后记在这里，下次启动照着打开

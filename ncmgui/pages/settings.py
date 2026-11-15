@@ -40,12 +40,54 @@ class SettingsPage(BasePage):
         self._build_app_update_card()
         self._build_binary_card()
         self._build_player_card()
+        self._build_favorite_card()
         self._build_global_card()
         self._build_update_card()
         self._build_about_card()
         # _build_binary_card 里的 _detect 跑在「更新 ncmctl」卡片建出来之前，
         # 那一次同步不到 update_button，这里补一次
         self._sync_update_button()
+
+    # --------------------------------------------------------- 收藏与数据
+
+    def _build_favorite_card(self) -> None:
+        card = FormCard(
+            "收藏与数据",
+            "MV 收藏存在哪里。本地库可以随时取消；网易云的公开接口只能加"
+            "收藏、不能取消，切到官方模式前请想清楚。",
+        )
+        self.favorite_mode = card.add_combo(
+            "MV 收藏模式",
+            [
+                ("本地数据库（推荐）", "local"),
+                ("官方账号收藏（只能加，不能取消）", "official"),
+            ],
+            str(self.cfg.get("mv.favorite_mode", "local") or "local"),
+            hint="切换只影响之后的操作：已经存在本地或账号里的收藏不会互相迁移。",
+        )
+        self.favorite_mode.currentIndexChanged.connect(
+            self._on_favorite_mode_changed)
+        self.content.addWidget(card)
+
+    def _on_favorite_mode_changed(self, _index: int) -> None:
+        value = combo_data(self.favorite_mode, "local")
+        current = str(self.cfg.get("mv.favorite_mode", "local") or "local")
+        if value == "official" and current != "official":
+            answer = QMessageBox.warning(
+                self, "警告：官方接口功能残缺",
+                '<span style="color:#ff4d6d;">由于网易云官方 Web API 限制，'
+                "一旦使用官方接口收藏 MV，将无法在本软件及网页端取消收藏。"
+                "请谨慎选择。</span>",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.favorite_mode.blockSignals(True)
+                self.favorite_mode.setCurrentIndex(
+                    0 if current == "local" else 1)
+                self.favorite_mode.blockSignals(False)
+                return
+        self.cfg.set("mv.favorite_mode", value)
 
     # --------------------------------------------------------- ncmctl 定位
 
@@ -884,6 +926,8 @@ class SettingsPage(BasePage):
             self.window.scrobble.invalidate()
         self.cfg.set("player.scrobble", scrobble_enabled)
         self.cfg.set("ui.close_to_tray", self.close_to_tray.isChecked())
+        self.cfg.set("mv.favorite_mode",
+                     combo_data(self.favorite_mode, "local"))
         self.cfg.set("home", self.home.path())
         self.cfg.set("config_file", self.config_file.path())
         self.cfg.set("debug", self.debug.isChecked())

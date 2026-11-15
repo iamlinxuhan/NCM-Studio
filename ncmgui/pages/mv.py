@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit
 
 from ..api.models import Mv
 from ..config import default_video_dir
+from ..library import favorites
 from ..mvdownload import download_all
 from ..widgets.card import ghost_button
 from ..widgets.covercard import CoverGrid
@@ -86,11 +87,16 @@ class MvPage(BasePage):
                    "正在加载推荐 MV…")
 
     def reload_favorites(self) -> None:
-        """官方「收藏 MV」列表。收藏本身走 ``/api/mv/sublist``，不建本地表。"""
+        """收藏的 MV：默认读本地库，设置成官方模式时读账号收藏。"""
         self._mode = "favorites"
-        if not self.window.require_login_silent("查看收藏的 MV"):
+        mode = str(self.cfg.get("mv.favorite_mode", "local") or "local")
+        if mode == "official":
+            if not self.window.require_login_silent("查看收藏的 MV"):
+                return
+            self._load(lambda: self.window.client.mv_sublist(200),
+                       "正在加载收藏的 MV…")
             return
-        self._load(lambda: self.window.client.mv_sublist(200),
+        self._load(lambda: favorites(self.window.library, 500),
                    "正在加载收藏的 MV…")
 
     def _search(self) -> None:

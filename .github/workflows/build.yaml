@@ -125,6 +125,7 @@ jobs:
           python -m ncmgui.library.db
           python -m ncmgui.library.history
           python -m ncmgui.library.mvhistory
+          python -m ncmgui.library.mvfavorites
           python -m ncmgui.library.stats
           python -m ncmgui.library.queries
           python -m ncmgui.library.scan

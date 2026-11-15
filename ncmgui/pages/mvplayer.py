@@ -33,7 +33,13 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import config_dir, default_video_dir
-from ..library import record_mv_play, update_mv_play
+from ..library import (
+    add_favorite,
+    is_favorite,
+    record_mv_play,
+    remove_favorite,
+    update_mv_play,
+)
 from ..mvdownload import fetch_mv_file, mv_filename, unique_path
 from ..mvstream import HttpRangeDevice
 from ..playback import STATE_LOADING, STATE_PLAYING
@@ -444,7 +450,21 @@ class MvPlayerPage(BasePage):
 
     # ---------------------------------------------------------------- 收藏
 
+    def _favorite_mode(self) -> str:
+        mode = str(self.cfg.get("mv.favorite_mode", "local") or "local")
+        return "official" if mode == "official" else "local"
+
     def _refresh_subscribe_state(self) -> None:
+        if self.mv is None:
+            return
+        if self._favorite_mode() == "local":
+            # 本地收藏是同步查询，不需要后台任务
+            self._set_subscribed(
+                is_favorite(self.window.library, int(self.mv.id)))
+            return
+        self._refresh_official_state()
+
+    def _refresh_official_state(self) -> None:
         """用官方「收藏 MV」列表判断当前这支是否已收藏。
 
         ``mv/detail`` 与 ``mv/sublist`` 都没有可靠的 ``subed`` 字段，只能
@@ -482,10 +502,22 @@ class MvPlayerPage(BasePage):
     def _toggle_subscribe(self) -> None:
         if self.mv is None:
             return
+        if self._favorite_mode() == "local":
+            library = self.window.library
+            mv_id = int(self.mv.id)
+            if self._subscribed:
+                remove_favorite(library, mv_id)
+                self._set_subscribed(False)
+                self.toast("已取消收藏")
+            else:
+                add_favorite(library, self.mv)
+                self._set_subscribed(True)
+                self.toast("已收藏 MV")
+            return
         if not self.window.require_login_silent("收藏 MV"):
             return
         if self._subscribed:
-            # 取消收藏的接口服务端不开放（见 Client.mv_subscribe），别假装成功
+            # 官方明文接口只能加不能删（取消走客户端 eapi），别假装成功
             self.toast("如需取消收藏，请到网易云客户端操作")
             return
         on = True
