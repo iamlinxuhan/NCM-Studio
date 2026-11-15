@@ -37,8 +37,11 @@ class HeatmapWidget(QWidget):
     MIN_CELL = 11
     MAX_CELL = 19
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None,
+                 accent: str = "CYAN") -> None:
         super().__init__(parent)
+        #: theme 里的颜色 token 名；浅色/深色主题切换时按名字重新取色
+        self._accent = accent
         self._days: tuple[DayEntry, ...] = ()
         self._max = 1
         self._cells: list[tuple[QRect, DayEntry]] = []
@@ -89,7 +92,7 @@ class HeatmapWidget(QWidget):
 
         empty = QColor(theme.PANEL_ALT)
         border = QColor(theme.BORDER)
-        accent = QColor(theme.CYAN)
+        accent = QColor(getattr(theme, self._accent))
         muted = QColor(theme.TEXT_DIM)
         text = QColor(theme.TEXT)
 
@@ -189,8 +192,11 @@ class HeatmapWidget(QWidget):
 class HourBars(QWidget):
     """24 小时播放次数柱状图。"""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None,
+                 accent: str = "CYAN", peak: str = "PURPLE") -> None:
         super().__init__(parent)
+        self._accent = accent
+        self._peak = peak
         self._hours: tuple[int, ...] = (0,) * 24
         self.setMinimumHeight(150)
 
@@ -207,8 +213,8 @@ class HourBars(QWidget):
 
         muted = QColor(theme.TEXT_DIM)
         empty = QColor(theme.PANEL_ALT)
-        accent = QColor(theme.CYAN)
-        peak = QColor(theme.PURPLE)
+        accent = QColor(getattr(theme, self._accent))
+        peak = QColor(getattr(theme, self._peak))
 
         font = self.font()
         font.setPointSizeF(max(7.5, font.pointSizeF() - 2.0))
@@ -253,8 +259,13 @@ class SliceBars(QWidget):
     LABEL_WIDTH = 92
     VALUE_WIDTH = 46
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None,
+                 accent: str = "CYAN",
+                 palette: tuple[str, ...] = ()) -> None:
         super().__init__(parent)
+        self._accent = accent
+        #: 按条目顺序循环取色；为空时全部用 accent
+        self._palette = palette
         self._items: tuple[SliceEntry, ...] = ()
         self.setMinimumHeight(self.ROW_HEIGHT)
 
@@ -274,7 +285,7 @@ class SliceBars(QWidget):
         text = QColor(theme.TEXT)
         muted = QColor(theme.TEXT_DIM)
         track = QColor(theme.PANEL_ALT)
-        accent = QColor(theme.CYAN)
+        accent = QColor(getattr(theme, self._accent))
 
         if not self._items:
             painter.setPen(muted)
@@ -300,7 +311,11 @@ class SliceBars(QWidget):
                 QRectF(bar_left, middle - bar_height / 2,
                        bar_right - bar_left, bar_height), 4.5, 4.5)
             ratio = item.count / maximum
-            painter.setBrush(accent)
+            if self._palette:
+                color = QColor(getattr(theme, self._palette[index % len(self._palette)]))
+            else:
+                color = accent
+            painter.setBrush(color)
             painter.drawRoundedRect(
                 QRectF(bar_left, middle - bar_height / 2,
                        max(3.0, (bar_right - bar_left) * ratio), bar_height), 4.5, 4.5)

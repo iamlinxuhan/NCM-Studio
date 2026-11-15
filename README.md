@@ -58,7 +58,7 @@ ncmctl 的全部子命令都在界面里有对应入口：
 | 我喜欢的音乐 | 网易云 `/api/*` + 随包 mpv | 红心歌单直接走程序内接口客户端（不再多起一次 ncmctl 进程），列表、点一首即流播；播放页、歌词、队列、四种播放顺序 |
 | 收藏 | 网易云 `/api/*` | 收藏的歌单 / 专辑 / 歌手三个 Tab，点进去看详情，可直接取消收藏 |
 | 本地曲库 | 随包 mpv | 扫描下载目录或任意文件夹；歌曲 / 文件夹 / 本地歌手 / 本地专辑四个 Tab，支持本地歌单 |
-| 历史与统计 | 本地 SQLite | 播放历史（歌曲与 MV 两个标签，各保留最近 500 条，可搜索、清空，双击重播）与听歌统计（90 天热力图、24 小时分布、常听排行、音质构成）两个 Tab；可选把每轮听满 5 秒的实际收听时长同步到网易云账号的听歌记录（实验性，默认关闭） |
+| 历史与统计 | 本地 SQLite | 播放历史（歌曲与 MV 两个标签，各保留最近 500 条，可搜索、清空，双击重播）与统计两个 Tab。统计里听歌与 MV 各有一套量表：听歌是 90 天热力图、24 小时分布、常听排行、音质构成；MV 用紫色系单独画热力图、时段分布、观看完成度与最常看的 MV / 歌手。可选把每轮听满 5 秒的实际收听时长同步到网易云账号的听歌记录（实验性，默认关闭） |
 | 下载与云盘 | `download` / `ncm` / `cloud` | 下载任务队列、失败重试与历史记录；超过 100 首的批次先确认耗时；`.ncm` 解码；云盘列表、容量、播放、删除与上传 |
 | 流媒体 | Subsonic / Jellyfin API | 连接自建的 Navidrome、Airsonic、Gonic、Jellyfin、Emby；歌曲 / 专辑 / 歌手 / 歌单浏览与播放 |
 | 高级工具 | `sign` / `scrobble` / `partner` / `task`、`proxy`、`crypto` / `curl` | 账号任务、抓包代理与调试工具三个 Tab |
@@ -641,7 +641,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.1.1 packaging\ncm-studio.iss
+iscc /DAppVersion=4.2.0 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
