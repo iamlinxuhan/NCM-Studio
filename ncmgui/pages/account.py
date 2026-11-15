@@ -342,9 +342,12 @@ class AccountPage(BasePage):
         self.qr_label.setText("正在生成二维码…")
         self.qr_status.setText("已请求 ncmctl 生成二维码，请稍候…")
 
+        # 二维码是登录辅助，不需要把输出刷到底部控制台：控制台一弹出来，
+        # 用户很容易误点它的「停止」按钮，直接把等待中的进程 SIGTERM 掉
         runner = self.window.submit(
             "二维码登录",
             ncmctl.build_login_qrcode(self._qr_dir, timeout="5m", opts=self.opts()),
+            show_log=False,
         )
         if not runner:
             self._cleanup_qr_dir()
