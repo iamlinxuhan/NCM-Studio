@@ -191,6 +191,8 @@ class MvPlayerPage(BasePage):
         self._seeking = False
         #: 当前把网络数据喂给播放器的设备；本地缓存播放时为 None
         self._device: HttpRangeDevice | None = None
+        #: 全屏时承载视频与控制条的独立窗口
+        self._fullscreen_window: QWidget | None = None
         #: 切换播放源时要跳回的位置；-1 表示没有待恢复的位置
         self._resume_position = -1
         #: 本次观看在 mv_events 里的行 ID，0 表示还没写
@@ -234,19 +236,20 @@ class MvPlayerPage(BasePage):
         palette.setColor(QPalette.ColorRole.Window, QColor("#000000"))
         self.video.setPalette(palette)
         self.video.setAutoFillBackground(True)
-        self.content.addWidget(self.video, 1)
-
-        # 全屏时控制条和返回口都装进视频窗里：QVideoWidget 的帧画在 widget 上，
-        # 子控件能盖在上面，于是全屏也能拖进度、退出。
-        self.exit_fullscreen_button = ghost_button("✕ 退出全屏", compact=True)
-        self.exit_fullscreen_button.setParent(self.video)
-        self.exit_fullscreen_button.hide()
-        self.exit_fullscreen_button.clicked.connect(self._exit_fullscreen)
+        # 视频放在容器里：全屏时把 video 挪进全屏窗，退出时放回这里。
+        # 不要把控制条做成 QVideoWidget 的子控件 —— 实测全屏后那样整片子
+        # 控件都不渲染（FFmpeg 后端把帧画满整个窗口，盖掉了子控件）。
+        self.video_host = QWidget()
+        video_layout = QVBoxLayout(self.video_host)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_layout.addWidget(self.video)
+        self.content.addWidget(self.video_host, 1)
 
         self.controls = QWidget()
         self.controls.setObjectName("MvControls")
+        self.controls.setMinimumHeight(44)
         controls = QHBoxLayout(self.controls)
-        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setContentsMargins(8, 4, 8, 4)
         controls.setSpacing(10)
 
         self.play_button = ghost_button("暂停", compact=True)
@@ -283,7 +286,7 @@ class MvPlayerPage(BasePage):
         self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
         controls.addWidget(self.fullscreen_button)
 
-        # 全屏时控件会被挪进视频窗，退出时再放回这个容器
+        # 全屏时控制条和视频一起进独立的全屏窗，退出时再放回这里
         self.controls_host = QWidget()
         host = QVBoxLayout(self.controls_host)
         host.setContentsMargins(0, 0, 0, 0)
@@ -405,9 +408,7 @@ class MvPlayerPage(BasePage):
 
     def stop(self) -> None:
         # 离开页面时如果还停在全屏，先把全屏窗收掉，否则会盖在整个应用上面
-        if self.video.isFullScreen():
-            self.video.setFullScreen(False)
-            self._sync_fullscreen()
+        self._exit_fullscreen()
         self._flush_history()
         self._history_timer.stop()
         self._stall_timer.stop()
@@ -596,77 +597,72 @@ class MvPlayerPage(BasePage):
     # ---------------------------------------------------------------- 全屏
 
     def _toggle_fullscreen(self) -> None:
-        self.video.setFullScreen(not self.video.isFullScreen())
-        self._sync_fullscreen()
-        if self.video.isFullScreen():
-            # 全屏窗是独立顶层窗口，主动要一次焦点，ESC 才收得到
-            self.video.setFocus()
-
-    def _exit_fullscreen(self) -> None:
-        if self.video.isFullScreen():
-            self.video.setFullScreen(False)
-        self._sync_fullscreen()
-
-    def _sync_fullscreen(self) -> None:
-        full = self.video.isFullScreen()
-        self.fullscreen_button.setText("退出全屏" if full else "全屏")
-        self.exit_fullscreen_button.setVisible(full)
-        if full:
-            self._enter_controls_fullscreen()
-            self.exit_fullscreen_button.raise_()
-            self._place_fullscreen_widgets()
+        if self._fullscreen_window is None:
+            self._enter_fullscreen()
         else:
-            self._exit_controls_fullscreen()
+            self._exit_fullscreen()
 
-    def _enter_controls_fullscreen(self) -> None:
-        """把控制条搬进视频窗：全屏时仍能暂停、拖进度、调音量。"""
-        self.controls.setParent(self.video)
+    def _enter_fullscreen(self) -> None:
+        """把视频和控制条一起放进一个独立的全屏窗口。
+
+        不能只让 QVideoWidget 自己全屏、再把控制条塞成它的子控件：FFmpeg
+        后端会把视频帧画满整个窗口，子控件实测不显示。让两者做兄弟控件最稳。
+        """
+        window = QWidget()
+        window.setWindowTitle(self.title.text() or "MV")
+        window.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        window.setStyleSheet("background: #000000;")
+        layout = QVBoxLayout(window)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        video_layout = self.video_host.layout()
+        controls_layout = self.controls_host.layout()
+        if video_layout is not None:
+            video_layout.removeWidget(self.video)
+        if controls_layout is not None:
+            controls_layout.removeWidget(self.controls)
+
         self.controls.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.controls.setStyleSheet(
             "QWidget#MvControls {"
-            " background-color: rgba(8, 12, 20, 190);"
-            " border-radius: 10px; }")
-        self.controls.show()
+            " background-color: rgba(8, 12, 20, 230); }")
+        layout.addWidget(self.video, 1)
+        layout.addWidget(self.controls, 0)
+        self._fullscreen_window = window
+        window.installEventFilter(self)
+        window.showFullScreen()
+        window.setFocus()
+        self.fullscreen_button.setText("退出全屏")
 
-    def _exit_controls_fullscreen(self) -> None:
+    def _exit_fullscreen(self) -> None:
+        window = self._fullscreen_window
+        if window is None:
+            return
+        self._fullscreen_window = None
+        layout = window.layout()
+        if layout is not None:
+            layout.removeWidget(self.video)
+            layout.removeWidget(self.controls)
+        video_layout = self.video_host.layout()
+        if video_layout is not None:
+            video_layout.addWidget(self.video)
+        controls_layout = self.controls_host.layout()
+        if controls_layout is not None:
+            controls_layout.addWidget(self.controls)
         self.controls.setStyleSheet("")
         self.controls.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-        self.controls.setParent(self.controls_host)
-        layout = self.controls_host.layout()
-        if layout is not None:
-            layout.addWidget(self.controls)
-        self.controls.show()
-
-    def _place_fullscreen_widgets(self) -> None:
-        if not self.video.isFullScreen():
-            return
-        if self.exit_fullscreen_button.isVisible():
-            self.exit_fullscreen_button.adjustSize()
-            margin = 18
-            size = self.exit_fullscreen_button.size()
-            self.exit_fullscreen_button.move(
-                max(0, self.video.width() - size.width() - margin), margin)
-        if self.controls.isVisible():
-            margin = 16
-            height = max(42, self.controls.sizeHint().height())
-            width = max(280, self.video.width() - 2 * margin)
-            self.controls.setGeometry(
-                margin, max(0, self.video.height() - height - margin),
-                width, height)
-            self.controls.raise_()
+        self.fullscreen_button.setText("全屏")
+        window.hide()
+        window.deleteLater()
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
-        kind = event.type()
-        if (kind == QEvent.Type.KeyPress
+        if (event.type() == QEvent.Type.KeyPress
                 and event.key() == Qt.Key.Key_Escape
-                and self.video.isFullScreen()):
+                and self._fullscreen_window is not None):
             self._exit_fullscreen()
             return True
-        if obj is self.video:
-            if kind == QEvent.Type.Resize and self.exit_fullscreen_button.isVisible():
-                self._place_fullscreen_widgets()
-            elif kind == QEvent.Type.WindowStateChange:
-                self._sync_fullscreen()
         return super().eventFilter(obj, event)
 
     # ---------------------------------------------------------------- 回调
