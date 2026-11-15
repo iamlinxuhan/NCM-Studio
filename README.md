@@ -563,8 +563,11 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
   封面下载与 mpv 加载都走同一处校验；带用户名密码的 URL 与缺主机的 URL 也拒绝。
 - 来自接口的文本（评论、昵称、签名、歌名歌手）在 `QLabel` 里按纯文本渲染，
   不会被当成 HTML 富文本，恶意评论无法伪装成系统提示或 UI 元素。
-- CookieCloud 响应上限 4 MB、单张封面 16 MB、网易云接口响应 64 MB、流媒体服务器
-  响应 32 MB；异常或被控的服务返回超大内容时中止，不会把内存吃光。
+- CookieCloud 响应上限 4 MB、单张封面 16 MB、网易云接口响应 64 MB（反作弊请求
+  同样受限）、流媒体服务器响应 32 MB；异常或被控的服务返回超大内容时中止，
+  不会把内存吃光。
+- 流媒体服务器地址：HTTPS 不限；HTTP 只允许本机与私有网段，公网 HTTP 直接拒绝
+  （Token 会明文上网）。内网 HTTP 在添加时会弹出明文传输警告。
 - 粘贴的 Cookie 会先写入本程序配置目录下的私有临时目录（目录 `0700`、文件 `0600`）再传给 `--file`，避免直接出现在进程参数中，用完即删；异常退出留下的残留会在下次启动时清掉。
 - CookieCloud 同步成功后会记录时间；1 小时内再次点击会先提醒，避免短时间内反复拉取浏览器 Cookie 触发风控。失败不会记录，可以立即重试。
 - 配置目录在 POSIX 上为 `0700`、配置文件为 `0600`，其他用户无法读取其中的路径、代理与账号标识。
@@ -683,7 +686,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.4 packaging\ncm-studio.iss
+iscc /DAppVersion=4.7.5 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \

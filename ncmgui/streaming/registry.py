@@ -14,6 +14,7 @@ import zlib
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ..netutil import validate_server_url
 from ..resolver import Song
 from .base import StreamError, StreamPlaylist, StreamSource, StreamTrack
 from .jellyfin import JellyfinAdapter
@@ -181,6 +182,13 @@ class StreamingRegistry(QObject):
         if kind not in KINDS:
             kind = "subsonic"
         url = _text(data.get("url")).rstrip("/")
+        if url:
+            # 配置也可能被手动编辑，这里再兜一次：公网 HTTP 不允许，
+            # 否则 Token 会明文上网
+            try:
+                url = validate_server_url(url)
+            except ValueError as exc:
+                raise StreamError(str(exc)) from exc
         return {
             "name": _text(data.get("name")) or url or "流媒体",
             "kind": kind,

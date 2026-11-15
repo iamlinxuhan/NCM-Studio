@@ -121,10 +121,28 @@ class ServerDialog(QDialog):
             self.token.setText(str(server.get("token") or ""))
 
     def _accept(self) -> None:
+        from urllib.parse import urlsplit
+
+        from ..netutil import validate_server_url
+
         url = self.url.text().strip()
-        if not url.startswith(("http://", "https://")):
-            QMessageBox.warning(self, "地址不完整", "服务器地址必须以 http:// 或 https:// 开头。")
+        try:
+            url = validate_server_url(url)
+        except ValueError as exc:
+            QMessageBox.warning(self, "服务器地址不可用", str(exc))
             return
+        if urlsplit(url).scheme.lower() == "http":
+            answer = QMessageBox.warning(
+                self, "明文连接",
+                "这个地址使用 HTTP，Jellyfin/Emby 的 Token 与密码会在网络中"
+                "明文传输，同网段的攻击者可以直接嗅探。仅建议在内网使用；"
+                "公网请改用 HTTPS。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.url.setText(url)
         if not self.name.text().strip():
             self.name.setText(url)
         self.accept()

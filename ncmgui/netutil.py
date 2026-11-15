@@ -19,6 +19,45 @@ class ProxyError(ValueError):
     """代理串不合法。消息直接展示给用户。"""
 
 
+def _is_local_or_private(host: str) -> bool:
+    """本机、私有网段、链路本地与常见内网主机名。"""
+    import ipaddress
+
+    name = str(host or "").strip().lower()
+    if not name:
+        return False
+    if name == "localhost" or name.endswith(".local"):
+        return True
+    try:
+        addr = ipaddress.ip_address(name)
+    except ValueError:
+        # 单标签主机名（nas、jellyfin）通常在内网
+        return "." not in name
+    return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
+
+
+def validate_server_url(url: str) -> str:
+    """流媒体服务器地址校验：HTTPS 任意，HTTP 仅限本机/内网。
+
+    Jellyfin/Emby 的 Token 放在请求头里，走 HTTP 时同网段的攻击者可以直接
+    嗅探。公网地址一律要求 HTTPS；内网明文由界面单独提示。
+    """
+    text = str(url or "").strip().rstrip("/")
+    parts = urlsplit(text)
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError("服务器地址必须以 http:// 或 https:// 开头")
+    host = parts.hostname or ""
+    if not host:
+        raise ValueError("服务器地址缺少主机名")
+    if scheme == "https":
+        return text
+    if _is_local_or_private(host):
+        return text
+    raise ValueError(
+        "公网地址请使用 HTTPS：HTTP 会明文传输 Token 与密码。")
+
+
 def media_url(url: str) -> str:
     """确认媒体地址只使用 http/https。
 
@@ -91,6 +130,24 @@ def _selftest() -> int:
     # ---- 媒体地址白名单
     check("允许 http", media_url("http://x/a.mp4"), "http://x/a.mp4")
     check("允许 https", media_url("https://x/a"), "https://x/a")
+    # ---- 流媒体服务器地址
+    check("HTTPS 任意", validate_server_url("https://media.example.com"),
+          "https://media.example.com")
+    check("HTTP 本机", validate_server_url("http://127.0.0.1:8096"),
+          "http://127.0.0.1:8096")
+    check("HTTP 私网", validate_server_url("http://192.168.1.2:4533"),
+          "http://192.168.1.2:4533")
+    check("HTTP 主机名", validate_server_url("http://nas:8096"),
+          "http://nas:8096")
+    for bad in ("http://media.example.com", "http://8.8.8.8",
+                "ftp://x/a", "", "http:///a"):
+        try:
+            validate_server_url(bad)
+        except ValueError:
+            check(f"拒绝服务器地址 {bad or '空'}", True, True)
+        else:
+            check(f"拒绝服务器地址 {bad or '空'}", False, True)
+
     for bad in ("file:///etc/passwd", "ftp://x/a", "data:text/plain,x", "",
                 "http://user:pass@x/a", "http:///a"):
         try:

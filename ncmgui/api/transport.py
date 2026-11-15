@@ -498,7 +498,10 @@ class Transport:
                     },
                 )
                 with self._opener().open(request, timeout=min(self.timeout, 8.0)) as response:
-                    text = response.read().decode("utf-8", errors="replace")
+                    raw = response.read(MAX_RESPONSE + 1)
+                # 反作弊响应只有一小段 HTML；超限直接当作没有 token
+                text = (raw.decode("utf-8", errors="replace")
+                        if len(raw) <= MAX_RESPONSE else "")
                 match = _TOKEN_RE.search(text)
                 token = match.group(1) if match else ""
             except (urllib.error.URLError, TimeoutError, OSError,
