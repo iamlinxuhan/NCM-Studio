@@ -277,6 +277,8 @@ class Mv:
     duration: int = 0
     description: str = ""
     publish_time: str = ""
+    #: 当前账号是否收藏了这支 MV（``mv/sublist`` 与 ``mv/detail`` 会给）
+    subscribed: bool = False
 
     @property
     def duration_text(self) -> str:
@@ -612,6 +614,7 @@ def mv_from_api(item: dict | None) -> Mv | None:
         duration=_int(item.get("duration")),
         description=_text(item.get("briefDesc") or item.get("description")),
         publish_time=_text(item.get("publishTime")),
+        subscribed=bool(item.get("subed") or item.get("subscribed")),
     )
 
 

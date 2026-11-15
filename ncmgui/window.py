@@ -113,6 +113,7 @@ PAGE_NAV = {
     "search": "discover",
     "history": "history_stats",
     "stats": "history_stats",
+    "mv_stats": "history_stats",
     "download": "transfer",
     "ncm": "transfer",
     "cloud": "transfer",
@@ -782,6 +783,18 @@ class MainWindow(QMainWindow):
         self.comments_page.load(song)
         self.stack.setCurrentWidget(self.comments_page)
 
+    def open_mv_comments(self, mv) -> None:
+        """从 MV 播放页打开这支 MV 的评论；视频继续播，不打断。"""
+        current = self.stack.currentWidget()
+        if current is not self.comments_page:
+            self._comments_return_widget = current
+        self._nav_group.setExclusive(False)
+        for button in self._nav_buttons.values():
+            button.setChecked(False)
+        self._nav_group.setExclusive(True)
+        self.comments_page.load_mv(mv)
+        self.stack.setCurrentWidget(self.comments_page)
+
     def open_mv(self, mv, url: str) -> None:
         """在内容区播放 MV。返回时回到打开它的页面。"""
         current = self.stack.currentWidget()
@@ -840,6 +853,9 @@ class MainWindow(QMainWindow):
                         hook()
                     except RuntimeError:
                         pass
+                return
+            if widget is self.mv_player_page:
+                # 从 MV 评论返回时视频还在播，直接切回去，别走 show_page
                 return
             for key, page in self.pages.items():
                 if page is widget:

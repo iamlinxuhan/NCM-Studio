@@ -12,10 +12,6 @@
 
 from __future__ import annotations
 
-import os
-import re
-import time
-import urllib.request
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, QUrl, pyqtSignal
@@ -36,20 +32,18 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..api.transport import USER_AGENT
-from ..config import config_dir
+from ..config import config_dir, default_video_dir
 from ..library import record_mv_play, update_mv_play
+from ..mvdownload import fetch_mv_file, mv_filename, unique_path
 from ..mvstream import HttpRangeDevice
 from ..playback import STATE_LOADING, STATE_PLAYING
 from ..widgets.card import ghost_button
+from ..widgets.playbackbar import SeekSlider
 from ..workers import BackgroundTask
 from .base import BasePage
 
 #: 卡住多久算「流断了」。HttpRangeDevice 自己会重试，这里只兜底更糟的情况。
 STALL_MS = 25000
-
-_BAD_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-
 
 def _quiet_ffmpeg() -> None:
     """把 FFmpeg 的日志级别压到 error。
@@ -132,23 +126,6 @@ def _clock(milliseconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
-def _mv_filename(mv) -> str:
-    base = f"{mv.artist} - {mv.name}" if getattr(mv, "artist", "") else mv.name
-    base = _BAD_FILENAME.sub("_", str(base)).strip().strip(".") or f"mv-{mv.id}"
-    return f"{base}.mp4"
-
-
-def _unique_path(path: Path) -> Path:
-    """同名文件已经存在时加序号，不覆盖用户的东西。"""
-    if not path.exists():
-        return path
-    for index in range(2, 1000):
-        candidate = path.with_name(f"{path.stem} ({index}){path.suffix}")
-        if not candidate.exists():
-            return candidate
-    return path
-
-
 def _mv_cache_path(mv_id: int) -> Path:
     """断流兜底用的完整视频缓存。"""
     return config_dir() / "cache" / "mv" / f"{int(mv_id)}.mp4"
@@ -172,10 +149,6 @@ def _prune_mv_cache(keep: int = 5) -> None:
             path.unlink()
         except OSError:
             pass
-
-
-class _Cancelled(Exception):
-    """用户取消了下载。"""
 
 
 class MvPlayerPage(BasePage):
@@ -208,6 +181,8 @@ class MvPlayerPage(BasePage):
         self._local = False
         #: 缓存兜底本身失败过，不要再反复重试
         self._cache_failed = False
+        #: 当前 MV 是否已在官方「收藏 MV」里
+        self._subscribed = False
         super().__init__(window)
 
     # ---------------------------------------------------------------- 构建
@@ -256,11 +231,13 @@ class MvPlayerPage(BasePage):
         self.play_button.clicked.connect(self._toggle)
         controls.addWidget(self.play_button)
 
-        self.position = QSlider(Qt.Orientation.Horizontal)
+        # 和底部播放条一样，点轨道任意位置直接跳过去，而不是「翻一页」
+        self.position = SeekSlider(Qt.Orientation.Horizontal)
         self.position.setRange(0, 0)
         self.position.sliderPressed.connect(self._begin_seek)
         self.position.sliderReleased.connect(self._end_seek)
         self.position.sliderMoved.connect(self._seek)
+        self.position.clickedValue.connect(self._seek_clicked)
         controls.addWidget(self.position, 1)
 
         self.time_label = QLabel("0:00 / 0:00")
@@ -277,6 +254,14 @@ class MvPlayerPage(BasePage):
         self.volume.setValue(max(0, min(100, volume)))
         self.volume.valueChanged.connect(self._set_volume)
         controls.addWidget(self.volume)
+
+        self.subscribe_button = ghost_button("收藏", compact=True)
+        self.subscribe_button.clicked.connect(self._toggle_subscribe)
+        controls.addWidget(self.subscribe_button)
+
+        self.comments_button = ghost_button("评论", compact=True)
+        self.comments_button.clicked.connect(self._open_comments)
+        controls.addWidget(self.comments_button)
 
         self.download_button = ghost_button("下载", compact=True)
         self.download_button.clicked.connect(self._toggle_download)
@@ -349,6 +334,9 @@ class MvPlayerPage(BasePage):
         self._history_checks = 0
         self._local = False
         self._cache_failed = False
+        self._subscribed = False
+        self.subscribe_button.setText("收藏")
+        self._refresh_subscribe_state()
         self.title.setText(getattr(mv, "name", "") or "MV")
         self.meta.setText(getattr(mv, "subtitle", ""))
         self.status.setText("正在加载视频…")
@@ -444,6 +432,88 @@ class MvPlayerPage(BasePage):
     def _seek(self, value: int) -> None:
         self.time_label.setText(f"{_clock(value)} / {_clock(self.media.duration())}")
 
+    def _seek_clicked(self, value: int) -> None:
+        """点进度条轨道：立刻跳到那个位置，不用松手。"""
+        self.media.setPosition(int(value))
+        self.time_label.setText(
+            f"{_clock(value)} / {_clock(self.media.duration())}")
+
+    def _open_comments(self) -> None:
+        if self.mv is not None:
+            self.window.open_mv_comments(self.mv)
+
+    # ---------------------------------------------------------------- 收藏
+
+    def _refresh_subscribe_state(self) -> None:
+        """用官方「收藏 MV」列表判断当前这支是否已收藏。
+
+        ``mv/detail`` 与 ``mv/sublist`` 都没有可靠的 ``subed`` 字段，只能
+        拉一次收藏列表比对 id。列表通常只有几十条，开销可以接受。
+        """
+        if self.mv is None:
+            return
+        client = self.window.client
+        if not client.logged_in:
+            self.subscribe_button.setEnabled(False)
+            self.subscribe_button.setToolTip("登录后才能收藏 MV")
+            return
+        mv_id = int(self.mv.id)
+        self.subscribe_button.setEnabled(False)
+        task = BackgroundTask(lambda: client.mv_sublist(200), parent=self)
+
+        def done(items) -> None:
+            if self.mv is None or int(self.mv.id) != mv_id:
+                return
+            self._set_subscribed(any(int(item.id) == mv_id for item in items))
+
+        def failed(_message: str) -> None:
+            # 查询失败不挡收藏：按钮可用，点下去照样能收藏
+            self.subscribe_button.setEnabled(True)
+
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
+
+    def _set_subscribed(self, on: bool) -> None:
+        self._subscribed = bool(on)
+        self.subscribe_button.setText("已收藏" if on else "收藏")
+        self.subscribe_button.setEnabled(True)
+
+    def _toggle_subscribe(self) -> None:
+        if self.mv is None:
+            return
+        if not self.window.require_login_silent("收藏 MV"):
+            return
+        if self._subscribed:
+            # 取消收藏的接口服务端不开放（见 Client.mv_subscribe），别假装成功
+            self.toast("如需取消收藏，请到网易云客户端操作")
+            return
+        on = True
+        client = self.window.client
+        mv_id = int(self.mv.id)
+        self.subscribe_button.setEnabled(False)
+        self.status.setText("正在收藏…" if on else "正在取消收藏…")
+        self._transient_status = True
+        task = BackgroundTask(
+            lambda: client.mv_subscribe(mv_id, on), parent=self)
+
+        def done(_result) -> None:
+            if self.mv is None or int(self.mv.id) != mv_id:
+                return
+            self._set_subscribed(on)
+            self.status.setText("")
+            self._transient_status = False
+            self.toast("已收藏 MV" if on else "已取消收藏")
+
+        def failed(message: str) -> None:
+            self.subscribe_button.setEnabled(True)
+            self.status.setText(f"操作失败：{message}")
+            self._transient_status = False
+
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
+
     def _set_volume(self, value: int) -> None:
         self.audio.setVolume(max(0, min(100, value)) / 100)
 
@@ -466,81 +536,11 @@ class MvPlayerPage(BasePage):
     # ---------------------------------------------------------------- 下载
 
     def _download_dir(self) -> Path:
-        raw = str(self.cfg.get("download.output", "") or "").strip()
+        """MV 固定用「下载」页里的 MV 输出目录，这里不提供修改入口。"""
+        raw = str(self.cfg.get("download.mv_output", "") or "").strip()
         if raw:
             return Path(raw).expanduser()
-        return Path.home() / "NCM-Studio-download"
-
-    def _fetch_mv_file(self, mv, target: Path, task: BackgroundTask | None) -> str:
-        """把 MV 完整下载到 ``target``，可被任意后台线程调用。
-
-        网易云的视频 CDN 会中途掐连接：先写 ``.part``，断了用 ``Range`` 从
-        已下载的位置续传，同时重新取播放地址（旧地址可能已过期）。最多续 3 次。
-        """
-        client = self.window.client
-        url, _fee = client.mv_url(mv.id)
-        part = target.with_name(target.name + ".part")
-        attempt = 0
-        if task is not None:
-            task.percent.emit(-1)
-        while True:
-            written = part.stat().st_size if part.is_file() else 0
-            headers = {
-                "User-Agent": USER_AGENT,
-                "Referer": "https://music.163.com/",
-            }
-            if written:
-                headers["Range"] = f"bytes={written}-"
-            request = urllib.request.Request(url, headers=headers)
-            try:
-                with urllib.request.urlopen(request, timeout=30) as response:
-                    status = int(getattr(response, "status", 200) or 200)
-                    length = int(response.headers.get("Content-Length") or 0)
-                    if written and status == 206:
-                        base = written
-                        total = base + length if length else 0
-                        mode = "ab"
-                    else:
-                        # 服务端不支持续传（回了 200），只能从头写
-                        base = 0
-                        total = length
-                        mode = "wb"
-                    got = 0
-                    with open(part, mode) as handle:
-                        while True:
-                            if task is not None and task.cancel_event.is_set():
-                                raise _Cancelled("已取消下载")
-                            chunk = response.read(256 * 1024)
-                            if not chunk:
-                                break
-                            handle.write(chunk)
-                            got += len(chunk)
-                            if total and task is not None:
-                                task.percent.emit(
-                                    min(99, (base + got) * 100 // total))
-                    if total and base + got < total:
-                        # 连接提前关闭时 read() 只返回 b''，不抛异常；
-                        # 不核对长度就会把半截文件当成下载完成
-                        raise OSError("连接提前中断")
-                os.replace(part, target)
-                return str(target)
-            except _Cancelled:
-                try:
-                    part.unlink()
-                except OSError:
-                    pass
-                raise
-            except Exception:  # noqa: BLE001 - 网络异常统一重试
-                attempt += 1
-                if attempt > 3:
-                    try:
-                        part.unlink()
-                    except OSError:
-                        pass
-                    raise
-                time.sleep(1.5 * attempt)
-                # 旧地址可能已随断流失效，重新取一次再续传
-                url, _fee = client.mv_url(mv.id)
+        return default_video_dir()
 
     def _toggle_download(self) -> None:
         task = self._download
@@ -563,8 +563,12 @@ class MvPlayerPage(BasePage):
         self.status.setText("正在获取下载地址…")
 
         def work() -> str:
-            target = _unique_path(directory / _mv_filename(mv))
-            return self._fetch_mv_file(mv, target, task)
+            target = unique_path(directory / mv_filename(mv))
+            return fetch_mv_file(
+                self.window.client, mv, target,
+                progress=task.percent.emit if task is not None else None,
+                cancelled=task.cancel_event.is_set if task is not None else None,
+            )
 
         task = BackgroundTask(work, parent=self)
         self._download = task
@@ -773,7 +777,11 @@ class MvPlayerPage(BasePage):
         task: BackgroundTask | None = None
 
         def work() -> str:
-            return self._fetch_mv_file(mv, target, task)
+            return fetch_mv_file(
+                self.window.client, mv, target,
+                progress=task.percent.emit if task is not None else None,
+                cancelled=task.cancel_event.is_set if task is not None else None,
+            )
 
         task = BackgroundTask(work, parent=self)
         self._cache_task = task

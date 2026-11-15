@@ -12,6 +12,7 @@ from .base import TabbedPage
 from .cloud import CloudPage
 from .download import DownloadPage
 from .history import HistoryPage
+from .mvstats import MvStatsPage
 from .ncm import NcmPage
 from .proxy import ProxyPage
 from .stats import StatsPage
@@ -21,10 +22,11 @@ from .tools import ToolsPage
 
 class HistoryStatsPage(TabbedPage):
     PAGE_TITLE = "历史与统计"
-    PAGE_SUBTITLE = "最近听过什么，以及在哪些歌上花的时间最多。"
+    PAGE_SUBTITLE = "最近听过什么、看过哪些 MV，以及在它们身上花的时间最多。"
     TABS = (
         ("history", "播放历史", HistoryPage),
         ("stats", "听歌统计", StatsPage),
+        ("mv_stats", "MV 播放统计", MvStatsPage),
     )
 
 

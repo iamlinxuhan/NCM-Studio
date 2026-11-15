@@ -294,6 +294,48 @@ class ApiClient:
             raise ApiError("这个 MV 不存在或已下架")
         return mv
 
+    def mv_sublist(self, limit: int = 100, offset: int = 0) -> list[Mv]:
+        """当前账号收藏的 MV（官方客户端的「收藏 MV」）。
+
+        这是官方功能，直接走 ``/api/mv/sublist``，不另建本地收藏表。
+        """
+        self.need_login()
+        payload = self.transport.get(
+            "/api/mv/sublist",
+            {"limit": max(1, int(limit)), "offset": max(0, int(offset))},
+        )
+        return [mv for mv in (
+            mv_from_api(item if isinstance(item, dict) else None)
+            for item in (payload.get("data") or [])
+        ) if mv is not None]
+
+    def mv_subscribe(self, mv_id: int, on: bool = True) -> None:
+        """收藏 MV。
+
+        网页端用的是明文 ``/api/mv/sub``，参数名是 ``mvId``（不是 ``id`` 或
+        ``mvid``），并且要带表单里的 ``csrf_token``。``/weapi/mv/sub`` 会
+        返回空的 200，实际什么也没做，别用。
+
+        取消收藏（``/api/mv/unsub``）服务端一律返回空的 400 —— 桌面客户端
+        走的是另一套 eapi，本项目暂未实现，所以这里明确拒绝，交给页面提示
+        用户去官方客户端操作，而不是假装成功。
+        """
+        self.need_login()
+        if not on:
+            raise ApiError("暂不支持在应用内取消收藏 MV，请到网易云客户端操作")
+        token = self.transport.jar.csrf
+        if not token:
+            raise AuthRequired("登录信息缺少 CSRF 令牌，请重新登录")
+        payload = self.transport.request(
+            "POST",
+            "/api/mv/sub",
+            {"mvId": int(mv_id), "csrf_token": token},
+            write=True,
+        )
+        if int(payload.get("code") or 0) != 200:
+            raise ApiError(
+                str(payload.get("message") or "收藏操作失败，请稍后再试"))
+
     def mv_url(self, mv_id: int, quality: int = 1080) -> tuple[str, int]:
         """取 MV 播放地址。返回 ``(url, fee)``；``fee`` 非 0 说明要会员。"""
         payload = self.transport.weapi(
@@ -488,12 +530,15 @@ class ApiClient:
     # -------------------------------------------------------------- 评论
 
     def comments(self, song_id: int, page: int = 1, limit: int = 20,
-                 hot: bool = False) -> tuple[list[Comment], int, bool]:
+                 hot: bool = False, *, resource: str = "song",
+                 ) -> tuple[list[Comment], int, bool]:
         limit = max(1, min(int(limit), 100))
         offset = (max(1, int(page)) - 1) * limit
+        thread = self.mv_thread_id(song_id) if resource == "mv" \
+            else self.song_thread_id(song_id)
         path = (
-            f"/api/v1/resource/hotcomments/R_SO_4_{int(song_id)}"
-            if hot else f"/api/v1/resource/comments/R_SO_4_{int(song_id)}"
+            f"/api/v1/resource/hotcomments/{thread}"
+            if hot else f"/api/v1/resource/comments/{thread}"
         )
         payload = self.transport.get(path, {"limit": limit, "offset": offset})
         raw = payload.get("hotComments") if hot else payload.get("comments")
@@ -506,15 +551,23 @@ class ApiClient:
         """歌曲评论区的 threadId。网页端所有评论接口都用这个格式。"""
         return f"R_SO_4_{int(song_id)}"
 
+    @staticmethod
+    def mv_thread_id(mv_id: int) -> str:
+        """MV 评论区的 threadId（``R_MV_5_<id>``）。"""
+        return f"R_MV_5_{int(mv_id)}"
+
     def add_comment(self, song_id: int, content: str, *,
-                    reply_to: int = 0) -> Comment:
-        """发一条歌曲评论；``reply_to`` 非 0 时发成楼中楼回复。"""
+                    reply_to: int = 0, thread_id: str = "") -> Comment:
+        """发一条评论；``reply_to`` 非 0 时发成楼中楼回复。
+
+        ``thread_id`` 用来区分评论挂在歌曲还是 MV 下；不传时按歌曲处理。
+        """
         self.need_login()
         text = (content or "").strip()
         if not text:
             raise ApiError("评论内容不能为空")
         data: dict[str, Any] = {
-            "threadId": self.song_thread_id(song_id),
+            "threadId": thread_id or self.song_thread_id(song_id),
             "content": text,
         }
         if reply_to:

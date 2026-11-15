@@ -43,7 +43,9 @@ _EXPORTS = {
     "RankEntry": "stats",
     "SliceEntry": "stats",
     "StatsData": "stats",
+    "MvStats": "stats",
     "collect": "stats",
+    "collect_mv": "stats",
 }
 
 __all__ = list(_EXPORTS)

@@ -39,7 +39,6 @@ class StatsPage(BasePage):
         self._build_heatmap()
         self._build_charts()
         self._build_rankings()
-        self._build_mv_stats()
         self._build_status()
 
     # ---------------------------------------------------------------- 构建
@@ -55,7 +54,6 @@ class StatsPage(BasePage):
             ("active", "活跃天数"),
             ("streak", "连续听歌"),
             ("longest", "最长连续"),
-            ("mv", "MV 观看"),
         ):
             card = QFrame()
             card.setObjectName("Card")
@@ -125,62 +123,6 @@ class StatsPage(BasePage):
             row.addWidget(card, 1)
         self.content.addLayout(row)
 
-    def _build_mv_stats(self) -> None:
-        """MV 观看的量表：热力图、时段、完成度与排行。
-
-        维度与听歌统计刻意保持一致，用户可以把「听」和「看」放在一起比较。
-        """
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
-
-        heat_card, heat_layout = self._card(
-            "MV · 最近 90 天",
-            "颜色越亮表示当天观看越多；每一格是一天。",
-        )
-        # MV 用紫色系，和听歌统计的青色系区分开
-        self.mv_heatmap = HeatmapWidget(accent="PURPLE")
-        heat_layout.addWidget(self.mv_heatmap)
-        row.addWidget(heat_card, 3)
-
-        hours_card, hours_layout = self._card("MV 时段分布", "")
-        self.mv_hours_caption = QLabel("")
-        self.mv_hours_caption.setObjectName("CardSubtitle")
-        hours_layout.addWidget(self.mv_hours_caption)
-        self.mv_hours = HourBars(accent="PURPLE", peak="PURPLE_HOVER")
-        hours_layout.addWidget(self.mv_hours)
-        row.addWidget(hours_card, 2)
-        self.content.addLayout(row)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
-
-        done_card, done_layout = self._card("MV 观看完成度", "「看完」指播放到了结尾。")
-        self.mv_completion = SliceBars(
-            palette=("PURPLE", "AMBER"))
-        done_layout.addWidget(self.mv_completion)
-        done_layout.addStretch(1)
-        row.addWidget(done_card, 2)
-
-        self._mv_rank_tables: dict[str, QTableWidget] = {}
-        self._mv_rank_empty: dict[str, QLabel] = {}
-        for key, title in (
-            ("mvs", "最常看的 MV"),
-            ("mv_artists", "最常看的歌手"),
-        ):
-            card, layout = self._card(title, "按观看次数")
-            table = self._make_rank_table()
-            empty = QLabel("还没有足够的数据")
-            empty.setObjectName("Hint")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(empty, 0, Qt.AlignmentFlag.AlignTop)
-            layout.addWidget(table, 0, Qt.AlignmentFlag.AlignTop)
-            self._mv_rank_tables[key] = table
-            self._mv_rank_empty[key] = empty
-            row.addWidget(card, 1)
-        self.content.addLayout(row)
-
     def _build_status(self) -> None:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -239,8 +181,7 @@ class StatsPage(BasePage):
         self._render()
 
     def theme_changed(self) -> None:
-        for widget in (self.heatmap, self.hours, self.qualities,
-                       self.mv_heatmap, self.mv_hours, self.mv_completion):
+        for widget in (self.heatmap, self.hours, self.qualities):
             widget.theme_changed()
         self._reload(repaint_only=True)
 
@@ -251,9 +192,6 @@ class StatsPage(BasePage):
             self.heatmap.set_data(self._data.days)
             self.hours.set_data(self._data.hours)
             self.qualities.set_data(self._data.qualities)
-            self.mv_heatmap.set_data(self._data.mv.days)
-            self.mv_hours.set_data(self._data.mv.hours)
-            self.mv_completion.set_data(self._data.mv.completion)
             self._update_texts()
             return
         self._render()
@@ -268,15 +206,6 @@ class StatsPage(BasePage):
             rows = getattr(data, key)
             self._fill_rank(self._rank_tables[key], self._rank_empty[key], rows)
 
-        mv = data.mv
-        self.mv_heatmap.set_data(mv.days)
-        self.mv_hours.set_data(mv.hours)
-        self.mv_completion.set_data(mv.completion)
-        for key in self._mv_rank_tables:
-            self._fill_rank(
-                self._mv_rank_tables[key], self._mv_rank_empty[key],
-                mv.mvs if key == "mvs" else mv.artists)
-
         self._update_texts()
 
     def _update_texts(self) -> None:
@@ -286,20 +215,6 @@ class StatsPage(BasePage):
         self._stats["active"].setText(f"{data.active_days} 天")
         self._stats["streak"].setText(f"{data.current_streak} 天")
         self._stats["longest"].setText(f"{data.longest_streak} 天")
-        mv = data.mv
-        if mv.total_plays:
-            self._stats["mv"].setText(f"{mv.total_plays} 支")
-            self._stats["mv"].setToolTip(
-                f"累计观看 {mv.total_watched_text}，"
-                f"有 {mv.active_days} 天在看 MV")
-            peak_end = (mv.peak_hour + 1) % 24
-            self.mv_hours_caption.setText(
-                f"最常在 {mv.peak_hour:02d}:00–{peak_end:02d}:00 看 MV，"
-                f"共 {mv.hours[mv.peak_hour]} 次。"
-            )
-        else:
-            self._stats["mv"].setText("—")
-            self.mv_hours_caption.setText("还没有观看记录。")
 
         if data.total_plays:
             peak_end = (data.peak_hour + 1) % 24

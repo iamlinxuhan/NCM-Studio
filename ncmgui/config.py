@@ -149,6 +149,23 @@ def default_music_dir() -> Path:
     return Path.home() / "NCM-Studio-download"
 
 
+def _video_candidates() -> list[Path]:
+    """各平台可能的视频目录，按优先级排列。"""
+    home = Path.home()
+    xdg = _user_dirs().get("XDG_VIDEOS_DIR", "")
+    candidates = [Path(xdg)] if xdg else []
+    candidates += [home / "Videos", home / "视频", home / "Movies"]
+    return candidates
+
+
+def default_video_dir() -> Path:
+    """MV 的默认下载目录：系统视频目录下的 ``NCM-Studio``。"""
+    for candidate in _video_candidates():
+        if candidate.is_dir():
+            return candidate / "NCM-Studio"
+    return Path.home() / "NCM-Studio-videos"
+
+
 def _legacy_music_dir() -> Path:
     """改名前的默认下载目录。迁移配置时用来识别「用户没改过」的情况。"""
     for candidate in _music_candidates():
@@ -207,6 +224,8 @@ def _defaults() -> dict[str, Any]:
         "debug": False,
         "download": {
             "output": str(default_music_dir()),
+            # MV 单独一个目录：视频文件和音乐混在一起会让曲库扫描把 mp4 也扫进来
+            "mv_output": str(default_video_dir()),
             "level": "lossless",
             # 默认并发 3：网易云对高频请求敏感，5 路并发更容易撞限流
             "parallel": 3,

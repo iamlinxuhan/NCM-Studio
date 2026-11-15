@@ -42,6 +42,10 @@ class CommentsPage(BasePage):
 
     def __init__(self, window) -> None:
         self.song: Song | None = None
+        #: 当前评论挂在歌曲还是 MV 上；两者共用这一页
+        self.mv = None
+        self._subject_id = 0
+        self._resource = "song"
         self._task: BackgroundTask | None = None
         self._generation = 0
         self._reply_to = None
@@ -148,17 +152,36 @@ class CommentsPage(BasePage):
     def load(self, song: Song) -> None:
         """切换到某首歌的评论。"""
         self.song = song
+        self.mv = None
+        self._resource = "song"
+        self._subject_id = int(song.id) if song is not None else 0
+        self._prepare(song.display if song is not None else "评论")
+
+    def load_mv(self, mv) -> None:
+        """切换到某支 MV 的评论（threadId 是 ``R_MV_5_<id>``）。"""
+        self.song = None
+        self.mv = mv
+        self._resource = "mv"
+        self._subject_id = int(mv.id) if mv is not None else 0
+        self._prepare(mv.name if mv is not None else "MV 评论")
+
+    def _prepare(self, title: str) -> None:
         self._reply_to = None
         self._reply_to_label_reset()
         self.composer.clear()
-        self.title.setText(song.display if song is not None else "评论")
+        self.title.setText(title)
         self.meta.setText("")
         self._clear_comments()
         self.pager.set_page(1, False, 0)
         self._update_count(0)
-        if song is None:
-            return
-        self._load(int(song.id), page=1, with_hot=True)
+        if self._subject_id:
+            self._load(self._subject_id, page=1, with_hot=True)
+
+    def _thread_id(self) -> str:
+        client = self.window.client
+        if self._resource == "mv":
+            return client.mv_thread_id(self._subject_id)
+        return client.song_thread_id(self._subject_id)
 
     def on_show(self) -> None:
         pass
@@ -174,12 +197,14 @@ class CommentsPage(BasePage):
 
         def work():
             latest, total, more = client.comments(
-                song_id, page=page, limit=PAGE_SIZE)
+                song_id, page=page, limit=PAGE_SIZE,
+                resource=self._resource)
             hot = []
             if with_hot:
                 try:
                     hot, _hot_total, _hot_more = client.comments(
-                        song_id, page=1, limit=PAGE_SIZE, hot=True)
+                        song_id, page=1, limit=PAGE_SIZE, hot=True,
+                        resource=self._resource)
                 except Exception:
                     hot = []
             return latest, total, more, hot
@@ -192,8 +217,8 @@ class CommentsPage(BasePage):
         task.start()
 
     def _load_latest(self, page: int) -> None:
-        if self.song is not None:
-            self._load(int(self.song.id), page=page, with_hot=False)
+        if self._subject_id:
+            self._load(self._subject_id, page=page, with_hot=False)
 
     def _on_done(self, data, page: int, generation: int,
                  with_hot: bool) -> None:
@@ -261,7 +286,7 @@ class CommentsPage(BasePage):
         self._clear_reply()
 
     def _post(self) -> None:
-        if self.song is None:
+        if not self._subject_id:
             return
         if not self.window.require_login_silent("发表评论"):
             return
@@ -273,14 +298,16 @@ class CommentsPage(BasePage):
             self.status.setText(f"评论最多 {MAX_LENGTH} 字。")
             return
         client = self.window.client
-        song_id = int(self.song.id)
+        song_id = self._subject_id
+        thread_id = self._thread_id()
         reply = self._reply_to
         reply_to = int(reply.id) if reply is not None else 0
 
         self.post_button.setEnabled(False)
         self.status.setText("正在发布…")
         task = BackgroundTask(
-            lambda: client.add_comment(song_id, text, reply_to=reply_to),
+            lambda: client.add_comment(
+                song_id, text, reply_to=reply_to, thread_id=thread_id),
             parent=self,
         )
 
@@ -318,7 +345,7 @@ class CommentsPage(BasePage):
         paint(liked, count + (1 if liked else -1))
         label.setEnabled(False)
         client = self.window.client
-        thread_id = comment.thread_id or client.song_thread_id(self.song.id)
+        thread_id = comment.thread_id or self._thread_id()
         task = BackgroundTask(
             lambda: client.like_comment(comment.id, thread_id, liked),
             parent=self,

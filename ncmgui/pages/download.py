@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Sequence
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -27,12 +28,13 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import covers, images, lyrics, ncmctl
-from ..config import default_music_dir
+from ..config import default_music_dir, default_video_dir
 from ..download_manager import (
     STATUS_QUEUED,
     STATUS_RUNNING,
     DownloadManager,
 )
+from ..mvdownload import download_all
 from ..resolver import PLAYLIST_URL, FeeTagger, Plan, Resolver, Song
 from ..widgets.card import Card, accent_button, ghost_button
 from ..widgets.console import ConsoleView, classify
@@ -159,6 +161,15 @@ class DownloadPage(BasePage):
         hint.setWordWrap(True)
 
         card.add(self.liked_button)
+
+        self.mv_button = ghost_button("下载收藏的 MV", compact=True)
+        self.mv_button.clicked.connect(self._download_favorites)
+        card.add(self.mv_button)
+        self.mv_status = QLabel("")
+        self.mv_status.setObjectName("Hint")
+        self.mv_status.setWordWrap(True)
+        card.add(self.mv_status)
+
         card.add(hint)
         self.content.addWidget(card)
 
@@ -220,6 +231,17 @@ class DownloadPage(BasePage):
         )
         # 输出目录变了，之前的查重结论就作废
         self.output.pathChanged.connect(lambda _path: self._invalidate_plan())
+
+        self.mv_output = options.add_path(
+            "MV 输出目录",
+            mode="dir",
+            value=self.cfg.get("download.mv_output", ""),
+            default=str(default_video_dir()),
+            hint=(
+                "MV 的下载位置，默认是「视频」目录下的 NCM-Studio。MV 播放页的"
+                "「下载」和收藏页的「下载全部」都直接用这里，不再单独选择。"
+            ),
+        )
         self.content.addWidget(options)
 
     def _build_report(self) -> None:
@@ -613,6 +635,60 @@ class DownloadPage(BasePage):
 
         self._start_task(work, "正在读取「我喜欢的音乐」…", MODE_LIKED)
 
+    def _download_favorites(self) -> None:
+        """一键下载官方「收藏 MV」里的全部 MV，落到「MV 输出目录」。"""
+        if not self.require_login("下载收藏的 MV"):
+            return
+        task = self._mv_download_task
+        if task is not None and task.is_running:
+            task.cancel()
+            self.mv_status.setText("正在取消下载…")
+            return
+        self.save_config()
+        raw = str(self.cfg.get("download.mv_output", "") or "").strip()
+        directory = (Path(raw).expanduser() if raw
+                     else default_video_dir())
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.mv_status.setText(f"无法创建 MV 下载目录：{exc}")
+            return
+        client = self.window.client
+        self.mv_button.setEnabled(False)
+        self.mv_status.setText("正在读取收藏的 MV…")
+        task = BackgroundTask(lambda: self._run_mv_download(client, directory, task),
+                              parent=self)
+        self._mv_download_task = task
+
+        def done(count: int) -> None:
+            self.mv_button.setEnabled(True)
+            if count:
+                self.mv_status.setText(f"已下载 {count} 支 MV 到 {directory}")
+                self.toast(f"已下载 {count} 支 MV")
+            else:
+                self.mv_status.setText("还没有收藏的 MV。")
+
+        def failed(message: str) -> None:
+            cancelled = task is not None and task.cancel_event.is_set()
+            self.mv_button.setEnabled(True)
+            self.mv_status.setText(
+                "已取消下载" if cancelled else f"MV 下载失败：{message}")
+
+        task.progress.connect(self.mv_status.setText)
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
+
+    def _run_mv_download(self, client, directory: Path, task) -> int:
+        mvs = client.mv_sublist(200)
+        if not mvs:
+            return 0
+        return download_all(
+            client, mvs, directory,
+            progress=task.progress.emit if task is not None else None,
+            cancelled=task.cancel_event.is_set if task is not None else None,
+        )
+
     def _execute_plan(self, plan: Plan, raw_targets: list[str] | None = None) -> None:
         """按计划开跑。
 
@@ -933,3 +1009,4 @@ class DownloadPage(BasePage):
         self.cfg.set("download.cover", combo_data(self.cover, covers.MODE_FILE))
         self.cfg.set("download.parallel", self.parallel.value())
         self.cfg.set("download.output", self.output.path())
+        self.cfg.set("download.mv_output", self.mv_output.path())

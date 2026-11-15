@@ -59,6 +59,8 @@ class MvStats:
     total_plays: int = 0
     total_watched_ms: int = 0
     active_days: int = 0
+    current_streak: int = 0
+    longest_streak: int = 0
 
     @property
     def total_watched_text(self) -> str:
@@ -83,18 +85,10 @@ class StatsData:
     active_days: int = 0
     current_streak: int = 0
     longest_streak: int = 0
-    #: 同一窗口内的 MV 观看次数与累计观看时长
-    mv_plays: int = 0
-    mv_watched_ms: int = 0
-    mv: MvStats = MvStats()
 
     @property
     def total_listened_text(self) -> str:
         return format_duration(self.total_listened_ms)
-
-    @property
-    def mv_watched_text(self) -> str:
-        return format_duration(self.mv_watched_ms)
 
     @property
     def peak_hour(self) -> int:
@@ -142,6 +136,31 @@ class _Counter:
 
     def __len__(self) -> int:
         return len(self._data)
+
+
+def _streaks(day_entries: tuple[DayEntry, ...], start_day: date,
+             today: date) -> tuple[int, int]:
+    """返回 ``(当前连续天数, 最长连续天数)``。
+
+    今天还没记录不算断，从昨天继续往前数 —— 与听歌统计一致。
+    """
+    active = {item.day for item in day_entries if item.plays}
+    longest = 0
+    run = 0
+    cursor = start_day
+    while cursor <= today:
+        if cursor in active:
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+        cursor += timedelta(days=1)
+    current = 0
+    cursor = today if today in active else today - timedelta(days=1)
+    while cursor >= start_day and cursor in active:
+        current += 1
+        cursor -= timedelta(days=1)
+    return current, longest
 
 
 def _local_day(timestamp: float) -> date:
@@ -202,59 +221,6 @@ def collect(
             artists.add(artist, "", listened_ms)
         qualities[quality] = qualities.get(quality, 0) + 1
 
-    mv_rows = db.query(
-        "SELECT name, artist, started_at, watched_ms, completed"
-        " FROM mv_events WHERE started_at >= ? ORDER BY started_at",
-        (start_ts,),
-    )
-    mv_day_plays: dict[date, int] = {}
-    mv_day_ms: dict[date, int] = {}
-    mv_hours = [0] * 24
-    mv_names = _Counter()
-    mv_artists = _Counter()
-    mv_total = 0
-    mv_done = 0
-    for row in mv_rows:
-        started_at = int(row["started_at"] or 0)
-        watched_ms = max(0, int(row["watched_ms"] or 0))
-        day = _local_day(started_at)
-        if day < start_day or day > today:
-            continue
-        mv_total += 1
-        mv_day_plays[day] = mv_day_plays.get(day, 0) + 1
-        mv_day_ms[day] = mv_day_ms.get(day, 0) + watched_ms
-        mv_hours[datetime.fromtimestamp(started_at).hour] += 1
-        title = str(row["name"] or "").strip() or "未知 MV"
-        artist_text = str(row["artist"] or "").strip() or "未知歌手"
-        mv_names.add(title, artist_text, watched_ms)
-        for artist in split_artists(artist_text) or ("未知歌手",):
-            mv_artists.add(artist, "", watched_ms)
-        if row["completed"]:
-            mv_done += 1
-
-    mv_day_entries = tuple(
-        DayEntry(
-            day=start_day + timedelta(days=offset),
-            plays=mv_day_plays.get(start_day + timedelta(days=offset), 0),
-            listened_ms=mv_day_ms.get(start_day + timedelta(days=offset), 0),
-        )
-        for offset in range(days)
-    )
-    mv_stats = MvStats(
-        days=mv_day_entries,
-        hours=tuple(mv_hours),
-        mvs=mv_names.ranked(rank_limit),
-        artists=mv_artists.ranked(rank_limit),
-        completion=(
-            (SliceEntry("看完", mv_done),
-             SliceEntry("未看完", mv_total - mv_done))
-            if mv_total else ()
-        ),
-        total_plays=mv_total,
-        total_watched_ms=sum(mv_day_ms.values()),
-        active_days=sum(1 for item in mv_day_entries if item.plays),
-    )
-
     day_entries = tuple(
         DayEntry(
             day=start_day + timedelta(days=offset),
@@ -265,23 +231,7 @@ def collect(
     )
 
     active = {item.day for item in day_entries if item.plays}
-    longest = 0
-    run = 0
-    cursor = start_day
-    while cursor <= today:
-        if cursor in active:
-            run += 1
-            longest = max(longest, run)
-        else:
-            run = 0
-        cursor += timedelta(days=1)
-
-    # 当前连续天数：今天还没听不算断，从昨天继续往前数。
-    current = 0
-    cursor = today if today in active else today - timedelta(days=1)
-    while cursor >= start_day and cursor in active:
-        current += 1
-        cursor -= timedelta(days=1)
+    current, longest = _streaks(day_entries, start_day, today)
 
     return StatsData(
         days=day_entries,
@@ -300,9 +250,76 @@ def collect(
         active_days=len(active),
         current_streak=current,
         longest_streak=longest,
-        mv_plays=mv_total,
-        mv_watched_ms=mv_stats.total_watched_ms,
-        mv=mv_stats,
+    )
+
+
+def collect_mv(
+    db: LibraryDB,
+    days: int = DEFAULT_DAYS,
+    *,
+    now: float | None = None,
+    rank_limit: int = 10,
+) -> MvStats:
+    """MV 观看统计，窗口与切分方式跟听歌统计一致。"""
+    days = max(1, int(days))
+    now_ts = time.time() if now is None else float(now)
+    today = _local_day(now_ts)
+    start_day = today - timedelta(days=days - 1)
+    start_ts = int(datetime.combine(start_day, dtime.min).timestamp())
+
+    rows = db.query(
+        "SELECT name, artist, started_at, watched_ms, completed"
+        " FROM mv_events WHERE started_at >= ? ORDER BY started_at",
+        (start_ts,),
+    )
+    day_plays: dict[date, int] = {}
+    day_ms: dict[date, int] = {}
+    hours = [0] * 24
+    mvs = _Counter()
+    artists = _Counter()
+    total = 0
+    done = 0
+    for row in rows:
+        started_at = int(row["started_at"] or 0)
+        watched_ms = max(0, int(row["watched_ms"] or 0))
+        day = _local_day(started_at)
+        if day < start_day or day > today:
+            continue
+        total += 1
+        day_plays[day] = day_plays.get(day, 0) + 1
+        day_ms[day] = day_ms.get(day, 0) + watched_ms
+        hours[datetime.fromtimestamp(started_at).hour] += 1
+        title = str(row["name"] or "").strip() or "未知 MV"
+        artist_text = str(row["artist"] or "").strip() or "未知歌手"
+        mvs.add(title, artist_text, watched_ms)
+        for name in split_artists(artist_text) or ("未知歌手",):
+            artists.add(name, "", watched_ms)
+        if row["completed"]:
+            done += 1
+
+    day_entries = tuple(
+        DayEntry(
+            day=start_day + timedelta(days=offset),
+            plays=day_plays.get(start_day + timedelta(days=offset), 0),
+            listened_ms=day_ms.get(start_day + timedelta(days=offset), 0),
+        )
+        for offset in range(days)
+    )
+    current, longest = _streaks(day_entries, start_day, today)
+    return MvStats(
+        days=day_entries,
+        hours=tuple(hours),
+        mvs=mvs.ranked(rank_limit),
+        artists=artists.ranked(rank_limit),
+        completion=(
+            (SliceEntry("看完", done), SliceEntry("未看完", total - done))
+            if total else ()
+        ),
+        total_plays=total,
+        total_watched_ms=sum(day_ms.values()),
+        active_days=sum(1 for item in day_entries if item.plays),
+        current_streak=current,
+        longest_streak=longest,
     )
 
 
@@ -391,17 +408,17 @@ def _selftest() -> int:
         check("音质排序", data.qualities[0].label, "320 kbps")
         check("音质计数", data.qualities[0].count, 2)
         check("时长文本", data.songs[0].duration_text, "6 分 20 秒")
-        check("MV 观看次数", data.mv_plays, 2)
-        check("MV 观看时长", data.mv_watched_ms, 180_000)
-        check("MV 子统计次数", data.mv.total_plays, 2)
-        check("MV 子统计时长", data.mv.total_watched_ms, 180_000)
-        check("MV 活跃天数", data.mv.active_days, 2)
-        check("MV 今日次数", data.mv.days[-1].plays, 1)
-        check("MV 排行", data.mv.mvs[0].title, "测试 MV")
-        check("MV 排行次数", data.mv.mvs[0].plays, 2)
-        check("MV 歌手排行", data.mv.artists[0].title, "歌手")
-        check("MV 完成度条目", len(data.mv.completion), 2)
-        check("MV 未看完", data.mv.completion[1].count, 2)
+        mv_data = collect_mv(db, 90, now=now)
+        check("MV 观看次数", mv_data.total_plays, 2)
+        check("MV 观看时长", mv_data.total_watched_ms, 180_000)
+        check("MV 活跃天数", mv_data.active_days, 2)
+        check("MV 今日次数", mv_data.days[-1].plays, 1)
+        check("MV 排行", mv_data.mvs[0].title, "测试 MV")
+        check("MV 排行次数", mv_data.mvs[0].plays, 2)
+        check("MV 歌手排行", mv_data.artists[0].title, "歌手")
+        check("MV 完成度条目", len(mv_data.completion), 2)
+        check("MV 未看完", mv_data.completion[1].count, 2)
+        check("MV 窗口天数", len(mv_data.days), 90)
         # 老记录/其他入口可能存档位键；展示层要翻成人话，不能再冒出一类音质
         check("档位键翻成人话", level_label("lossless"), "无损 FLAC")
 

@@ -41,6 +41,9 @@ DARK = {
     "GREEN": "#00ffa3",       # 成功
     "AMBER": "#ffb020",       # 警告
     "RED": "#ff4d6d",         # 危险
+    # MV 播放统计专用：接近 GitHub 贡献图的绿，但更淡、更偏青
+    "MV_GREEN": "#4fbf8f",
+    "MV_GREEN_BRIGHT": "#7fd9b0",
 
     "TEXT": "#e6edf7",        # 正文
     "TEXT_DIM": "#7b8aa5",    # 次要文字
@@ -104,6 +107,9 @@ LIGHT = {
     "GREEN": "#00875f",
     "AMBER": "#a26000",
     "RED": "#c62b4c",
+    # MV 播放统计专用：比 GitHub 的 #30a14e 更淡一档
+    "MV_GREEN": "#3aa678",
+    "MV_GREEN_BRIGHT": "#5cc494",
 
     "TEXT": "#13203a",
     "TEXT_DIM": "#51617c",
