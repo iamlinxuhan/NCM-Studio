@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -383,28 +385,140 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _proxy_for(url: str, proxy: str) -> str:
-    """GitHub 才走用户配置的代理，个人站点与下载镜像强制直连。
+def _env_proxy() -> str:
+    for key in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY",
+                "all_proxy", "ALL_PROXY"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
 
-    「GitHub 代理」这个设置本来就是为 api.github.com / github.com 准备的；
-    国内访问 dl.linxuhan.top 反而直连更快，绕到代理上只会更慢。
+
+def _desktop_proxy() -> str:
+    """Linux 桌面环境的代理：先 gsettings（GNOME），再 kioslaverc（KDE）。"""
+    try:
+        mode = subprocess.run(
+            ["gsettings", "get", "org.gnome.system.proxy", "mode"],
+            capture_output=True, text=True, timeout=2).stdout.strip().strip("'")
+        if mode == "manual":
+            host = subprocess.run(
+                ["gsettings", "get", "org.gnome.system.proxy.http", "host"],
+                capture_output=True, text=True,
+                timeout=2).stdout.strip().strip("'")
+            port = subprocess.run(
+                ["gsettings", "get", "org.gnome.system.proxy.http", "port"],
+                capture_output=True, text=True,
+                timeout=2).stdout.strip()
+            if host:
+                return f"http://{host}:{port or 8080}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        text = (Path.home() / ".config" / "kioslaverc").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    section = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line
+            continue
+        if section != "[Proxy Settings]" or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key == "httpProxy" and value:
+            return value
+    return ""
+
+
+def system_proxy() -> str:
+    """没有显式配置时，这台机器在用的代理。
+
+    **为什么不能只靠 urllib**：它在 Linux 上只读环境变量，而桌面环境把代理
+    写在 gsettings / kioslaverc 里。于是同一个网络里浏览器走代理飞快、自动
+    更新走直连，用户看到的是「更新比浏览器慢一个数量级」。
     """
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
-    if host == "github.com" or host.endswith(".github.com") \
-            or host.endswith(".githubusercontent.com"):
-        return proxy
-    return "direct"
+    return _env_proxy() or (_desktop_proxy()
+                            if sys.platform.startswith("linux") else "")
+
+
+def _proxy_for(proxy: str) -> str:
+    """这条请求该走哪个代理。
+
+    显式配置最优先；没配置就用系统代理；都没有（或显式写了 ``direct``）就
+    直连。**下载镜像与个人站点同样走代理** —— 镜像直连被限速时，更新不能
+    因为「官方地址能连上」就慢慢爬。
+    """
+    proxy = (proxy or "").strip()
+    if proxy.lower() in ("direct", "none"):
+        return "direct"
+    return proxy or system_proxy()
+
+
+@contextlib.contextmanager
+def _ipv4_first():
+    """把这一段里的 DNS 解析限制在 IPv4 上。
+
+    Cloudflare 这类站点同时有 A 与 AAAA，而 urllib 不做 Happy Eyeballs，
+    按 ``getaddrinfo`` 的顺序先连 IPv6。国内到部分 Cloudflare IPv6 前缀会被
+    限速（同一文件实测：IPv6 一百多 KB/s、IPv4 2.5 MB/s、代理 15 MB/s），
+    浏览器会并行尝试 IPv4，所以感觉不到。只在打开连接这一小段生效。
+    """
+    original = socket.getaddrinfo
+
+    def patched(host, port, family=0, type=0, proto=0, flags=0):  # noqa: A002
+        if family in (0, socket.AF_UNSPEC):
+            return original(host, port, socket.AF_INET, type, proto, flags)
+        return original(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = patched
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = original
+
+
+def _open(request: urllib.request.Request, proxy: str, timeout: float):
+    """按 :func:`_proxy_for` 的结论发起请求，失败时逐级退。
+
+    顺序：代理（配了才试）→ 直连且 IPv4 优先 → 直连交给 urllib 默认。
+    系统代理可能是陈的（换过端口、公司网走了 PAC）；IPv6 前缀也可能被限速。
+    两层回退让「能连上」与「连得快」都不至于被一个变量卡死。
+    """
+    effective = _proxy_for(proxy)
+    if effective and effective not in ("", "direct"):
+        plans = [(effective, False), ("direct", True), ("direct", False)]
+    elif effective == "direct":
+        plans = [("direct", True), ("direct", False)]
+    else:
+        # 没有可用的代理结论：先 IPv4 直连；再交给 urllib 默认（Windows 会读
+        # 注册表里的系统代理，这一条不能丢）。
+        plans = [("direct", True), ("", False)]
+
+    last: Exception | None = None
+    for how, ipv4 in plans:
+        try:
+            opener = _opener(how)
+            if ipv4:
+                with _ipv4_first():
+                    return opener.open(request, timeout=timeout)
+            return opener.open(request, timeout=timeout)
+        except ValueError as exc:
+            raise UpdateError(f"代理设置无效：{exc}") from exc
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError) as exc:
+            last = exc
+    assert last is not None
+    raise last
 
 
 def _read_one(url: str, proxy: str = "", timeout: float = 10.0,
               label: str = "GitHub") -> bytes:
     request = urllib.request.Request(url, headers=_headers())
     try:
-        opener = _opener(_proxy_for(url, proxy))
-    except ValueError as exc:
-        raise UpdateError(f"代理设置无效：{exc}") from exc
-    try:
-        with opener.open(request, timeout=timeout) as response:
+        with _open(request, proxy, timeout) as response:
             return response.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 403:
@@ -678,13 +792,9 @@ def _download_one(
     timeout: float,
 ) -> None:
     request = urllib.request.Request(url, headers=_headers())
-    try:
-        opener = _opener(_proxy_for(url, proxy))
-    except ValueError as exc:
-        raise UpdateError(f"代理设置无效：{exc}") from exc
     total, done = -1, 0
     try:
-        with opener.open(request, timeout=timeout) as response:
+        with _open(request, proxy, timeout) as response:
             total = int(response.headers.get("Content-Length") or -1)
             with dest.open("wb") as handle:
                 while True:
@@ -1223,6 +1333,29 @@ def _selftest() -> int:
     check("按名字找资产", release.asset("a") is not None, True)
     check("不存在的资产", release.asset("b"), None)
     check("资产大小", release.asset("a").size_mb if release.asset("a") else "", "1.0 MB")
+
+    # ---- 代理决策：显式配置 > 系统代理 > 直连
+    saved_proxy = {
+        key: os.environ.pop(key, None)
+        for key in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY",
+                    "all_proxy", "ALL_PROXY")
+    }
+    check("显式 direct", _proxy_for("direct"), "direct")
+    check("显式 none", _proxy_for("none"), "direct")
+    check("显式代理", _proxy_for("http://127.0.0.1:7897"),
+          "http://127.0.0.1:7897")
+    os.environ["https_proxy"] = "http://127.0.0.1:9999"
+    check("系统代理兜底", _proxy_for(""), "http://127.0.0.1:9999")
+    for key, value in saved_proxy.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+    with _ipv4_first():
+        infos = socket.getaddrinfo("localhost", 80, 0, socket.SOCK_STREAM)
+    check("IPv4 优先只解析 A 记录", {info[0] for info in infos},
+          {socket.AF_INET})
 
     # ---- 更新源：个人站点优先、GitHub 回退
     check("镜像地址", mirror_url("v1.2.3", "a.AppImage"),

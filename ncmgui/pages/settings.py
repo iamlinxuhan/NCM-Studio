@@ -420,15 +420,17 @@ class SettingsPage(BasePage):
             str(self.cfg.get("update.source", "auto") or "auto"),
             hint="个人站点走 Cloudflare 镜像，国内通常比 GitHub 快；自动模式"
                  "只在站点检查或下载失败时才回退。安装包仍会校验 SHA-256 与"
-                 "发布签名，换源不影响完整性。",
+                 "发布签名，换源不影响完整性。若镜像直连被限速，可在下面填代理；"
+                 "留空时会自动读取本机系统代理（含 KDE / GNOME 的桌面设置）。",
         )
 
         self.app_proxy = card.add_line(
-            "GitHub 代理", value=self.cfg.get("update.git_proxy", ""),
-            placeholder="留空走系统代理；填 direct 强制直连",
-            hint="只用于 api.github.com 与 github.com；个人站点和下载镜像"
-                 "始终直连。HTTP 代理转发 HTTPS 时走 CONNECT 隧道，TLS 仍"
-                 "端到端加密，但代理能看到目标域名 —— 请只在可信网络使用。",
+            "更新代理", value=self.cfg.get("update.git_proxy", ""),
+            placeholder="留空自动读取系统代理；填 direct 强制直连",
+            hint="对 GitHub、个人站点与下载镜像都生效。留空时依次读环境变量"
+                 "与桌面设置的代理；直连时会优先走 IPv4（部分网络到 Cloudflare "
+                 "的 IPv6 前缀被限速）。HTTP 代理转发 HTTPS 时走 CONNECT 隧道，"
+                 "TLS 仍端到端加密，但代理能看到目标域名 —— 请只在可信网络使用。",
         )
         self.app_check_on_start = card.add_switch(
             "每次启动检查更新",

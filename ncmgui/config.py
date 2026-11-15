@@ -307,7 +307,8 @@ def _defaults() -> dict[str, Any]:
         "ui": {"theme": "dark", "close_to_tray": False},
         # 主窗口大小。用户缩放过后记在这里，下次启动照着打开
         "window": {"width": 1180, "height": 780, "maximized": False},
-        # 自动更新。git_proxy 为空走系统代理，direct 表示直连
+        # 自动更新。git_proxy 为空自动读系统代理（环境变量 / gsettings /
+        # kioslaverc），direct 表示直连；GitHub、个人站点与镜像共用这个结论
         "update": {
             "git_proxy": "",
             "source": "auto",

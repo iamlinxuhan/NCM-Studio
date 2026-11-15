@@ -492,8 +492,11 @@ macOS 的 Now Playing 目前还没有接入；那边的耳机按键暂时不会�
   「名字写着 3.0.0、内容是 3.0.3」或菜单项失效。文件名不带版本号则保持不变；
   如果目标文件名已被其他文件占用（比如用户自己下载过同版本），**保持原文件名、不覆盖**；
 - 源码运行时不能替换（没有可替换的产物），按钮是灰的，只提示 `git pull`；
-- 「GitHub 代理」只作用于 `api.github.com` / `github.com`；个人站点和下载镜像
-  始终直连，国内不必为它们额外挂代理。留空走系统代理，填 `direct` 强制直连。
+- 「更新代理」对 GitHub、个人站点与下载镜像都生效。留空时依次读环境变量、
+  `gsettings`（GNOME）与 `kioslaverc`（KDE）里的系统代理 —— `urllib` 自己只认
+  环境变量，而 Linux 桌面把代理写在后面两处，只直连会把「浏览器很快、更新很慢」
+  变成常态（实测同一镜像：直连 181 KB/s、系统代理 20 MB/s）。填 `direct` 强制直连；
+  直连时优先解析 IPv4，避开部分网络对 Cloudflare IPv6 前缀的限速。
 
 > 自动更新只做「下载 → 校验 → 验证签名 → 替换 → 重启」。任何一步失败都会保留
 > 现有版本，并给出 Release 页链接供手动下载。
@@ -638,7 +641,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.1.0 packaging\ncm-studio.iss
+iscc /DAppVersion=4.1.1 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
