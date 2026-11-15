@@ -47,6 +47,7 @@ from .pages.following import FollowingPage
 from .pages.groups import AdvancedPage, HistoryStatsPage, TransferPage
 from .pages.liked import LikedPage
 from .pages.local import LocalPage
+from .pages.localmv import LocalMvPage
 from .pages.mv import MvPage
 from .pages.mvplayer import MvPlayerPage
 from .pages.player import PlayerPage
@@ -85,6 +86,7 @@ NAV_ITEMS = (
     ("liked", "♡", "我喜欢的音乐", LikedPage),
     ("favorites", "★", "收藏", FavoritesPage),
     ("local", "♪", "本地曲库", LocalPage),
+    ("local_mv", "▣", "本地 MV", LocalMvPage),
     ("history_stats", "⟲", "历史与统计", HistoryStatsPage),
     ("transfer", "▼", "下载与云盘", TransferPage),
     ("streaming", "◉", "流媒体", StreamingPage),
@@ -797,6 +799,24 @@ class MainWindow(QMainWindow):
         self.comments_page.load_mv(mv)
         self.stack.setCurrentWidget(self.comments_page)
 
+    def open_local_mv(self, song) -> None:
+        """在内容区播放本地视频（本地曲库「本地 MV」里的条目）。"""
+        current = self.stack.currentWidget()
+        if current is not self.mv_player_page:
+            self._mv_return_widget = current
+        self._nav_group.setExclusive(False)
+        for button in self._nav_buttons.values():
+            button.setChecked(False)
+        self._nav_group.setExclusive(True)
+        self.mv_player_page.load_local(song)
+        self.stack.setCurrentWidget(self.mv_player_page)
+        hook = getattr(self.mv_player_page, "on_show", None)
+        if callable(hook) and not self.defer_page_loads:
+            try:
+                hook()
+            except RuntimeError:
+                pass
+
     def open_mv(self, mv, url: str) -> None:
         """在内容区播放 MV。返回时回到打开它的页面。"""
         current = self.stack.currentWidget()
@@ -1041,6 +1061,7 @@ class MainWindow(QMainWindow):
         tagger: Callable[[str], str | None] | None = None,
         on_finish: Callable[["ConsolePanel", int], None] | None = None,
         sensitive_input: bool = False,
+        show_log: bool = True,
     ):
         """启动一个作业。
 
@@ -1059,6 +1080,8 @@ class MainWindow(QMainWindow):
             调用方拿不到，只能这样传回去。
         :param sensitive_input: 这个作业的 stdin 是敏感内容（短信验证码、
             密码、令牌）。输入框改用密码回显，回显行与导出日志都不记原文。
+        :param show_log: 是否把输出显示到「作业控制台」。下载可以关掉，
+            避免每首歌都刷一屏日志；作业本身照常执行。
         :return: 启动成功返回 :class:`~ncmgui.runner.JobRunner`，否则返回 None
         """
         from .runner import JobRunner
@@ -1083,10 +1106,14 @@ class MainWindow(QMainWindow):
         for line in intro or []:
             panel.view.append_line(line, classify(line))
 
-        index = self.console_tabs.addTab(panel, title)
-        self.console_tabs.setCurrentIndex(index)
-        self._set_console_visible(True)
-        self._update_console_hint()
+        if show_log:
+            index = self.console_tabs.addTab(panel, title)
+            self.console_tabs.setCurrentIndex(index)
+            self._set_console_visible(True)
+            self._update_console_hint()
+        else:
+            # 面板不进控制台，输出自然丢弃；作业照跑，结束回调仍然有效
+            panel.hide()
 
         runner.output.connect(lambda _line, p=panel: self._mark_activity(p))
         panel.jobFinished.connect(lambda code, p=panel: self._on_job_finished(p, code))

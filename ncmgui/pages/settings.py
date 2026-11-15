@@ -40,6 +40,7 @@ class SettingsPage(BasePage):
         self._build_app_update_card()
         self._build_binary_card()
         self._build_player_card()
+        self._build_log_card()
         self._build_favorite_card()
         self._build_global_card()
         self._build_update_card()
@@ -47,6 +48,23 @@ class SettingsPage(BasePage):
         # _build_binary_card 里的 _detect 跑在「更新 ncmctl」卡片建出来之前，
         # 那一次同步不到 update_button，这里补一次
         self._sync_update_button()
+
+    # --------------------------------------------------------- 日志
+
+    def _build_log_card(self) -> None:
+        card = FormCard(
+            "日志",
+            "控制下载歌曲时是否在底部「作业控制台」逐行显示 ncmctl 的输出。",
+        )
+        self.show_download_log = card.add_switch(
+            "显示下载日志",
+            bool(self.cfg.get("download.show_log", False)),
+            hint=(
+                "关闭时下载照常进行，只是不再弹出控制台、不逐行刷日志；"
+                "失败与完成仍会提示。排查网络或音质问题时再打开。"
+            ),
+        )
+        self.content.addWidget(card)
 
     # --------------------------------------------------------- 收藏与数据
 
@@ -926,6 +944,8 @@ class SettingsPage(BasePage):
             self.window.scrobble.invalidate()
         self.cfg.set("player.scrobble", scrobble_enabled)
         self.cfg.set("ui.close_to_tray", self.close_to_tray.isChecked())
+        self.cfg.set("download.show_log",
+                     self.show_download_log.isChecked())
         self.cfg.set("mv.favorite_mode",
                      combo_data(self.favorite_mode, "local"))
         self.cfg.set("home", self.home.path())

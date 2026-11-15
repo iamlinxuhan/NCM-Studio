@@ -19,6 +19,7 @@ from typing import Sequence
 
 from ..resolver import Song
 from .db import LibraryDB
+from .scan import VIDEO_QUALITY
 
 SORTS = (
     ("歌名", "name"),
@@ -64,6 +65,7 @@ def tracks(
     folder: str = "",
     artist: str = "",
     album: str = "",
+    kind: str = "",
     sort: str = "name",
     descending: bool = False,
     limit: int | None = None,
@@ -93,6 +95,12 @@ def tracks(
     if album:
         clauses.append("album = ?")
         params.append(album)
+    if kind == "video":
+        clauses.append("quality = ?")
+        params.append(VIDEO_QUALITY)
+    elif kind == "audio":
+        clauses.append("quality <> ?")
+        params.append(VIDEO_QUALITY)
 
     order = {
         "name": "name COLLATE NOCASE",

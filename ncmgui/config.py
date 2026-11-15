@@ -227,6 +227,9 @@ def _defaults() -> dict[str, Any]:
             # MV 单独一个目录：视频文件和音乐混在一起会让曲库扫描把 mp4 也扫进来
             "mv_output": str(default_video_dir()),
             "level": "lossless",
+            # 是否把 ncmctl 的逐行输出显示到作业控制台。默认关闭：批量下载
+            # 时每首歌刷一屏没有可读性，失败信息有单独的提示。
+            "show_log": False,
             # 默认并发 3：网易云对高频请求敏感，5 路并发更容易撞限流
             "parallel": 3,
             "strict": False,

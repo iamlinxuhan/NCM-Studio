@@ -183,9 +183,14 @@ class MvPage(BasePage):
         )
         self._download_task = task
 
-        def done(count: int) -> None:
+        def done(result) -> None:
+            downloaded, skipped = result
             self.download_all_button.setText("下载全部")
-            self.status.setText(f"已下载 {count} 支 MV 到 {directory}")
+            parts = [f"已下载 {downloaded} 支"]
+            if skipped:
+                parts.append(f"跳过 {skipped} 支已存在")
+            self.status.setText(
+                "，".join(parts) + f"，目录：{directory}")
 
         def failed(message: str) -> None:
             cancelled = task is not None and task.cancel_event.is_set()

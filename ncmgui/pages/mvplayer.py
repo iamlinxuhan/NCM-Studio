@@ -40,7 +40,7 @@ from ..library import (
     remove_favorite,
     update_mv_play,
 )
-from ..mvdownload import fetch_mv_file, mv_filename, unique_path
+from ..mvdownload import fetch_mv_file, mv_filename
 from ..mvstream import HttpRangeDevice
 from ..playback import STATE_LOADING, STATE_PLAYING
 from ..widgets.card import ghost_button
@@ -155,6 +155,18 @@ def _prune_mv_cache(keep: int = 5) -> None:
             path.unlink()
         except OSError:
             pass
+
+
+class _LocalVideo:
+    """本地视频的轻量描述：MV 播放页只用到这几个字段。"""
+
+    def __init__(self, song) -> None:
+        self.id = 0
+        self.name = song.name
+        self.artist = ""
+        self.cover_url = ""
+        self.duration = int(getattr(song, "duration", 0) or 0)
+        self.subtitle = ""
 
 
 class MvPlayerPage(BasePage):
@@ -342,6 +354,8 @@ class MvPlayerPage(BasePage):
         self._cache_failed = False
         self._subscribed = False
         self.subscribe_button.setText("收藏")
+        self.subscribe_button.setEnabled(True)
+        self.comments_button.setEnabled(True)
         self._refresh_subscribe_state()
         self.title.setText(getattr(mv, "name", "") or "MV")
         self.meta.setText(getattr(mv, "subtitle", ""))
@@ -399,6 +413,35 @@ class MvPlayerPage(BasePage):
         except Exception:  # noqa: BLE001 - 关闭失败不影响后续
             pass
         device.deleteLater()
+
+    def load_local(self, song) -> None:
+        """播放本地视频：不走网络设备，直接读文件。"""
+        self._flush_history()
+        self._close_device()
+        self._history_timer.stop()
+        self.mv = _LocalVideo(song)
+        self._url = ""
+        self._local = True
+        self._cache_failed = True
+        self._resume_position = -1
+        self._event_id = 0
+        self._history_checks = 0
+        self.title.setText(song.name)
+        self.meta.setText("本地视频")
+        self.status.setText("")
+        self.play_button.setText("暂停")
+        # 本地视频没有网易云 ID，收藏与评论不适用
+        self.subscribe_button.setEnabled(False)
+        self.comments_button.setEnabled(False)
+        playback = self.window.playback
+        if (playback.current is not None and not playback.paused
+                and playback.state in (STATE_LOADING, STATE_PLAYING)):
+            try:
+                playback.toggle()
+            except Exception:  # noqa: BLE001
+                pass
+        self._sync_output_device()
+        self._play_local(Path(song.path), 0)
 
     def stop(self) -> None:
         # 离开页面时如果还停在全屏，先把全屏窗收掉，否则会盖在整个应用上面
@@ -591,11 +634,16 @@ class MvPlayerPage(BasePage):
             self.status.setText(f"无法创建下载目录：{exc}")
             return
 
+        target = directory / mv_filename(mv)
+        if target.is_file() and target.stat().st_size > 0:
+            self.status.setText(f"已存在：{target}")
+            self.toast("这支 MV 已经在下载目录里")
+            return
+
         self.download_button.setText("取消下载")
         self.status.setText("正在获取下载地址…")
 
         def work() -> str:
-            target = unique_path(directory / mv_filename(mv))
             return fetch_mv_file(
                 self.window.client, mv, target,
                 progress=task.percent.emit if task is not None else None,
@@ -857,6 +905,9 @@ class MvPlayerPage(BasePage):
     def _record_history(self) -> None:
         """播放满 5 秒才记一条，和歌曲历史的策略一致。"""
         if self.mv is None or self._event_id:
+            return
+        if not getattr(self.mv, "id", 0):
+            # 本地视频没有网易云 ID，不写 MV 观看历史
             return
         position = int(self.media.position())
         if position < 3000:

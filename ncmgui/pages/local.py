@@ -599,7 +599,9 @@ class LocalPage(BasePage):
     def _reload_songs(self) -> None:
         if self._demo_mode:
             return
-        self._songs = tracks(self.db, **self._query_kwargs())
+        kwargs = self._query_kwargs()
+        kwargs["kind"] = "audio"
+        self._songs = tracks(self.db, **kwargs)
         if (self.sort_combo.currentData() or "name") == "liked":
             self._ensure_liked_rank()
             self._songs = self._sort_by_liked(self._songs)

@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 
 from .. import covers, images, lyrics, ncmctl
 from ..config import default_music_dir, default_video_dir
+from ..library import favorites
 from ..download_manager import (
     STATUS_QUEUED,
     STATUS_RUNNING,
@@ -636,8 +637,12 @@ class DownloadPage(BasePage):
         self._start_task(work, "正在读取「我喜欢的音乐」…", MODE_LIKED)
 
     def _download_favorites(self) -> None:
-        """一键下载官方「收藏 MV」里的全部 MV，落到「MV 输出目录」。"""
-        if not self.require_login("下载收藏的 MV"):
+        """一键下载「收藏的 MV」，落到「MV 输出目录」。
+
+        收藏模式跟随设置：本地模式读本地库（不需要登录），官方模式读账号。
+        """
+        mode = str(self.cfg.get("mv.favorite_mode", "local") or "local")
+        if mode == "official" and not self.require_login("下载收藏的 MV"):
             return
         task = self._mv_download_task
         if task is not None and task.is_running:
@@ -660,11 +665,16 @@ class DownloadPage(BasePage):
                               parent=self)
         self._mv_download_task = task
 
-        def done(count: int) -> None:
+        def done(result) -> None:
+            downloaded, skipped = result
             self.mv_button.setEnabled(True)
-            if count:
-                self.mv_status.setText(f"已下载 {count} 支 MV 到 {directory}")
-                self.toast(f"已下载 {count} 支 MV")
+            if downloaded or skipped:
+                parts = [f"已下载 {downloaded} 支"]
+                if skipped:
+                    parts.append(f"跳过 {skipped} 支已存在")
+                self.mv_status.setText(
+                    "，".join(parts) + f"，目录：{directory}")
+                self.toast(f"MV 下载完成：新增 {downloaded} 支")
             else:
                 self.mv_status.setText("还没有收藏的 MV。")
 
@@ -679,10 +689,14 @@ class DownloadPage(BasePage):
         task.failed.connect(failed)
         task.start()
 
-    def _run_mv_download(self, client, directory: Path, task) -> int:
-        mvs = client.mv_sublist(200)
+    def _run_mv_download(self, client, directory: Path, task) -> tuple[int, int]:
+        mode = str(self.cfg.get("mv.favorite_mode", "local") or "local")
+        if mode == "official":
+            mvs = client.mv_sublist(200)
+        else:
+            mvs = favorites(self.window.library, 500)
         if not mvs:
-            return 0
+            return 0, 0
         return download_all(
             client, mvs, directory,
             progress=task.progress.emit if task is not None else None,
@@ -821,6 +835,7 @@ class DownloadPage(BasePage):
             intro=intro,
             tagger=FeeTagger(songs) if songs else None,
             on_finish=on_finish,
+            show_log=bool(self.cfg.get("download.show_log", False)),
         )
         if runner is None:
             self._active_record_id = ""

@@ -56,6 +56,7 @@ def fetch_mv_file(
     *,
     progress: Callable[[int], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    skip_existing: bool = True,
 ) -> str:
     """把一支 MV 完整下载到 ``target``，返回最终路径。
 
@@ -64,7 +65,11 @@ def fetch_mv_file(
 
     ``progress`` 收到 ``-1`` 表示总长未知、``0–99`` 表示百分比；
     ``cancelled`` 返回真时抛 :class:`DownloadCancelled` 并清理半截文件。
+    ``skip_existing`` 为真时，目标已存在且非空就直接返回 —— 最终名只在
+    下载完整后才出现，所以存在即完整，不会把半截文件当成已完成。
     """
+    if skip_existing and target.is_file() and target.stat().st_size > 0:
+        return str(target)
     url, _fee = client.mv_url(mv.id)
     part = target.with_name(target.name + ".part")
     attempt = 0
@@ -136,24 +141,30 @@ def download_all(
     *,
     progress: Callable[[str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
-) -> int:
-    """顺序下载一批 MV，返回成功数。
+) -> tuple[int, int]:
+    """顺序下载一批 MV，返回 ``(新下载数, 跳过数)``。
 
-    同名文件不会覆盖：``unique_path`` 会加序号，用户重复点「全部下载」
-    只会多出副本，不会冲掉上次下载好的文件。
+    目标目录里已有同名且非空的文件就跳过，不生成「(2)」副本 —— 和歌曲
+    下载的查重行为保持一致。
     """
     items = list(mvs)
     folder = Path(directory)
-    completed = 0
+    downloaded = 0
+    skipped = 0
     for index, mv in enumerate(items):
         if cancelled is not None and cancelled():
             raise DownloadCancelled("已取消下载")
+        target = folder / mv_filename(mv)
+        if target.is_file() and target.stat().st_size > 0:
+            skipped += 1
+            if progress is not None:
+                progress(f"跳过已存在：{mv.name}")
+            continue
         if progress is not None:
             progress(f"正在下载 {index + 1}/{len(items)}：{mv.name}")
-        target = unique_path(folder / mv_filename(mv))
         fetch_mv_file(client, mv, target, cancelled=cancelled)
-        completed += 1
-    return completed
+        downloaded += 1
+    return downloaded, skipped
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +229,14 @@ def _selftest() -> int:
         check("下载路径", got, str(target))
         check("内容完整", target.read_bytes(), payload)
         check("断流后重连", state["n"] >= 2, True)
+
+        before = state["n"]
+        fetch_mv_file(client, mv, target)
+        check("已存在时不重复下载", state["n"], before)
+
+        named = Path(root) / mv_filename(mv)
+        named.write_bytes(payload)
+        check("批量下载跳过已存在", download_all(client, [mv], root), (0, 1))
 
     server.shutdown()
 

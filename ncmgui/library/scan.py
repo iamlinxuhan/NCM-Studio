@@ -22,6 +22,15 @@ from ..lyrics import AUDIO_SUFFIXES
 from ..localmusic import describe_quality
 from .db import LibraryDB
 
+#: 视频文件后缀。本地曲库把 MV 也索引进来，播放时交给 MV 播放页。
+#: ``.mp4`` 既可能是音频也可能是视频，统一按视频处理（音频容器用 ``.m4a``）。
+VIDEO_SUFFIXES = frozenset(
+    {".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts"}
+)
+
+#: 视频条目在 ``tracks.quality`` 里的标记，查询时靠它区分音视频。
+VIDEO_QUALITY = "视频"
+
 #: 单次扫描的文件数上限。曲库再大也应当分目录管理；这个上限只防失控。
 SCAN_LIMIT = 50000
 
@@ -108,7 +117,7 @@ def read_tags(path: Path) -> tuple[str, tuple[str, ...], str, int]:
     return name, artists, album, duration
 
 
-def _iter_audio(root: Path, cancel: Callable[[], bool] | None,
+def _iter_media(root: Path, cancel: Callable[[], bool] | None,
                 errors: list[str]) -> Iterable[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
         if cancel is not None and cancel():
@@ -120,7 +129,8 @@ def _iter_audio(root: Path, cancel: Callable[[], bool] | None,
             if filename.startswith("."):
                 continue
             path = Path(dirpath) / filename
-            if path.suffix.lower() not in AUDIO_SUFFIXES:
+            suffix = path.suffix.lower()
+            if suffix not in AUDIO_SUFFIXES and suffix not in VIDEO_SUFFIXES:
                 continue
             yield path
 
@@ -174,7 +184,7 @@ def scan(
     seen: set[str] = set()
     files: list[Path] = []
     for root in roots:
-        for path in _iter_audio(root, cancel, result.errors):
+        for path in _iter_media(root, cancel, result.errors):
             if cancel is not None and cancel():
                 result.cancelled = True
                 break
@@ -250,7 +260,8 @@ def scan(
             if unchanged:
                 continue
             name, artists, album, duration = read_tags(path)
-            quality = describe_quality(path)
+            is_video = path.suffix.lower() in VIDEO_SUFFIXES
+            quality = VIDEO_QUALITY if is_video else describe_quality(path)
             artists_text = ", ".join(artists)
             size = int(stat.st_size)
             if row is None:
