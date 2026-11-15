@@ -77,12 +77,23 @@ class StreamingRegistry(QObject):
                 kind = _text(item.get("kind"))
                 if kind not in KINDS:
                     continue
+                url = _text(item.get("url"))
+                insecure = False
+                if url:
+                    # 老版本保存的公网 http:// 配置：不能静默继续用明文发
+                    # Token 与密码，但也别把它从配置里删掉（用户数据），
+                    # 标成禁用，等用户改成 HTTPS 或内网地址。
+                    try:
+                        url = validate_server_url(url)
+                    except ValueError:
+                        insecure = True
                 servers.append(
                     {
                         "id": server_id,
-                        "name": _text(item.get("name")) or _text(item.get("url")) or "流媒体",
+                        "name": _text(item.get("name")) or url or "流媒体",
                         "kind": kind,
-                        "url": _text(item.get("url")),
+                        "url": url,
+                        "insecure": insecure,
                         "username": _text(item.get("username")),
                         "password": str(item.get("password") or ""),
                         "token": _text(item.get("token")),
@@ -98,7 +109,11 @@ class StreamingRegistry(QObject):
         内存里的列表仍然可用，本次会话不受影响；但磁盘上没有写入，
         必须让用户知道，否则重启后服务器会凭空消失。
         """
-        self.cfg.set("streaming.servers", [dict(server) for server in self._server_list])
+        # insecure 是加载时按地址重算的运行时标记，不写进配置文件
+        self.cfg.set("streaming.servers", [
+            {key: value for key, value in server.items() if key != "insecure"}
+            for server in self._server_list
+        ])
         ok = self.cfg.save()
         if not ok:
             self.saveFailed.emit("流媒体服务器配置写入失败，重启后可能丢失")
@@ -116,6 +131,10 @@ class StreamingRegistry(QObject):
             if server["id"] == server_id:
                 return dict(server)
         return None
+
+    def insecure_servers(self) -> list[dict]:
+        """被禁用的服务器（历史配置里的公网 HTTP）。"""
+        return [dict(item) for item in self._server_list if item.get("insecure")]
 
     def name_for(self, server_id: str) -> str:
         server = self.server(server_id)
@@ -209,6 +228,10 @@ class StreamingRegistry(QObject):
         server = self.server(server_id)
         if server is None:
             raise StreamError("服务器不存在，可能已被删除")
+        if server.get("insecure"):
+            raise StreamError(
+                "这个服务器使用公网 HTTP，凭据会在网络中明文传输，已禁用。"
+                "请编辑为 https:// 或内网地址。")
         factory = KINDS.get(server["kind"])
         if factory is None:
             raise StreamError(f"不支持的服务器类型：{server['kind']}")
@@ -340,6 +363,28 @@ def _selftest() -> int:
         cfg = Config(Path(folder) / "config.json")
         registry = StreamingRegistry(cfg)
         check("初始为空", registry.servers(), [])
+
+        # 老版本的公网 HTTP 配置：加载时不能静默继续用明文发凭据
+        cfg.set("streaming.servers", [
+            {"id": "old", "kind": "jellyfin", "name": "旧服务器",
+             "url": "http://media.example.com"},
+            {"id": "lan", "kind": "jellyfin", "name": "内网",
+             "url": "http://192.168.1.9:8096"},
+        ])
+        reloaded = StreamingRegistry(cfg)
+        check("旧公网 HTTP 被标记禁用",
+              [item["id"] for item in reloaded.insecure_servers()], ["old"])
+        check("内网 HTTP 不受影响",
+              any(item["id"] == "lan" for item in reloaded.servers()), True)
+        try:
+            reloaded.adapter("old")
+        except StreamError:
+            check("禁用服务器不可创建适配器", True, True)
+        else:
+            check("禁用服务器不可创建适配器", False, True)
+        # 回到干净配置，后面的用例继续用新注册表
+        cfg.set("streaming.servers", [])
+        registry = StreamingRegistry(cfg)
 
         server = registry.add_server(
             {

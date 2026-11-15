@@ -614,7 +614,7 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 | 更新链版本号与签名内容不绑定 | 站点/镜像可拿旧版本的合法签名冒充新版本，静默降级 | 签名前把 tag 写入 `SHA256SUMS`，客户端比对签名文件里的 tag 与 Release |
 | weapi 密钥使用非密码学随机数 | 密钥可预测 | 改用 `secrets.choice` |
 | 媒体 URL 未校验协议 | `file:/…`、`data:` 可让播放器读本机文件 | 统一 `netutil.media_url` 白名单；`source` 非空时强制校验，拒绝 userinfo 与无主机 URL |
-| 流媒体服务器允许公网 HTTP | Token 在明文网络中可被嗅探 | HTTPS 任意；HTTP 仅本机/私网，公网拒绝；内网 HTTP 弹警告 |
+| 流媒体服务器允许公网 HTTP | Token 在明文网络中可被嗅探 | HTTPS 任意；HTTP 仅本机/私网，公网拒绝；内网 HTTP 弹警告；**旧配置里的公网 HTTP 加载时标记禁用**，保留条目但不允许连接，等用户改地址 |
 | 网易云接口、流媒体、反作弊、封面、CookieCloud 响应无上限 | 异常服务耗内存 | 分别限制 64 / 32 / 64 / 16 / 4 MB |
 | PyQt 槽函数里的数据库异常会杀进程 | 菜单/下拉操作可能让整个程序退出 | 红心排序、历史删除、喜欢顺序查询加兜底 |
 | 远端文本按 AutoText 渲染 | 恶意评论可伪装成 UI 元素 | 评论、昵称、签名、歌名歌手改为 `PlainText` |
@@ -709,7 +709,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.5 packaging\ncm-studio.iss
+iscc /DAppVersion=4.7.6 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
