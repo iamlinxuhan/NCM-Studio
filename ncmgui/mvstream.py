@@ -175,8 +175,6 @@ def _selftest() -> int:
     import threading as _threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    from PyQt6.QtWidgets import QApplication
-
     from . import ensure_utf8_stdout
 
     ensure_utf8_stdout()
@@ -226,7 +224,8 @@ def _selftest() -> int:
     _threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}/a.mp4"
 
-    app = QApplication.instance() or QApplication([])
+    # 这里刻意不创建 QApplication：QIODevice 属于 QtCore，自检不碰界面；
+    # CI 的 Linux runner 没有显示器，建 QApplication 会直接 abort
     device = HttpRangeDevice(lambda: url)
     try:
         check("总长", device.size(), len(payload))
@@ -254,7 +253,6 @@ def _selftest() -> int:
     finally:
         device.close()
         server.shutdown()
-        app.processEvents()
 
     if failures:
         print(f"MV 数据流自检失败 {len(failures)} 项：")
