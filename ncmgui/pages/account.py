@@ -70,6 +70,8 @@ class AccountPage(BasePage):
         self._phone_runner = None
         #: 正在拉取 CookieCloud 的后台任务
         self._cc_task: BackgroundTask | None = None
+        #: 页面是否正在关闭。关闭后才完成的后台任务不能留下凭据文件
+        self._closing = False
         #: 尚未删除的 Cookie 临时文件。正常路径随作业结束删除；退出或作业
         #: 没能启动时由 shutdown() 兜底。
         self._pending_temp: set[str] = set()
@@ -643,7 +645,10 @@ class AccountPage(BasePage):
 
     def shutdown(self) -> None:
         """关窗时清掉二维码目录与所有 Cookie 临时文件。"""
+        self._closing = True
         self._qr_timer.stop()
+        if self._cc_task is not None:
+            self._cc_task.cancel()
         self._cleanup_qr_dir()
         for path in tuple(self._pending_temp):
             self._discard_temp(path)
@@ -717,14 +722,20 @@ class AccountPage(BasePage):
         self.cc_status.setText("正在从 CookieCloud 拉取 Cookie…")
 
         # 密码只在内存里参与解密，不拼命令、不落盘、不进日志
+        task: BackgroundTask | None = None
         task = BackgroundTask(
             lambda: cookiecloud.write_netscape(
-                server, uuid, password, headers=headers),
+                server, uuid, password, headers=headers,
+                cancelled=task.cancel_event.is_set if task is not None else None),
             parent=self,
         )
         self._cc_task = task
 
         def done(path: str) -> None:
+            if self._closing:
+                # 页面已经关了：不要让凭据文件留在临时目录里
+                self._remove_temp(path)
+                return
             self._pending_temp.add(path)
             argv = ncmctl.build_login_cookie(
                 file=path, fmt="netscape", opts=self.opts())

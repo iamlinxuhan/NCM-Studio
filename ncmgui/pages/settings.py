@@ -744,6 +744,7 @@ class SettingsPage(BasePage):
                     int(done * 100 / total) if total > 0 else -1
                 ),
                 proxy,
+                max_bytes=asset.size or None,
             )
             updater.verify(part, expected)
             try:

@@ -555,7 +555,9 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 - 手机号登录的密码会以命令行参数的形式传给 ncmctl，因而会出现在进程列表里 —— 这是 ncmctl 自身的接口限制。**介意的话请用扫码登录或短信验证码**。
 - CookieCloud 的密码不再交给 ncmctl：本程序自己请求 `/get`、在内存里解密，
   只把解密后的 Netscape 文件传给 `ncmctl login cookie --file`，密码不会进入
-  命令行、进程列表或日志。
+  命令行、进程列表或日志。关闭窗口时会取消拉取任务，已生成的临时文件立即删除。
+- 自动更新的响应体与安装包都有大小上限：API/校验文件 16 MB，安装包以 Release
+  声明的大小为准（兜底 2 GB）。签名能防篡改，大小上限防资源耗尽。
 - 粘贴的 Cookie 会先写入本程序配置目录下的私有临时目录（目录 `0700`、文件 `0600`）再传给 `--file`，避免直接出现在进程参数中，用完即删；异常退出留下的残留会在下次启动时清掉。
 - CookieCloud 同步成功后会记录时间；1 小时内再次点击会先提醒，避免短时间内反复拉取浏览器 Cookie 触发风控。失败不会记录，可以立即重试。
 - 配置目录在 POSIX 上为 `0700`、配置文件为 `0600`，其他用户无法读取其中的路径、代理与账号标识。
@@ -674,7 +676,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.1 packaging\ncm-studio.iss
+iscc /DAppVersion=4.7.2 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \

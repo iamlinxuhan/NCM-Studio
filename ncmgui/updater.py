@@ -514,12 +514,23 @@ def _open(request: urllib.request.Request, proxy: str, timeout: float):
     raise last
 
 
+#: 单个 JSON 响应的上限（version.json、GitHub API、SHA256SUMS 都很小）。
+#: 防止被劫持的源返回一个巨大的响应把内存吃光。
+MAX_RESPONSE = 16 * 1024 * 1024
+
+#: 安装包的兜底上限。调用方知道资产大小时会传实际大小再收紧。
+MAX_DOWNLOAD = 2 * 1024 * 1024 * 1024
+
+
 def _read_one(url: str, proxy: str = "", timeout: float = 10.0,
               label: str = "GitHub") -> bytes:
     request = urllib.request.Request(url, headers=_headers())
     try:
         with _open(request, proxy, timeout) as response:
-            return response.read()
+            data = response.read(MAX_RESPONSE + 1)
+            if len(data) > MAX_RESPONSE:
+                raise UpdateError(f"{label} 返回的内容过大，已中止。")
+            return data
     except urllib.error.HTTPError as exc:
         if exc.code == 403:
             hint = (
@@ -790,19 +801,25 @@ def _download_one(
     on_progress: Callable[[int, int], None] | None,
     proxy: str,
     timeout: float,
+    max_bytes: int = MAX_DOWNLOAD,
 ) -> None:
     request = urllib.request.Request(url, headers=_headers())
     total, done = -1, 0
     try:
         with _open(request, proxy, timeout) as response:
             total = int(response.headers.get("Content-Length") or -1)
+            if total > max_bytes:
+                raise UpdateError(
+                    f"安装包大小异常（{total} 字节，上限 {max_bytes}），已中止。")
             with dest.open("wb") as handle:
                 while True:
                     chunk = response.read(CHUNK)
                     if not chunk:
                         break
-                    handle.write(chunk)
                     done += len(chunk)
+                    if done > max_bytes:
+                        raise UpdateError("安装包超过预期大小，已中止。")
+                    handle.write(chunk)
                     if on_progress is not None:
                         on_progress(done, total)
             if total >= 0 and done != total:
@@ -826,6 +843,7 @@ def download(
     on_progress: Callable[[int, int], None] | None = None,
     proxy: str = "",
     timeout: float = 30.0,
+    max_bytes: int | None = None,
 ) -> None:
     """把 ``url``（或一组备用地址）流式写到 ``dest``。
 
@@ -838,10 +856,11 @@ def download(
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     urls = [url] if isinstance(url, str) else [item for item in url if item]
+    limit = int(max_bytes) if max_bytes and max_bytes > 0 else MAX_DOWNLOAD
     errors: list[str] = []
     for item in urls:
         try:
-            _download_one(item, dest, on_progress, proxy, timeout)
+            _download_one(item, dest, on_progress, proxy, timeout, limit)
             return
         except UpdateError as exc:
             errors.append(str(exc))
@@ -1392,6 +1411,18 @@ def _selftest() -> int:
         dest = root / "out.bin"
         download([(root / "missing.bin").as_uri(), good.as_uri()], dest)
         check("下载回退到第二个地址", dest.read_bytes(), b"payload")
+
+        # 安装包大小超过上限时必须中止，而不是把磁盘写满
+        oversized = root / "oversized.bin"
+        oversized.write_bytes(b"x" * 4096)
+        capped = root / "capped.bin"
+        try:
+            download(oversized.as_uri(), capped, max_bytes=1024)
+        except UpdateError as exc:
+            check("超过大小上限被拒绝", "上限" in str(exc), True)
+        else:
+            check("超过大小上限被拒绝", False, True)
+        check("超限时不保留文件", capped.exists(), False)
 
     if failures:
         print(f"更新自检失败 {len(failures)} 项：")

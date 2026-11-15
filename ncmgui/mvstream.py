@@ -104,12 +104,7 @@ class HttpRangeDevice(QIODevice):
     # ------------------------------------------------------------ 内部
 
     def _probe_size(self) -> int:
-        data, total, ranged = self._request(0, 0)
-        if not ranged and data:
-            # 服务端不认 Range，直接给了整个文件；顺手当第一块缓存
-            self._buf_start = 0
-            self._buf = data
-            return len(data)
+        _data, total, _ranged = self._request(0, 0)
         return total
 
     def _request(self, start: int, end: int) -> tuple[bytes, int, bool]:
@@ -134,10 +129,15 @@ class HttpRangeDevice(QIODevice):
                 except ValueError:
                     total = -1
             if status != 206:
-                data = response.read()
-                return data, len(data), False
+                # 服务器忽略了 Range。随机访问与 seek 都无从谈起，
+                # 整文件读入内存还会随视频大小暴涨 —— 直接拒绝，让上层
+                # 走「完整缓存到磁盘再播放」的兜底路径。
+                raise OSError("视频服务器不支持 Range 请求")
             length = int(response.headers.get("Content-Length") or 0)
-            data = response.read(length) if length > 0 else response.read()
+            want = max(1, end - start + 1)
+            # 即使响应头声称更大，也只读请求的这一块
+            length = min(length, want) if length > 0 else want
+            data = response.read(length)
             if total < 0 and length > 0:
                 total = start + length
             return data, total, True
@@ -185,11 +185,19 @@ def _selftest() -> int:
             failures.append(f"{name}: 期望 {want!r}，实际 {got!r}")
 
     payload = bytes(range(256)) * 32768  # 8 MiB，确保跨多块
-    state = {"n": 0, "drop_once": True}
+    state = {"n": 0, "drop_once": True, "ignore_range": False}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - http.server 命名
             state["n"] += 1
+            if state.get("ignore_range"):
+                # 模拟不支持 Range 的服务器：回 200 + 整个文件
+                state["ignore_range"] = False
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             rng = self.headers.get("Range") or ""
             if rng.startswith("bytes="):
                 start, _, last = rng[6:].partition("-")
@@ -250,6 +258,15 @@ def _selftest() -> int:
         check("断流后续传长度", len(got), 2_500_000)
         check("断流后续传内容", got, payload[3_000_000:5_500_000])
         check("断流后确实重连过", state["n"] > 3, True)
+
+        # 不支持 Range 的服务器必须明确拒绝：整文件 read() 会吃光内存
+        state["ignore_range"] = True
+        try:
+            device._request(0, 0)
+        except OSError:
+            check("不支持 Range 被拒绝", True, True)
+        else:
+            check("不支持 Range 被拒绝", False, True)
     finally:
         device.close()
         server.shutdown()

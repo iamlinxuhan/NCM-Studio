@@ -19,6 +19,7 @@ import os
 import tempfile
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -166,15 +167,19 @@ def write_netscape(
     headers: str = "",
     timeout: float = 30.0,
     directory: str | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> str:
     """拉取并写一个 0600 的 Netscape 临时文件，返回路径。
 
-    调用方负责在登录作业结束后删除它。
+    调用方负责在登录作业结束后删除它。``cancelled`` 在写盘前后各检查一次：
+    页面已经关闭时不再留下凭据文件。
     """
     from .config import private_tmp_dir
 
     text = netscape_text(fetch_payload(
         server, uuid, password, headers=headers, timeout=timeout))
+    if cancelled is not None and cancelled():
+        raise CookieCloudError("已取消")
     root = Path(directory) if directory else private_tmp_dir()
     root.mkdir(parents=True, exist_ok=True)
     fd, path = tempfile.mkstemp(prefix="cookiecloud-", suffix=".txt", dir=str(root))
@@ -183,7 +188,9 @@ def write_netscape(
             handle.write(text)
         if os.name == "posix":
             os.chmod(path, 0o600)
-    except OSError:
+        if cancelled is not None and cancelled():
+            raise CookieCloudError("已取消")
+    except BaseException:
         try:
             os.unlink(path)
         except OSError:

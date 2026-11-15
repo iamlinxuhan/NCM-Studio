@@ -24,11 +24,30 @@ REFERER = "https://music.163.com/"
 #: 重试次数（每次都会重新取播放地址，旧地址可能已过期）
 ATTEMPTS = 4
 
+#: 单个 MV 的大小上限。异常 CDN 或恶意响应不该把磁盘写满。
+MAX_MV_BYTES = 2 * 1024 ** 3
+
 _BAD_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 class DownloadCancelled(Exception):
     """用户取消了下载。"""
+
+
+def _parse_content_range(value: str) -> tuple[int, int] | None:
+    """解析 ``Content-Range: bytes 100-199/2000``，返回 ``(起点, 总长)``。"""
+    text = str(value or "").strip()
+    if not text.startswith("bytes "):
+        return None
+    try:
+        span, _, total_text = text[6:].partition("/")
+        start = int(span.split("-", 1)[0])
+        total = int(total_text)
+    except (ValueError, IndexError):
+        return None
+    if start < 0 or total <= 0 or total > MAX_MV_BYTES:
+        return None
+    return start, total
 
 
 def mv_filename(mv) -> str:
@@ -88,15 +107,27 @@ def fetch_mv_file(
             with urllib.request.urlopen(request, timeout=30) as response:
                 status = int(getattr(response, "status", 200) or 200)
                 length = int(response.headers.get("Content-Length") or 0)
-                if written and status == 206:
+                if status == 206:
+                    parsed = _parse_content_range(
+                        response.headers.get("Content-Range") or "")
+                    if parsed is None:
+                        # 没有 Content-Range 就没法确认这一段属于哪个位置，
+                        # 拼出来的文件可能是错的
+                        raise OSError("续传响应缺少有效的 Content-Range")
+                    start, total = parsed
+                    if start != written:
+                        raise OSError("续传响应的起点与已下载位置不一致")
                     base = written
-                    total = base + length if length else 0
                     mode = "ab"
                 else:
-                    # 服务端不支持续传（回了 200），只能从头写
+                    if length <= 0:
+                        # 200 且没有长度：读到 EOF 也无法判断是否完整
+                        raise OSError("服务器没有提供文件长度，无法校验完整性")
                     base = 0
                     total = length
                     mode = "wb"
+                if total > MAX_MV_BYTES:
+                    raise OSError("视频超过大小上限，已中止")
                 got = 0
                 with open(part, mode) as handle:
                     while True:
@@ -105,14 +136,16 @@ def fetch_mv_file(
                         chunk = response.read(256 * 1024)
                         if not chunk:
                             break
-                        handle.write(chunk)
                         got += len(chunk)
-                        if total and progress is not None:
+                        if base + got > total:
+                            raise OSError("下载数据超过声明的长度")
+                        handle.write(chunk)
+                        if progress is not None:
                             progress(min(99, (base + got) * 100 // total))
-                if total and base + got < total:
+                if base + got != total:
                     # 连接提前关闭时 read() 只返回 b''，不抛异常；
                     # 不核对长度就会把半截文件当成下载完成
-                    raise OSError("连接提前中断")
+                    raise OSError("下载不完整")
             os.replace(part, target)
             return str(target)
         except DownloadCancelled:
@@ -207,6 +240,16 @@ def _selftest() -> int:
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if state.get("no_length"):
+                # 200 且没有 Content-Length：客户端必须拒绝，而不是把
+                # 读到 EOF 的内容当成完整文件
+                state["no_length"] = False
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(payload)
+                self.wfile.flush()
+                self.close_connection = True
+                return
             half = len(payload) // 2
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
@@ -237,6 +280,11 @@ def _selftest() -> int:
         named = Path(root) / mv_filename(mv)
         named.write_bytes(payload)
         check("批量下载跳过已存在", download_all(client, [mv], root), (0, 1))
+
+        state["no_length"] = True
+        again = Path(root) / "again.mp4"
+        fetch_mv_file(client, mv, again)
+        check("无长度响应被拒绝并重试", again.read_bytes(), payload)
 
     server.shutdown()
 

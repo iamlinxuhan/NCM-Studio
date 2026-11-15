@@ -21,7 +21,7 @@ import base64
 import binascii
 import json
 import os
-import random
+import secrets
 import string
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -63,8 +63,8 @@ def rsa_encrypt(text: str, modulus: int = MODULUS, pubkey: int = PUBKEY) -> str:
 
 
 def create_secret_key(length: int = 16) -> str:
-    """随机密钥。用 ``secrets`` 更好，但这里只需要不可预测，不涉及机密。"""
-    return "".join(random.choice(_ALPHABET) for _ in range(length))
+    """随机密钥。这是 weapi 的加密密钥，必须用密码学安全的随机源。"""
+    return "".join(secrets.choice(_ALPHABET) for _ in range(length))
 
 
 def weapi_params(params: dict, csrf_token: str = "") -> dict[str, str]:
