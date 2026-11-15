@@ -288,11 +288,22 @@ class LibraryDB:
         的「喜欢顺序」排序因此不需要再请求接口。
         """
         uid = int(uid or 0)
+        # 红心列表里可能出现同名文件主干（同一首歌重复出现、或不同歌曲撞名），
+        # (uid, base) 是主键，直接逐条插入会撞 UNIQUE 约束并抛异常。
+        # 保留第一次出现的位置，重复项直接丢掉。
+        seen: set[str] = set()
+        rows: list[tuple[int, str, int]] = []
+        for index, raw in enumerate(bases):
+            base = str(raw or "")
+            if not base or base in seen:
+                continue
+            seen.add(base)
+            rows.append((uid, base, index))
         with self.batch() as conn:
             conn.execute("DELETE FROM liked_order WHERE uid = ?", (uid,))
             conn.executemany(
                 "INSERT INTO liked_order(uid, base, position) VALUES(?, ?, ?)",
-                [(uid, str(base), index) for index, base in enumerate(bases)],
+                rows,
             )
 
     def liked_order(self, uid: int = 0) -> list[str] | None:
@@ -369,6 +380,9 @@ def _selftest() -> int:
         db.replace_liked_order(7, ["甲 - 一", "乙 - 二"])
         check("红心顺序", db.liked_order(7), ["甲 - 一", "乙 - 二"])
         check("红心顺序按账号隔离", db.liked_order(8), None)
+        # 红心列表里同一首歌可能重复出现；主键是 (uid, base)，不能直接插
+        db.replace_liked_order(7, ["甲 - 一", "甲 - 一", "", "乙 - 二"])
+        check("红心顺序去重", db.liked_order(7), ["甲 - 一", "乙 - 二"])
         db.replace_liked_order(7, ["乙 - 二"])
         check("红心顺序整体替换", db.liked_order(7), ["乙 - 二"])
         db.replace_liked_order(7, [])

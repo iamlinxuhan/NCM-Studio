@@ -475,9 +475,14 @@ class LikedPage(BasePage):
         """
         if not self._songs:
             return
-        self.window.library.replace_liked_order(
-            self.window.client.uid, [song.base for song in self._songs]
-        )
+        try:
+            self.window.library.replace_liked_order(
+                self.window.client.uid, [song.base for song in self._songs]
+            )
+        except Exception as exc:  # noqa: BLE001 - 排序缓存失败不该让页面崩溃
+            # Qt 槽函数里未捕获的异常会让整个进程退出（PyQt6 默认行为），
+            # 这只是个排序缓存，写失败最多是「喜欢顺序」排序退化
+            self.status_label.setText(f"收藏顺序缓存写入失败：{exc}")
 
     def _on_load_failed(self, message: str, generation: int) -> None:
         if generation != self._load_generation:

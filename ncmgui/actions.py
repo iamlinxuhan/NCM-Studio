@@ -130,7 +130,10 @@ class SongActions(QObject):
         if liked:
             # 红心页按收藏时间倒序，新喜欢的排在最前面
             order.insert(0, base)
-        library.replace_liked_order(uid, order)
+        try:
+            library.replace_liked_order(uid, order)
+        except Exception:  # noqa: BLE001 - 排序缓存写失败不该影响点红心
+            pass
 
     def toggle_like(self, song: Song, currently_liked: bool | None = None) -> None:
         if not self.window.require_login_silent("喜欢歌曲"):
