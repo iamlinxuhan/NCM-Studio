@@ -19,9 +19,26 @@ class ProxyError(ValueError):
     """代理串不合法。消息直接展示给用户。"""
 
 
+def _looks_like_nonstandard_ip(name: str) -> bool:
+    """``134744072``、``0x08080808``、``0177.0.0.1`` 这类伪 IP 表示。
+
+    网络栈会把它们解析成真实的 IPv4（例如 134744072 → 8.8.8.8），但
+    ``ipaddress`` 不认；不显式拒绝的话会被当成「无点号的内网主机名」。
+    """
+    parts = [part for part in str(name or "").split(".") if part]
+    if not parts:
+        return False
+    return all(part.startswith("0x") or part.isdigit() for part in parts)
+
+
 def _is_local_or_private(host: str) -> bool:
-    """本机、私有网段、链路本地与常见内网主机名。"""
+    """本机、私有网段、链路本地。
+
+    主机名必须解析后再判断：单标签名（``nas``）也可能被 DNS 解析到公网。
+    解析失败时按不安全处理 —— 让用户改用 HTTPS 或直接填内网 IP。
+    """
     import ipaddress
+    import socket
 
     name = str(host or "").strip().lower()
     if not name:
@@ -31,9 +48,27 @@ def _is_local_or_private(host: str) -> bool:
     try:
         addr = ipaddress.ip_address(name)
     except ValueError:
-        # 单标签主机名（nas、jellyfin）通常在内网
-        return "." not in name
-    return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
+        # 不是标准 IP 字面量：伪 IP 表示直接拒绝，其余按主机名解析
+        if _looks_like_nonstandard_ip(name):
+            return False
+    else:
+        return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
+
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except OSError:
+        return False
+    seen = False
+    for info in infos:
+        raw = str(info[4][0]).split("%", 1)[0]
+        try:
+            addr = ipaddress.ip_address(raw)
+        except ValueError:
+            return False
+        if not (addr.is_loopback or addr.is_private or addr.is_link_local):
+            return False
+        seen = True
+    return seen
 
 
 def validate_server_url(url: str) -> str:
@@ -137,9 +172,27 @@ def _selftest() -> int:
           "http://127.0.0.1:8096")
     check("HTTP 私网", validate_server_url("http://192.168.1.2:4533"),
           "http://192.168.1.2:4533")
-    check("HTTP 主机名", validate_server_url("http://nas:8096"),
-          "http://nas:8096")
+    # 主机名按 DNS 结果判断：解析到私网才允许
+    import socket
+    from unittest.mock import patch
+
+    def addresses(ip: str):
+        def fake(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+        return fake
+
+    with patch("socket.getaddrinfo", addresses("192.168.1.9")):
+        check("主机名解析到私网", validate_server_url("http://nas:8096"),
+              "http://nas:8096")
+    with patch("socket.getaddrinfo", addresses("8.8.8.8")):
+        try:
+            validate_server_url("http://nas.example.com")
+        except ValueError:
+            check("主机名解析到公网被拒绝", True, True)
+        else:
+            check("主机名解析到公网被拒绝", False, True)
     for bad in ("http://media.example.com", "http://8.8.8.8",
+                "http://134744072", "http://0x08080808", "http://0177.0.0.1",
                 "ftp://x/a", "", "http:///a"):
         try:
             validate_server_url(bad)

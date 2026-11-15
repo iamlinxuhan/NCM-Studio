@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..resolver import Song
-from .db import LibraryDB
+from .db import LibraryDB, like_pattern
 from .queries import split_artists
 
 
@@ -175,8 +175,10 @@ def recent(
     clauses: list[str] = []
     params: list[object] = []
     for word in (query or "").split():
-        clauses.append("(title LIKE ? OR artists LIKE ? OR album LIKE ?)")
-        like = f"%{word}%"
+        clauses.append(
+            "(title LIKE ? ESCAPE '\\' OR artists LIKE ? ESCAPE '\\'"
+            " OR album LIKE ? ESCAPE '\\')")
+        like = like_pattern(word)
         params.extend((like, like, like))
     sql = "SELECT * FROM play_events"
     if clauses:
@@ -203,7 +205,7 @@ def _selftest() -> int:
     import tempfile
 
     from .. import ensure_utf8_stdout
-    from .db import LibraryDB
+    from .db import LibraryDB, like_pattern
 
     ensure_utf8_stdout()
     failures: list[str] = []
@@ -230,6 +232,7 @@ def _selftest() -> int:
         check("过滤歌名", len(recent(db, query="晴天")), 2)
         check("过滤专辑", len(recent(db, query="叶惠美")), 2)
         check("过滤不命中", recent(db, query="不存在"), [])
+        check("通配符不当成全部", len(recent(db, query="%")), 0)
         check("计数", count(db), 2)
         check("本地文件失效不可播", records[0].to_song(), None)
 

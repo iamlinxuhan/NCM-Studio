@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -23,6 +24,17 @@ from typing import Any, Iterator, Sequence
 from ..config import config_dir
 
 SCHEMA_VERSION = 6
+
+
+def like_pattern(word: str) -> str:
+    """把用户搜索词转成 LIKE 模式，转义 ``%``、``_`` 与反斜杠本身。
+
+    搜索框里输入 ``%`` 不该变成「匹配所有行」。调用方配合
+    ``LIKE ? ESCAPE '\\'`` 使用。
+    """
+    text = str(word or "")
+    text = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{text}%"
 
 
 def default_db_path() -> Path:
@@ -151,10 +163,22 @@ class LibraryDB:
         self.path = Path(path).expanduser() if path else default_db_path()
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            if os.name == "posix":
+                # 默认库在 config_dir()（0700）下本来就受保护；这条是给
+                # 「library.db 配置键指向共享目录」的情况兜底
+                try:
+                    os.chmod(self.path.parent, 0o700)
+                except OSError:
+                    pass
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(
             str(self.path), check_same_thread=False, timeout=15.0
         )
+        if str(self.path) != ":memory:" and os.name == "posix":
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -336,6 +360,10 @@ def _selftest() -> int:
     def check(name: str, got: object, want: object) -> None:
         if got != want:
             failures.append(f"{name}: 期望 {want!r}，实际 {got!r}")
+
+    check("LIKE 转义 %", like_pattern("100%"), "%100\\%%")
+    check("LIKE 转义 _", like_pattern("a_b"), "%a\\_b%")
+    check("LIKE 转义反斜杠", like_pattern("a\\b"), "%a\\\\b%")
 
     with tempfile.TemporaryDirectory() as root:
         path = Path(root) / "library.db"

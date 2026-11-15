@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..resolver import Song
-from .db import LibraryDB
+from .db import LibraryDB, like_pattern
 from .scan import VIDEO_QUALITY
 
 SORTS = (
@@ -80,8 +80,10 @@ def tracks(
     text = (query or "").strip()
     if text:
         for word in text.split():
-            clauses.append("(name LIKE ? OR artists LIKE ? OR album LIKE ?)")
-            like = f"%{word}%"
+            clauses.append(
+                "(name LIKE ? ESCAPE '\\' OR artists LIKE ? ESCAPE '\\'"
+                " OR album LIKE ? ESCAPE '\\')")
+            like = like_pattern(word)
             params.extend((like, like, like))
     if folder:
         # 只要**直接**放在这个文件夹里的文件。用前缀 + 剩余部分不含分隔符，
@@ -209,7 +211,7 @@ def _selftest() -> int:
     import time
 
     from .. import ensure_utf8_stdout
-    from .db import LibraryDB
+    from .db import LibraryDB, like_pattern
 
     ensure_utf8_stdout()
     failures: list[str] = []
@@ -243,6 +245,7 @@ def _selftest() -> int:
         check("歌手筛选", [s.name for s in tracks(db, artist="甲")], ["一", "二"])
         check("专辑筛选", len(tracks(db, album="专辑二")), 2)
         check("关键字筛选", [s.name for s in tracks(db, query="乙 四")], ["四"])
+        check("通配符不当成全部", tracks(db, query="%"), [])
         check("文件夹筛选", len(tracks(db, folder="/music/B")), 2)
         check("本地来源", tracks(db)[0].source, "local")
         check("时长排序", [s.duration for s in tracks(db, sort="duration")],

@@ -15,7 +15,7 @@ import sqlite3
 import time
 
 from ..api.models import Mv
-from .db import LibraryDB
+from .db import LibraryDB, like_pattern
 
 
 def add_favorite(db: LibraryDB, mv) -> None:
@@ -72,8 +72,9 @@ def favorites(
     clauses: list[str] = []
     params: list[object] = []
     for word in (query or "").split():
-        clauses.append("(name LIKE ? OR artist LIKE ?)")
-        like = f"%{word}%"
+        clauses.append(
+            "(name LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\')")
+        like = like_pattern(word)
         params.extend((like, like))
     sql = "SELECT * FROM mv_favorites"
     if clauses:
@@ -92,7 +93,7 @@ def _selftest() -> int:
     from pathlib import Path
 
     from .. import ensure_utf8_stdout
-    from .db import LibraryDB
+    from .db import LibraryDB, like_pattern
 
     ensure_utf8_stdout()
     failures: list[str] = []

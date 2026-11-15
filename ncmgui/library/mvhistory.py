@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from .db import LibraryDB
+from .db import LibraryDB, like_pattern
 
 
 @dataclass(frozen=True)
@@ -106,8 +106,9 @@ def recent_mv(
     clauses: list[str] = []
     params: list[object] = []
     for word in (query or "").split():
-        clauses.append("(name LIKE ? OR artist LIKE ?)")
-        like = f"%{word}%"
+        clauses.append(
+            "(name LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\')")
+        like = like_pattern(word)
         params.extend((like, like))
     sql = "SELECT * FROM mv_events"
     if clauses:
@@ -135,7 +136,7 @@ def _selftest() -> int:
     from pathlib import Path
 
     from .. import ensure_utf8_stdout
-    from .db import LibraryDB
+    from .db import LibraryDB, like_pattern
 
     ensure_utf8_stdout()
     failures: list[str] = []
@@ -167,6 +168,7 @@ def _selftest() -> int:
         check("过滤名称", len(recent_mv(db, query="晴天")), 1)
         check("过滤歌手", len(recent_mv(db, query="别人")), 1)
         check("过滤不命中", recent_mv(db, query="不存在"), [])
+        check("通配符不当成全部", len(recent_mv(db, query="%")), 0)
         check("计数", mv_count(db), 2)
         clear_mv_history(db)
         check("清空", mv_count(db), 0)

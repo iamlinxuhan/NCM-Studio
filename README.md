@@ -619,6 +619,8 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 | PyQt 槽函数里的数据库异常会杀进程 | 菜单/下拉操作可能让整个程序退出 | 红心排序、历史删除、喜欢顺序查询加兜底 |
 | 远端文本按 AutoText 渲染 | 恶意评论可伪装成 UI 元素 | 评论、昵称、签名、歌名歌手改为 `PlainText` |
 | CI Action 使用可变 tag、构建 job 有写权限 | 供应链风险 | 固定 Action commit SHA；顶层 `contents: read`，仅 release job 可写 |
+| 搜索词里的 `%` / `_` 被当成 LIKE 通配符 | 输入 `%` 会匹配全部记录 | 统一 `like_pattern` 转义并加 `ESCAPE '\'`，曲库 / 历史 / MV 历史 / MV 收藏四个入口一致 |
+| 曲库数据库文件权限未收紧 | `library.db` 指向共享目录时同机用户可读 | 建库时目录 `0700`、库文件 `0600` |
 
 残余边界：HTTPS 只能保证传输加密，服务器本身被控时仍可返回恶意内容；应用侧能做的是校验协议、限制大小、把远端文本当纯文本。内网 HTTP 的明文传输风险只能由用户选择是否接受。
 
@@ -709,7 +711,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.6 packaging\ncm-studio.iss
+iscc /DAppVersion=4.7.7 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
