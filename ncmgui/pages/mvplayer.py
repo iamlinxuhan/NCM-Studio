@@ -4,9 +4,19 @@
 读取网易云的 mp4 地址（实测不需要 Referer），和 mpv 的外部窗口相比更符合
 「一个窗口听歌看 MV」的体验。开始播放前会暂停正在播放的音乐，避免两路声音
 叠在一起。
+
+网易云的视频 CDN 会中途掐断连接（FFmpeg 报 ``partial file``），而且播放地址
+本身有时效。所以出错或长时间卡住时不是拿旧地址重开，而是重新向服务端要一次
+地址、从断点续播；连续失败才会真正放弃。
 """
 
 from __future__ import annotations
+
+import os
+import re
+import time
+import urllib.request
+from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
@@ -26,9 +36,23 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..api.transport import USER_AGENT
+from ..config import config_dir
+from ..library import record_mv_play, update_mv_play
 from ..playback import STATE_LOADING, STATE_PLAYING
 from ..widgets.card import ghost_button
+from ..workers import BackgroundTask
 from .base import BasePage
+
+#: 一次播放里最多重新取几次地址。每次断流都从当前位置续上，不是从头再来。
+RELOAD_MAX = 3
+#: 卡住多久算「流断了」。首次加载慢也会走这条路，所以别设太短。
+STALL_MS = 12000
+#: 连续播放这么久后清零重连计数：断流重连成功后，用户又看了很久，
+#: 应该重新拥有完整的重试次数。
+HEALTHY_MS = 30000
+
+_BAD_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 def _quiet_ffmpeg() -> None:
@@ -112,6 +136,52 @@ def _clock(milliseconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+def _mv_filename(mv) -> str:
+    base = f"{mv.artist} - {mv.name}" if getattr(mv, "artist", "") else mv.name
+    base = _BAD_FILENAME.sub("_", str(base)).strip().strip(".") or f"mv-{mv.id}"
+    return f"{base}.mp4"
+
+
+def _unique_path(path: Path) -> Path:
+    """同名文件已经存在时加序号，不覆盖用户的东西。"""
+    if not path.exists():
+        return path
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{path.stem} ({index}){path.suffix}")
+        if not candidate.exists():
+            return candidate
+    return path
+
+
+def _mv_cache_path(mv_id: int) -> Path:
+    """断流兜底用的完整视频缓存。"""
+    return config_dir() / "cache" / "mv" / f"{int(mv_id)}.mp4"
+
+
+def _prune_mv_cache(keep: int = 5) -> None:
+    """缓存目录只留最近看过的几支，别让它无限长。"""
+    directory = _mv_cache_path(0).parent
+    if not directory.is_dir():
+        return
+    try:
+        files = sorted(
+            directory.glob("*.mp4"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    for path in files[keep:]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+class _Cancelled(Exception):
+    """用户取消了下载。"""
+
+
 class MvPlayerPage(BasePage):
     PAGE_TITLE = ""
     SCROLLABLE = False
@@ -123,7 +193,24 @@ class MvPlayerPage(BasePage):
         self.mv = None
         self._url = ""
         self._seeking = False
-        self._retries = 0
+        #: 连续重连次数；播放健康一段时间后清零
+        self._attempts = 0
+        self._recovering = False
+        #: 断流重连时要跳回的位置；-1 表示没有待恢复的位置
+        self._resume_position = -1
+        #: 本次观看在 mv_events 里的行 ID，0 表示还没写
+        self._event_id = 0
+        #: 5 秒检查时视频还没播起来，最多再等几轮
+        self._history_checks = 0
+        #: 状态栏当前显示的是「加载中/重连中」这类临时提示
+        self._transient_status = False
+        self._download: BackgroundTask | None = None
+        #: 断流兜底：把完整视频缓存到本地再播
+        self._cache_task: BackgroundTask | None = None
+        #: 当前是否在播放本地缓存文件（此时不必再重取网络地址）
+        self._local = False
+        #: 缓存兜底本身失败过，不要再反复重试
+        self._cache_failed = False
         super().__init__(window)
 
     # ---------------------------------------------------------------- 构建
@@ -154,15 +241,19 @@ class MvPlayerPage(BasePage):
         self.video.setAutoFillBackground(True)
         self.content.addWidget(self.video, 1)
 
-        # 全屏时控制条被盖住，在画面角上留一个退出口。装在视频窗里才能跟着
-        # 全屏窗一起显示（QVideoWidget 的帧是画在 widget 上的，子控件能盖住）
+        # 全屏时控制条和返回口都装进视频窗里：QVideoWidget 的帧画在 widget 上，
+        # 子控件能盖在上面，于是全屏也能拖进度、退出。
         self.exit_fullscreen_button = ghost_button("✕ 退出全屏", compact=True)
         self.exit_fullscreen_button.setParent(self.video)
         self.exit_fullscreen_button.hide()
         self.exit_fullscreen_button.clicked.connect(self._exit_fullscreen)
 
-        controls = QHBoxLayout()
+        self.controls = QWidget()
+        self.controls.setObjectName("MvControls")
+        controls = QHBoxLayout(self.controls)
+        controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(10)
+
         self.play_button = ghost_button("暂停", compact=True)
         self.play_button.clicked.connect(self._toggle)
         controls.addWidget(self.play_button)
@@ -189,10 +280,20 @@ class MvPlayerPage(BasePage):
         self.volume.valueChanged.connect(self._set_volume)
         controls.addWidget(self.volume)
 
+        self.download_button = ghost_button("下载", compact=True)
+        self.download_button.clicked.connect(self._toggle_download)
+        controls.addWidget(self.download_button)
+
         self.fullscreen_button = ghost_button("全屏", compact=True)
         self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
         controls.addWidget(self.fullscreen_button)
-        self.content.addLayout(controls)
+
+        # 全屏时控件会被挪进视频窗，退出时再放回这个容器
+        self.controls_host = QWidget()
+        host = QVBoxLayout(self.controls_host)
+        host.setContentsMargins(0, 0, 0, 0)
+        host.addWidget(self.controls)
+        self.content.addWidget(self.controls_host)
 
         self.status = QLabel("")
         self.status.setObjectName("Hint")
@@ -222,6 +323,21 @@ class MvPlayerPage(BasePage):
         self.media.mediaStatusChanged.connect(self._on_media_status)
         self.media.errorOccurred.connect(self._on_error)
 
+        self._stall_timer = QTimer(self)
+        self._stall_timer.setSingleShot(True)
+        self._stall_timer.setInterval(STALL_MS)
+        self._stall_timer.timeout.connect(self._on_stalled)
+
+        self._healthy_timer = QTimer(self)
+        self._healthy_timer.setSingleShot(True)
+        self._healthy_timer.setInterval(HEALTHY_MS)
+        self._healthy_timer.timeout.connect(self._reset_attempts)
+
+        self._history_timer = QTimer(self)
+        self._history_timer.setSingleShot(True)
+        self._history_timer.setInterval(5000)
+        self._history_timer.timeout.connect(self._record_history)
+
         # 全屏后键盘焦点可能在视频窗上，页面自己收不到 ESC；挂到应用级过滤
         app = QApplication.instance()
         if app is not None:
@@ -230,12 +346,21 @@ class MvPlayerPage(BasePage):
     # ---------------------------------------------------------------- 加载
 
     def load(self, mv, url: str) -> None:
+        # 上一支 MV 如果没经过 stop() 就被替换，先把观看记录补完整
+        self._flush_history()
         self.mv = mv
         self._url = str(url or "")
-        self._retries = 0
+        self._attempts = 0
+        self._recovering = False
+        self._resume_position = -1
+        self._event_id = 0
+        self._history_checks = 0
+        self._local = False
+        self._cache_failed = False
         self.title.setText(getattr(mv, "name", "") or "MV")
         self.meta.setText(getattr(mv, "subtitle", ""))
         self.status.setText("正在加载视频…")
+        self._transient_status = True
         self.play_button.setText("暂停")
         # 音乐和 MV 同时出声会互相盖住；只在音乐确实在响时暂停。
         # 不能用「未暂停」判断 —— 空闲时 toggle() 会顺手放起队列第一首
@@ -251,14 +376,30 @@ class MvPlayerPage(BasePage):
             return
         # 起播前再确认一次：从上次播放到现在，默认设备可能已经换了
         self._sync_output_device()
-        self.media.setSource(QUrl(self._url))
-        self.media.play()
+        # 之前断流时缓存过完整视频的话，直接播本地 —— 比再赌一次 HTTP 流稳
+        cache = _mv_cache_path(mv.id)
+        if cache.is_file() and cache.stat().st_size > 0:
+            self._play_local(cache, 0)
+        else:
+            self.media.setSource(QUrl(self._url))
+            self.media.play()
+        self._history_timer.start()
 
     def stop(self) -> None:
         # 离开页面时如果还停在全屏，先把全屏窗收掉，否则会盖在整个应用上面
         if self.video.isFullScreen():
             self.video.setFullScreen(False)
             self._sync_fullscreen()
+        self._flush_history()
+        self._history_timer.stop()
+        self._stall_timer.stop()
+        self._healthy_timer.stop()
+        if self._download is not None and self._download.is_running:
+            self._download.cancel()
+        if self._cache_task is not None and self._cache_task.is_running:
+            # 兜底缓存只服务当前这支 MV，离开页面就停，别在后台偷偷跑流量
+            self._cache_task.cancel()
+            self._cache_task = None
         self.media.stop()
         self.media.setSource(QUrl())
         self._url = ""
@@ -303,6 +444,139 @@ class MvPlayerPage(BasePage):
         self._output_device_id = ident
         self.audio.setDevice(device)
 
+    # ---------------------------------------------------------------- 下载
+
+    def _download_dir(self) -> Path:
+        raw = str(self.cfg.get("download.output", "") or "").strip()
+        if raw:
+            return Path(raw).expanduser()
+        return Path.home() / "NCM-Studio-download"
+
+    def _fetch_mv_file(self, mv, target: Path, task: BackgroundTask | None) -> str:
+        """把 MV 完整下载到 ``target``，可被任意后台线程调用。
+
+        网易云的视频 CDN 会中途掐连接：先写 ``.part``，断了用 ``Range`` 从
+        已下载的位置续传，同时重新取播放地址（旧地址可能已过期）。最多续 3 次。
+        """
+        client = self.window.client
+        url, _fee = client.mv_url(mv.id)
+        part = target.with_name(target.name + ".part")
+        attempt = 0
+        if task is not None:
+            task.percent.emit(-1)
+        while True:
+            written = part.stat().st_size if part.is_file() else 0
+            headers = {
+                "User-Agent": USER_AGENT,
+                "Referer": "https://music.163.com/",
+            }
+            if written:
+                headers["Range"] = f"bytes={written}-"
+            request = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    status = int(getattr(response, "status", 200) or 200)
+                    length = int(response.headers.get("Content-Length") or 0)
+                    if written and status == 206:
+                        base = written
+                        total = base + length if length else 0
+                        mode = "ab"
+                    else:
+                        # 服务端不支持续传（回了 200），只能从头写
+                        base = 0
+                        total = length
+                        mode = "wb"
+                    got = 0
+                    with open(part, mode) as handle:
+                        while True:
+                            if task is not None and task.cancel_event.is_set():
+                                raise _Cancelled("已取消下载")
+                            chunk = response.read(256 * 1024)
+                            if not chunk:
+                                break
+                            handle.write(chunk)
+                            got += len(chunk)
+                            if total and task is not None:
+                                task.percent.emit(
+                                    min(99, (base + got) * 100 // total))
+                    if total and base + got < total:
+                        # 连接提前关闭时 read() 只返回 b''，不抛异常；
+                        # 不核对长度就会把半截文件当成下载完成
+                        raise OSError("连接提前中断")
+                os.replace(part, target)
+                return str(target)
+            except _Cancelled:
+                try:
+                    part.unlink()
+                except OSError:
+                    pass
+                raise
+            except Exception:  # noqa: BLE001 - 网络异常统一重试
+                attempt += 1
+                if attempt > 3:
+                    try:
+                        part.unlink()
+                    except OSError:
+                        pass
+                    raise
+                time.sleep(1.5 * attempt)
+                # 旧地址可能已随断流失效，重新取一次再续传
+                url, _fee = client.mv_url(mv.id)
+
+    def _toggle_download(self) -> None:
+        task = self._download
+        if task is not None and task.is_running:
+            task.cancel()
+            self.download_button.setText("取消中…")
+            return
+        if self.mv is None:
+            self.status.setText("还没有正在播放的 MV。")
+            return
+        mv = self.mv
+        directory = self._download_dir()
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.status.setText(f"无法创建下载目录：{exc}")
+            return
+
+        self.download_button.setText("取消下载")
+        self.status.setText("正在获取下载地址…")
+
+        def work() -> str:
+            target = _unique_path(directory / _mv_filename(mv))
+            return self._fetch_mv_file(mv, target, task)
+
+        task = BackgroundTask(work, parent=self)
+        self._download = task
+
+        def on_progress(percent: int) -> None:
+            if percent < 0:
+                self.status.setText("下载中…")
+            else:
+                self.status.setText(f"下载中 {percent}%…")
+
+        def on_done(path: str) -> None:
+            self._download = None
+            self.download_button.setText("下载")
+            self.status.setText(f"已下载到 {path}")
+            toast = getattr(self, "toast", None)
+            if callable(toast):
+                toast("MV 已下载")
+
+        def on_failed(message: str) -> None:
+            cancelled = task is not None and task.cancel_event.is_set()
+            self._download = None
+            self.download_button.setText("下载")
+            self.status.setText("已取消下载" if cancelled else f"下载失败：{message}")
+
+        task.percent.connect(on_progress)
+        task.done.connect(on_done)
+        task.failed.connect(on_failed)
+        task.start()
+
+    # ---------------------------------------------------------------- 全屏
+
     def _toggle_fullscreen(self) -> None:
         self.video.setFullScreen(not self.video.isFullScreen())
         self._sync_fullscreen()
@@ -320,17 +594,48 @@ class MvPlayerPage(BasePage):
         self.fullscreen_button.setText("退出全屏" if full else "全屏")
         self.exit_fullscreen_button.setVisible(full)
         if full:
+            self._enter_controls_fullscreen()
             self.exit_fullscreen_button.raise_()
-            self._place_exit_button()
+            self._place_fullscreen_widgets()
+        else:
+            self._exit_controls_fullscreen()
 
-    def _place_exit_button(self) -> None:
-        if not self.exit_fullscreen_button.isVisible():
+    def _enter_controls_fullscreen(self) -> None:
+        """把控制条搬进视频窗：全屏时仍能暂停、拖进度、调音量。"""
+        self.controls.setParent(self.video)
+        self.controls.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.controls.setStyleSheet(
+            "QWidget#MvControls {"
+            " background-color: rgba(8, 12, 20, 190);"
+            " border-radius: 10px; }")
+        self.controls.show()
+
+    def _exit_controls_fullscreen(self) -> None:
+        self.controls.setStyleSheet("")
+        self.controls.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.controls.setParent(self.controls_host)
+        layout = self.controls_host.layout()
+        if layout is not None:
+            layout.addWidget(self.controls)
+        self.controls.show()
+
+    def _place_fullscreen_widgets(self) -> None:
+        if not self.video.isFullScreen():
             return
-        self.exit_fullscreen_button.adjustSize()
-        margin = 18
-        size = self.exit_fullscreen_button.size()
-        self.exit_fullscreen_button.move(
-            max(0, self.video.width() - size.width() - margin), margin)
+        if self.exit_fullscreen_button.isVisible():
+            self.exit_fullscreen_button.adjustSize()
+            margin = 18
+            size = self.exit_fullscreen_button.size()
+            self.exit_fullscreen_button.move(
+                max(0, self.video.width() - size.width() - margin), margin)
+        if self.controls.isVisible():
+            margin = 16
+            height = max(42, self.controls.sizeHint().height())
+            width = max(280, self.video.width() - 2 * margin)
+            self.controls.setGeometry(
+                margin, max(0, self.video.height() - height - margin),
+                width, height)
+            self.controls.raise_()
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
         kind = event.type()
@@ -341,7 +646,7 @@ class MvPlayerPage(BasePage):
             return True
         if obj is self.video:
             if kind == QEvent.Type.Resize and self.exit_fullscreen_button.isVisible():
-                self._place_exit_button()
+                self._place_fullscreen_widgets()
             elif kind == QEvent.Type.WindowStateChange:
                 self._sync_fullscreen()
         return super().eventFilter(obj, event)
@@ -362,35 +667,202 @@ class MvPlayerPage(BasePage):
     def _on_state(self, state) -> None:
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self.play_button.setText("暂停")
-            self.status.setText("")
+            if self._transient_status:
+                self.status.setText("")
+                self._transient_status = False
+            if not self._healthy_timer.isActive():
+                self._healthy_timer.start()
         elif state == QMediaPlayer.PlaybackState.PausedState:
             self.play_button.setText("播放")
+            self._healthy_timer.stop()
         else:
             self.play_button.setText("播放")
+            self._healthy_timer.stop()
 
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._stall_timer.stop()
+            self._flush_history(completed=True)
             self.status.setText("播放结束。")
             self.play_button.setText("重新播放")
+            return
+        if status in (QMediaPlayer.MediaStatus.StalledMedia,
+                      QMediaPlayer.MediaStatus.BufferingMedia):
+            if self.media.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self._stall_timer.start()
+            return
+        self._stall_timer.stop()
+        if status in (QMediaPlayer.MediaStatus.LoadedMedia,
+                      QMediaPlayer.MediaStatus.BufferedMedia):
+            self._apply_resume()
+
+    def _apply_resume(self) -> None:
+        """重连后回到断点。等媒体真正加载好再 seek，太早会被丢掉。"""
+        if self._resume_position <= 0:
+            return
+        position = self._resume_position
+        self._resume_position = -1
+        self.media.setPosition(position)
 
     def _on_error(self, _error, message: str) -> None:
-        # 视频流的 CDN 偶尔会提前断开（FFmpeg 报 partial file）。重开一次
-        # 通常就能接着放，比直接甩一句「播放失败」有用得多。
-        if self._url and self._retries < 1:
-            self._retries += 1
-            position = max(0, self.media.position())
-            self.status.setText("视频流中断，正在重试…")
-            QTimer.singleShot(1200, lambda: self._retry(position))
-            return
-        self.status.setText(f"播放失败：{message or '请检查网络或视频源'}")
+        self._recover(message or "视频播放中断")
 
-    def _retry(self, position: int) -> None:
-        if not self._url:
+    def _on_stalled(self) -> None:
+        self._recover("视频流卡住")
+
+    def _reset_attempts(self) -> None:
+        self._attempts = 0
+
+    def _recover(self, reason: str) -> None:
+        """断流/卡住时重新取播放地址，从当前位置续播。
+
+        直接拿旧地址重设基本没用：网易云的 CDN 连接是被服务端掐掉的，旧地址
+        要么已过期、要么仍然被限制。重新请求 ``mv/url`` 才能拿到新连接。
+        """
+        if not self._url or self.mv is None or self._recovering:
             return
-        # 同一个地址直接重设可能被忽略，先清空再设
+        if self._local:
+            self.status.setText(f"播放失败：{reason or '视频文件不可用'}")
+            return
+        if self._attempts >= RELOAD_MAX:
+            self._fall_back_to_cache(reason)
+            return
+        self._attempts += 1
+        self._recovering = True
+        self._stall_timer.stop()
+        self._resume_position = max(0, self.media.position())
+        self.status.setText(
+            f"{reason}，正在重新连接（{self._attempts}/{RELOAD_MAX}）…")
+        self._transient_status = True
+        client = self.window.client
+        mv_id = self.mv.id
+        task = BackgroundTask(lambda: client.mv_url(mv_id), parent=self)
+
+        def done(result) -> None:
+            url, _fee = result
+            self._url = str(url)
+            self._recovering = False
+            # 同一个地址直接重设可能被忽略，先清空再设
+            self.media.setSource(QUrl())
+            self.media.setSource(QUrl(self._url))
+            self.media.play()
+
+        def failed(message: str) -> None:
+            self._recovering = False
+            self._transient_status = False
+            self.status.setText(f"播放失败：{message}")
+
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
+
+    def _fall_back_to_cache(self, reason: str) -> None:
+        """网络播放反复失败时，把整支 MV 缓存到本地再续播。
+
+        QtMultimedia 的 FFmpeg 网络栈对「服务端提前断开」没有恢复能力，
+        重连几次还断就说明这条流在当前网络下走不通。视频本身不大，完整拉
+        下来后改本地文件播放，就彻底绕开了这个问题。
+        """
+        if self.mv is None or self._cache_failed:
+            return
+        if self._cache_task is not None and self._cache_task.is_running:
+            return
+        position = max(0, int(self.media.position()))
+        target = _mv_cache_path(self.mv.id)
+        if target.is_file() and target.stat().st_size > 0:
+            self._play_local(target, position)
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.status.setText(f"播放失败：无法建立视频缓存目录（{exc}）")
+            return
+        mv = self.mv
+        self._resume_position = position
+        self.status.setText("视频流反复中断，正在缓存完整视频，缓存好会自动续播…")
+        self._transient_status = True
+        task: BackgroundTask | None = None
+
+        def work() -> str:
+            return self._fetch_mv_file(mv, target, task)
+
+        task = BackgroundTask(work, parent=self)
+        self._cache_task = task
+
+        def progress(percent: int) -> None:
+            if percent < 0:
+                self.status.setText("正在缓存视频…（缓存好会自动续播）")
+            else:
+                self.status.setText(
+                    f"正在缓存视频 {percent}%…（缓存好会自动续播）")
+
+        def done(path: str) -> None:
+            self._cache_task = None
+            _prune_mv_cache()
+            self._play_local(Path(path), position)
+
+        def failed(message: str) -> None:
+            self._cache_task = None
+            self._cache_failed = True
+            self._transient_status = False
+            self.status.setText(f"播放失败：{message}")
+
+        task.percent.connect(progress)
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
+
+    def _play_local(self, path: Path, position: int) -> None:
+        """改播本地文件。``position`` 是断点，等媒体加载好后会跳过去。"""
+        self._local = True
+        self._attempts = 0
+        self._recovering = False
+        self._resume_position = max(0, int(position))
         self.media.setSource(QUrl())
-        self.media.setSource(QUrl(self._url))
+        self.media.setSource(QUrl.fromLocalFile(str(path)))
         self.media.play()
-        if position > 0:
-            self.media.setPosition(position)
         self.status.setText("")
+        self._transient_status = False
+
+    # ---------------------------------------------------------------- 历史
+
+    def _record_history(self) -> None:
+        """播放满 5 秒才记一条，和歌曲历史的策略一致。"""
+        if self.mv is None or self._event_id:
+            return
+        position = int(self.media.position())
+        if position < 3000:
+            # 网络慢时 5 秒还没真正播起来；只要还在加载就再等一轮，最多 6 轮
+            self._history_checks += 1
+            if (self._history_checks <= 6
+                    and self.media.playbackState()
+                    != QMediaPlayer.PlaybackState.StoppedState):
+                self._history_timer.start()
+            return
+        library = getattr(self.window, "library", None)
+        if library is None:
+            return
+        duration = int(getattr(self.mv, "duration", 0) or self.media.duration() or 0)
+        self._event_id = record_mv_play(
+            library,
+            mv_id=int(self.mv.id),
+            name=self.mv.name,
+            artist=getattr(self.mv, "artist", ""),
+            cover_url=getattr(self.mv, "cover_url", ""),
+            duration_ms=duration,
+            watched_ms=position,
+        )
+
+    def _flush_history(self, completed: bool = False) -> None:
+        if not self._event_id:
+            return
+        library = getattr(self.window, "library", None)
+        duration = int(
+            getattr(self.mv, "duration", 0) or self.media.duration() or 0
+        ) if self.mv is not None else 0
+        watched = int(self.media.position())
+        if completed and duration:
+            watched = duration
+        if library is not None:
+            update_mv_play(library, self._event_id, watched, completed=completed)
+        self._event_id = 0

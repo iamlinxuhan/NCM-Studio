@@ -120,6 +120,7 @@ jobs:
           # 本地曲库：schema/迁移、播放历史、统计、查询、扫描、本地歌单
           python -m ncmgui.library.db
           python -m ncmgui.library.history
+          python -m ncmgui.library.mvhistory
           python -m ncmgui.library.stats
           python -m ncmgui.library.queries
           python -m ncmgui.library.scan

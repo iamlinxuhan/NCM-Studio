@@ -22,7 +22,7 @@ from typing import Any, Iterator, Sequence
 
 from ..config import config_dir
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def default_db_path() -> Path:
@@ -99,6 +99,24 @@ CREATE INDEX IF NOT EXISTS idx_play_events_started
     ON play_events(started_at);
 CREATE INDEX IF NOT EXISTS idx_play_events_track
     ON play_events(track_id);
+
+-- MV 的观看历史。和 play_events 一样存快照（歌名/歌手/封面），MV 下架或
+-- 改名后历史仍然完整；点击重播时按 mv_id 重新取播放地址。
+CREATE TABLE IF NOT EXISTS mv_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    mv_id       INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    artist      TEXT NOT NULL DEFAULT '',
+    cover_url   TEXT NOT NULL DEFAULT '',
+    started_at  INTEGER NOT NULL,
+    watched_ms  INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    completed   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mv_events_started
+    ON mv_events(started_at);
+CREATE INDEX IF NOT EXISTS idx_mv_events_mv
+    ON mv_events(mv_id);
 
 -- 本地歌曲的歌词偏移（毫秒）。按文件路径记而不是歌曲 ID：重扫、换歌单、
 -- 文件从下载目录挪走后再加回来，路径对得上就能恢复。0 不写行。
