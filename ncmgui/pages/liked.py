@@ -30,14 +30,23 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QTableView,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
     QWidget,
 )
 
 from .. import localmusic, ncmctl, player, theme
+from ..api.models import Mv
+from ..config import default_video_dir
+from ..library import favorites
 from ..lyrics import AUDIO_SUFFIXES, index_audio
+from ..mvdownload import download_all
 from ..playback import STATE_PLAYING
 from ..resolver import Song
 from ..widgets.card import ghost_button
@@ -260,8 +269,11 @@ class LikedFilterProxy(QSortFilterProxyModel):
 # --------------------------------------------------------------------------- #
 
 class LikedPage(BasePage):
-    PAGE_TITLE = "我喜欢的音乐"
-    PAGE_SUBTITLE = "红心歌单。点一首歌即可流播 —— 已下载的直接播本地文件。"
+    PAGE_TITLE = "我的喜欢"
+    PAGE_SUBTITLE = (
+        "喜欢的歌曲与 MV。歌曲点一首即可流播，已下载的直接播本地文件；"
+        "MV 双击在应用内播放。"
+    )
 
     #: 表格自己滚动，不能再套 QScrollArea
     SCROLLABLE = False
@@ -279,9 +291,19 @@ class LikedPage(BasePage):
 
         self.playback = self.window.playback
 
+        # MV 标签页的状态
+        self._mv_items: list[Mv] = []
+        self._mv_rows: list[Mv] = []
+        self._mv_task: BackgroundTask | None = None
+        self._mv_url_task: BackgroundTask | None = None
+        self._mv_download_task: BackgroundTask | None = None
+
         # 标题由 BasePage 统一加（PAGE_TITLE 非空），这里不再重复
-        self._build_toolbar()
-        self._build_table()
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self._build_music_tab()
+        self._build_mv_tab()
+        self.content.addWidget(self.tabs, 1)
 
         self.playback.trackChanged.connect(self._on_track_changed)
         self.playback.stateChanged.connect(self._on_state_changed)
@@ -298,6 +320,16 @@ class LikedPage(BasePage):
             self.status_label.setText("登录后这里会显示你喜欢的音乐。")
 
     # ---------------------------------------------------------------- 构建
+
+    def _build_music_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(6)
+        self._music_layout = layout
+        self._build_toolbar()
+        self._build_table()
+        self.tabs.addTab(page, "音乐")
 
     def _build_toolbar(self) -> None:
         bar = QWidget()
@@ -327,7 +359,7 @@ class LikedPage(BasePage):
         self.refresh_btn.clicked.connect(self._reload)
         layout.addWidget(self.refresh_btn)
 
-        self.content.addWidget(bar)
+        self._music_layout.addWidget(bar)
 
     def _build_table(self) -> None:
         self.model = LikedTableModel(self)
@@ -364,7 +396,7 @@ class LikedPage(BasePage):
         self.table.setColumnWidth(LikedTableModel.COL_DURATION, 66)
         self.table.setColumnWidth(LikedTableModel.COL_LOCAL, 56)
 
-        self.content.addWidget(self.table, 1)
+        self._music_layout.addWidget(self.table, 1)
 
         # 状态、统计与本地音乐入口放在表格下方：工具栏已经被搜索框占满
         status_row = QHBoxLayout()
@@ -395,13 +427,190 @@ class LikedPage(BasePage):
         status_row.addWidget(self.download_btn)
         status_row.addWidget(self.local_btn)
         status_row.addWidget(self.local_dir_btn)
-        self.content.addLayout(status_row)
+        self._music_layout.addLayout(status_row)
+
+    # ---------------------------------------------------------------- MV
+
+    def _build_mv_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(6)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.mv_search = QLineEdit()
+        self.mv_search.setPlaceholderText("搜索 MV / 歌手")
+        self.mv_search.setClearButtonEnabled(True)
+        self.mv_search.textChanged.connect(lambda _text: self._filter_mvs())
+        row.addWidget(self.mv_search, 1)
+
+        self.mv_refresh_btn = ghost_button("刷新", compact=True)
+        self.mv_refresh_btn.clicked.connect(self._reload_mv)
+        row.addWidget(self.mv_refresh_btn)
+
+        self.mv_download_btn = ghost_button("下载全部", compact=True)
+        self.mv_download_btn.setToolTip(
+            "下载收藏的 MV 到「下载与云盘 → 下载」里设置的 MV 输出目录。")
+        self.mv_download_btn.clicked.connect(self._download_mvs)
+        row.addWidget(self.mv_download_btn)
+        layout.addLayout(row)
+
+        self.mv_status = QLabel("")
+        self.mv_status.setObjectName("Hint")
+        self.mv_status.setWordWrap(True)
+        layout.addWidget(self.mv_status)
+
+        self.mv_table = QTableWidget(0, 3)
+        self.mv_table.setHorizontalHeaderLabels(["MV", "歌手", "时长"])
+        self.mv_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.mv_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.mv_table.setShowGrid(False)
+        self.mv_table.setAlternatingRowColors(True)
+        self.mv_table.verticalHeader().setVisible(False)
+        self.mv_table.verticalHeader().setDefaultSectionSize(32)
+        self.mv_table.setWordWrap(False)
+        self.mv_table.cellDoubleClicked.connect(self._play_mv_row)
+        header = self.mv_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.mv_table.setColumnWidth(1, 180)
+        self.mv_table.setColumnWidth(2, 70)
+        layout.addWidget(self.mv_table, 1)
+        self.tabs.addTab(page, "MV")
+
+    def _reload_mv(self) -> None:
+        mode = str(self.cfg.get("mv.favorite_mode", "local") or "local")
+        if mode == "official":
+            if not self.is_logged_in():
+                self._show_mvs([], "登录后这里会显示你在官方账号收藏的 MV。")
+                return
+            if self._mv_task is not None and self._mv_task.is_running:
+                return
+            self.mv_status.setText("正在加载收藏的 MV…")
+            task = BackgroundTask(
+                lambda: self.window.client.mv_sublist(200), parent=self)
+            self._mv_task = task
+            task.done.connect(lambda items: self._show_mvs(items))
+            task.failed.connect(
+                lambda message: self.mv_status.setText(f"加载失败：{message}"))
+            task.start()
+            return
+        self._show_mvs(favorites(self.window.library, 500))
+
+    def _show_mvs(self, items, message: str = "") -> None:
+        self._mv_items = [item for item in items if isinstance(item, Mv)]
+        if not self._mv_items and message:
+            self.mv_status.setText(message)
+        self._filter_mvs()
+        if message and self._mv_items:
+            self.mv_status.setText(message)
+
+    def _filter_mvs(self) -> None:
+        query = self.mv_search.text().strip().casefold()
+        rows = [
+            mv for mv in self._mv_items
+            if not query or query in mv.name.casefold()
+            or query in mv.artist.casefold()
+        ]
+        self._mv_rows = rows
+        self.mv_table.setRowCount(len(rows))
+        for row, mv in enumerate(rows):
+            values = (mv.name, mv.artist or "—", mv.duration_text or "—")
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 2:
+                    item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, mv)
+                self.mv_table.setItem(row, column, item)
+        if rows:
+            self.mv_status.setText(f"{len(rows)} 支 MV")
+        else:
+            self.mv_status.setText(
+                "没有匹配的 MV。" if query else "还没有收藏的 MV。")
+
+    def _play_mv_row(self, row: int, _column: int) -> None:
+        if not (0 <= row < len(self._mv_rows)):
+            return
+        mv = self._mv_rows[row]
+        if self._mv_url_task is not None and self._mv_url_task.is_running:
+            self._mv_url_task.cancel()
+        self.mv_status.setText(f"正在获取《{mv.name}》的播放地址…")
+        task = BackgroundTask(
+            lambda: self.window.client.mv_url(mv.id), parent=self)
+        self._mv_url_task = task
+
+        def done(result) -> None:
+            url, _fee = result
+            self.window.open_mv(mv, url)
+
+        def failed(message: str) -> None:
+            self.mv_status.setText(f"无法播放：{message}")
+
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
+
+    def _download_mvs(self) -> None:
+        """下载收藏的全部 MV，落到「下载」页设置的 MV 输出目录。"""
+        task = self._mv_download_task
+        if task is not None and task.is_running:
+            task.cancel()
+            self.mv_status.setText("正在取消下载…")
+            return
+        if not self._mv_items:
+            self.mv_status.setText("还没有收藏的 MV。")
+            return
+        raw = str(self.cfg.get("download.mv_output", "") or "").strip()
+        directory = Path(raw).expanduser() if raw else default_video_dir()
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.mv_status.setText(f"无法创建 MV 下载目录：{exc}")
+            return
+        items = list(self._mv_items)
+        client = self.window.client
+        self.mv_download_btn.setEnabled(False)
+        self.mv_status.setText(f"准备下载 {len(items)} 支 MV…")
+        task = BackgroundTask(
+            lambda: download_all(
+                client, items, directory,
+                progress=task.progress.emit,
+                cancelled=task.cancel_event.is_set,
+            ),
+            parent=self,
+        )
+        self._mv_download_task = task
+
+        def done(result) -> None:
+            downloaded, skipped = result
+            self.mv_download_btn.setEnabled(True)
+            parts = [f"已下载 {downloaded} 支"]
+            if skipped:
+                parts.append(f"跳过 {skipped} 支已存在")
+            self.mv_status.setText("，".join(parts) + f"，目录：{directory}")
+
+        def failed(message: str) -> None:
+            cancelled = task is not None and task.cancel_event.is_set()
+            self.mv_download_btn.setEnabled(True)
+            self.mv_status.setText(
+                "已取消下载" if cancelled else f"下载失败：{message}")
+
+        task.progress.connect(self.mv_status.setText)
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
 
     # ---------------------------------------------------------------- 加载
 
     def on_show(self) -> None:
         self._ever_shown = True
         self._ensure_loaded()
+        self._reload_mv()
 
     def _ensure_loaded(self) -> None:
         if not self.is_logged_in():

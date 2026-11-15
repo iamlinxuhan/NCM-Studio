@@ -29,13 +29,11 @@ from PyQt6.QtWidgets import (
 
 from .. import covers, images, lyrics, ncmctl
 from ..config import default_music_dir, default_video_dir
-from ..library import favorites
 from ..download_manager import (
     STATUS_QUEUED,
     STATUS_RUNNING,
     DownloadManager,
 )
-from ..mvdownload import download_all
 from ..resolver import PLAYLIST_URL, FeeTagger, Plan, Resolver, Song
 from ..widgets.card import Card, accent_button, ghost_button
 from ..widgets.console import ConsoleView, classify
@@ -158,13 +156,13 @@ class DownloadPage(BasePage):
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
 
-        self.mv_button = ghost_button("下载收藏的 MV", compact=True)
-        self.mv_button.clicked.connect(self._download_favorites)
-        card.add(self.mv_button)
-        self.mv_status = QLabel("")
-        self.mv_status.setObjectName("Hint")
-        self.mv_status.setWordWrap(True)
-        card.add(self.mv_status)
+        hint2 = QLabel(
+            "收藏的 MV 请在「我的喜欢 → MV」里一键下载；目录仍由下面的"
+            "「MV 输出目录」决定。"
+        )
+        hint2.setObjectName("Hint")
+        hint2.setWordWrap(True)
+        card.add(hint2)
 
         card.add(hint)
         self.content.addWidget(card)
@@ -634,73 +632,6 @@ class DownloadPage(BasePage):
             return plan
 
         self._start_task(work, "正在读取「我喜欢的音乐」…", MODE_LIKED)
-
-    def _download_favorites(self) -> None:
-        """一键下载「收藏的 MV」，落到「MV 输出目录」。
-
-        收藏模式跟随设置：本地模式读本地库（不需要登录），官方模式读账号。
-        """
-        mode = str(self.cfg.get("mv.favorite_mode", "local") or "local")
-        if mode == "official" and not self.require_login("下载收藏的 MV"):
-            return
-        task = self._mv_download_task
-        if task is not None and task.is_running:
-            task.cancel()
-            self.mv_status.setText("正在取消下载…")
-            return
-        self.save_config()
-        raw = str(self.cfg.get("download.mv_output", "") or "").strip()
-        directory = (Path(raw).expanduser() if raw
-                     else default_video_dir())
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            self.mv_status.setText(f"无法创建 MV 下载目录：{exc}")
-            return
-        client = self.window.client
-        self.mv_button.setEnabled(False)
-        self.mv_status.setText("正在读取收藏的 MV…")
-        task = BackgroundTask(lambda: self._run_mv_download(client, directory, task),
-                              parent=self)
-        self._mv_download_task = task
-
-        def done(result) -> None:
-            downloaded, skipped = result
-            self.mv_button.setEnabled(True)
-            if downloaded or skipped:
-                parts = [f"已下载 {downloaded} 支"]
-                if skipped:
-                    parts.append(f"跳过 {skipped} 支已存在")
-                self.mv_status.setText(
-                    "，".join(parts) + f"，目录：{directory}")
-                self.toast(f"MV 下载完成：新增 {downloaded} 支")
-            else:
-                self.mv_status.setText("还没有收藏的 MV。")
-
-        def failed(message: str) -> None:
-            cancelled = task is not None and task.cancel_event.is_set()
-            self.mv_button.setEnabled(True)
-            self.mv_status.setText(
-                "已取消下载" if cancelled else f"MV 下载失败：{message}")
-
-        task.progress.connect(self.mv_status.setText)
-        task.done.connect(done)
-        task.failed.connect(failed)
-        task.start()
-
-    def _run_mv_download(self, client, directory: Path, task) -> tuple[int, int]:
-        mode = str(self.cfg.get("mv.favorite_mode", "local") or "local")
-        if mode == "official":
-            mvs = client.mv_sublist(200)
-        else:
-            mvs = favorites(self.window.library, 500)
-        if not mvs:
-            return 0, 0
-        return download_all(
-            client, mvs, directory,
-            progress=task.progress.emit if task is not None else None,
-            cancelled=task.cancel_event.is_set if task is not None else None,
-        )
 
     def _execute_plan(self, plan: Plan, raw_targets: list[str] | None = None) -> None:
         """按计划开跑。

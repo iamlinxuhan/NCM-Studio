@@ -83,7 +83,7 @@ NAV_ITEMS = (
     ("mv", "▷", "MV", MvPage),
     ("roam", "∞", "漫游", RoamPage),
     ("following", "◍", "关注", FollowingPage),
-    ("liked", "♡", "我喜欢的音乐", LikedPage),
+    ("liked", "♡", "我的喜欢", LikedPage),
     ("favorites", "★", "收藏", FavoritesPage),
     ("local", "♪", "本地曲库", LocalPage),
     ("local_mv", "▣", "本地 MV", LocalMvPage),
