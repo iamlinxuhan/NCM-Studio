@@ -39,18 +39,14 @@ from PyQt6.QtWidgets import (
 from ..api.transport import USER_AGENT
 from ..config import config_dir
 from ..library import record_mv_play, update_mv_play
+from ..mvstream import HttpRangeDevice
 from ..playback import STATE_LOADING, STATE_PLAYING
 from ..widgets.card import ghost_button
 from ..workers import BackgroundTask
 from .base import BasePage
 
-#: 一次播放里最多重新取几次地址。每次断流都从当前位置续上，不是从头再来。
-RELOAD_MAX = 3
-#: 卡住多久算「流断了」。首次加载慢也会走这条路，所以别设太短。
-STALL_MS = 12000
-#: 连续播放这么久后清零重连计数：断流重连成功后，用户又看了很久，
-#: 应该重新拥有完整的重试次数。
-HEALTHY_MS = 30000
+#: 卡住多久算「流断了」。HttpRangeDevice 自己会重试，这里只兜底更糟的情况。
+STALL_MS = 25000
 
 _BAD_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
@@ -193,10 +189,9 @@ class MvPlayerPage(BasePage):
         self.mv = None
         self._url = ""
         self._seeking = False
-        #: 连续重连次数；播放健康一段时间后清零
-        self._attempts = 0
-        self._recovering = False
-        #: 断流重连时要跳回的位置；-1 表示没有待恢复的位置
+        #: 当前把网络数据喂给播放器的设备；本地缓存播放时为 None
+        self._device: HttpRangeDevice | None = None
+        #: 切换播放源时要跳回的位置；-1 表示没有待恢复的位置
         self._resume_position = -1
         #: 本次观看在 mv_events 里的行 ID，0 表示还没写
         self._event_id = 0
@@ -328,11 +323,6 @@ class MvPlayerPage(BasePage):
         self._stall_timer.setInterval(STALL_MS)
         self._stall_timer.timeout.connect(self._on_stalled)
 
-        self._healthy_timer = QTimer(self)
-        self._healthy_timer.setSingleShot(True)
-        self._healthy_timer.setInterval(HEALTHY_MS)
-        self._healthy_timer.timeout.connect(self._reset_attempts)
-
         self._history_timer = QTimer(self)
         self._history_timer.setSingleShot(True)
         self._history_timer.setInterval(5000)
@@ -348,10 +338,9 @@ class MvPlayerPage(BasePage):
     def load(self, mv, url: str) -> None:
         # 上一支 MV 如果没经过 stop() 就被替换，先把观看记录补完整
         self._flush_history()
+        self._close_device()
         self.mv = mv
         self._url = str(url or "")
-        self._attempts = 0
-        self._recovering = False
         self._resume_position = -1
         self._event_id = 0
         self._history_checks = 0
@@ -381,9 +370,38 @@ class MvPlayerPage(BasePage):
         if cache.is_file() and cache.stat().st_size > 0:
             self._play_local(cache, 0)
         else:
-            self.media.setSource(QUrl(self._url))
-            self.media.play()
+            self._start_stream()
         self._history_timer.start()
+
+    def _start_stream(self) -> None:
+        """用 :class:`HttpRangeDevice` 接管网络，而不是让播放器直接拉流。
+
+        播放器拿到的是一个「本地设备」，请求由我们发出：带 Referer、按
+        Range 取块、断了自己换地址续上。
+        """
+        mv = self.mv
+        client = self.window.client
+
+        def provider() -> str:
+            url, _fee = client.mv_url(mv.id)
+            return url
+
+        device = HttpRangeDevice(provider, self)
+        self._device = device
+        # sourceUrl 只是给后端识别格式用的，真实数据全来自 device
+        self.media.setSourceDevice(device, QUrl("https://music.163.com/mv.mp4"))
+        self.media.play()
+
+    def _close_device(self) -> None:
+        device = self._device
+        self._device = None
+        if device is None:
+            return
+        try:
+            device.close()
+        except Exception:  # noqa: BLE001 - 关闭失败不影响后续
+            pass
+        device.deleteLater()
 
     def stop(self) -> None:
         # 离开页面时如果还停在全屏，先把全屏窗收掉，否则会盖在整个应用上面
@@ -393,7 +411,6 @@ class MvPlayerPage(BasePage):
         self._flush_history()
         self._history_timer.stop()
         self._stall_timer.stop()
-        self._healthy_timer.stop()
         if self._download is not None and self._download.is_running:
             self._download.cancel()
         if self._cache_task is not None and self._cache_task.is_running:
@@ -402,6 +419,7 @@ class MvPlayerPage(BasePage):
             self._cache_task = None
         self.media.stop()
         self.media.setSource(QUrl())
+        self._close_device()
         self._url = ""
         self.position.setRange(0, 0)
         self.time_label.setText("0:00 / 0:00")
@@ -670,14 +688,8 @@ class MvPlayerPage(BasePage):
             if self._transient_status:
                 self.status.setText("")
                 self._transient_status = False
-            if not self._healthy_timer.isActive():
-                self._healthy_timer.start()
-        elif state == QMediaPlayer.PlaybackState.PausedState:
-            self.play_button.setText("播放")
-            self._healthy_timer.stop()
         else:
             self.play_button.setText("播放")
-            self._healthy_timer.stop()
 
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -710,58 +722,25 @@ class MvPlayerPage(BasePage):
     def _on_stalled(self) -> None:
         self._recover("视频流卡住")
 
-    def _reset_attempts(self) -> None:
-        self._attempts = 0
-
     def _recover(self, reason: str) -> None:
-        """断流/卡住时重新取播放地址，从当前位置续播。
+        """播放器报错或长时间卡住时的最后兜底。
 
-        直接拿旧地址重设基本没用：网易云的 CDN 连接是被服务端掐掉的，旧地址
-        要么已过期、要么仍然被限制。重新请求 ``mv/url`` 才能拿到新连接。
+        正常情况下 :class:`HttpRangeDevice` 自己在内部重试、换地址续传，
+        播放器根本看不到断流。走到这里说明设备也救不回来，那就把整支视频
+        缓存到本地再播 —— 本地文件不会再有网络断流问题。
         """
-        if not self._url or self.mv is None or self._recovering:
+        if self.mv is None:
             return
         if self._local:
             self.status.setText(f"播放失败：{reason or '视频文件不可用'}")
             return
-        if self._attempts >= RELOAD_MAX:
-            self._fall_back_to_cache(reason)
-            return
-        self._attempts += 1
-        self._recovering = True
         self._stall_timer.stop()
-        self._resume_position = max(0, self.media.position())
-        self.status.setText(
-            f"{reason}，正在重新连接（{self._attempts}/{RELOAD_MAX}）…")
-        self._transient_status = True
-        client = self.window.client
-        mv_id = self.mv.id
-        task = BackgroundTask(lambda: client.mv_url(mv_id), parent=self)
-
-        def done(result) -> None:
-            url, _fee = result
-            self._url = str(url)
-            self._recovering = False
-            # 同一个地址直接重设可能被忽略，先清空再设
-            self.media.setSource(QUrl())
-            self.media.setSource(QUrl(self._url))
-            self.media.play()
-
-        def failed(message: str) -> None:
-            self._recovering = False
-            self._transient_status = False
-            self.status.setText(f"播放失败：{message}")
-
-        task.done.connect(done)
-        task.failed.connect(failed)
-        task.start()
+        self._fall_back_to_cache(reason)
 
     def _fall_back_to_cache(self, reason: str) -> None:
-        """网络播放反复失败时，把整支 MV 缓存到本地再续播。
+        """网络播放救不回来时，把整支 MV 缓存到本地再续播。
 
-        QtMultimedia 的 FFmpeg 网络栈对「服务端提前断开」没有恢复能力，
-        重连几次还断就说明这条流在当前网络下走不通。视频本身不大，完整拉
-        下来后改本地文件播放，就彻底绕开了这个问题。
+        视频本身不大，完整拉下来后改本地文件播放，就彻底绕开了网络栈。
         """
         if self.mv is None or self._cache_failed:
             return
@@ -815,10 +794,9 @@ class MvPlayerPage(BasePage):
     def _play_local(self, path: Path, position: int) -> None:
         """改播本地文件。``position`` 是断点，等媒体加载好后会跳过去。"""
         self._local = True
-        self._attempts = 0
-        self._recovering = False
         self._resume_position = max(0, int(position))
         self.media.setSource(QUrl())
+        self._close_device()
         self.media.setSource(QUrl.fromLocalFile(str(path)))
         self.media.play()
         self.status.setText("")

@@ -117,6 +117,8 @@ jobs:
           python -m ncmgui.streaming.subsonic
           python -m ncmgui.streaming.jellyfin
           python -m ncmgui.streaming.registry
+          # MV 数据流：Range 分块、随机访问、断流续传
+          python -m ncmgui.mvstream
           # 本地曲库：schema/迁移、播放历史、统计、查询、扫描、本地歌单
           python -m ncmgui.library.db
           python -m ncmgui.library.history

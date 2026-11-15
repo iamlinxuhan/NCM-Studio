@@ -54,6 +54,7 @@ class StatsPage(BasePage):
             ("active", "活跃天数"),
             ("streak", "连续听歌"),
             ("longest", "最长连续"),
+            ("mv", "MV 观看"),
         ):
             card = QFrame()
             card.setObjectName("Card")
@@ -215,6 +216,12 @@ class StatsPage(BasePage):
         self._stats["active"].setText(f"{data.active_days} 天")
         self._stats["streak"].setText(f"{data.current_streak} 天")
         self._stats["longest"].setText(f"{data.longest_streak} 天")
+        if data.mv_plays:
+            self._stats["mv"].setText(f"{data.mv_plays} 支")
+            self._stats["mv"].setToolTip(
+                f"累计观看 {data.mv_watched_text}")
+        else:
+            self._stats["mv"].setText("—")
 
         if data.total_plays:
             peak_end = (data.peak_hour + 1) % 24

@@ -60,10 +60,17 @@ class StatsData:
     active_days: int = 0
     current_streak: int = 0
     longest_streak: int = 0
+    #: 同一窗口内的 MV 观看次数与累计观看时长
+    mv_plays: int = 0
+    mv_watched_ms: int = 0
 
     @property
     def total_listened_text(self) -> str:
         return format_duration(self.total_listened_ms)
+
+    @property
+    def mv_watched_text(self) -> str:
+        return format_duration(self.mv_watched_ms)
 
     @property
     def peak_hour(self) -> int:
@@ -171,6 +178,11 @@ def collect(
             artists.add(artist, "", listened_ms)
         qualities[quality] = qualities.get(quality, 0) + 1
 
+    mv_rows = db.query(
+        "SELECT watched_ms FROM mv_events WHERE started_at >= ?", (start_ts,)
+    )
+    mv_watched_ms = sum(max(0, int(row["watched_ms"] or 0)) for row in mv_rows)
+
     day_entries = tuple(
         DayEntry(
             day=start_day + timedelta(days=offset),
@@ -216,6 +228,8 @@ def collect(
         active_days=len(active),
         current_streak=current,
         longest_streak=longest,
+        mv_plays=len(mv_rows),
+        mv_watched_ms=mv_watched_ms,
     )
 
 
@@ -266,6 +280,18 @@ def _selftest() -> int:
         # 窗口外
         insert(db, "古老", "旧人", "旧专辑", "未知",
                at(today - timedelta(days=200), 10), 100_000)
+        # MV 观看：两条窗口内、一条窗口外
+        for started_at, watched in (
+            (at(today, 10), 120_000),
+            (at(today - timedelta(days=1), 22), 60_000),
+            (at(today - timedelta(days=200), 8), 30_000),
+        ):
+            db.execute(
+                "INSERT INTO mv_events(mv_id, name, artist, cover_url,"
+                " started_at, watched_ms, duration_ms, completed)"
+                " VALUES(1, '测试 MV', '歌手', '', ?, ?, 0, 0)",
+                (started_at, watched),
+            )
 
         data = collect(db, 90, now=now)
         check("窗口天数", len(data.days), 90)
@@ -292,6 +318,8 @@ def _selftest() -> int:
         check("音质排序", data.qualities[0].label, "320 kbps")
         check("音质计数", data.qualities[0].count, 2)
         check("时长文本", data.songs[0].duration_text, "6 分 20 秒")
+        check("MV 观看次数", data.mv_plays, 2)
+        check("MV 观看时长", data.mv_watched_ms, 180_000)
         # 老记录/其他入口可能存档位键；展示层要翻成人话，不能再冒出一类音质
         check("档位键翻成人话", level_label("lossless"), "无损 FLAC")
 
