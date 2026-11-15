@@ -151,17 +151,12 @@ class DownloadPage(BasePage):
     def _build_quick(self) -> None:
         card = Card("快捷下载", "不用手抄歌单 ID，直接从账号里取。")
 
-        self.liked_button = accent_button("下载「我喜欢的音乐」全部歌曲")
-        self.liked_button.clicked.connect(self._download_liked)
-
         hint = QLabel(
-            "先读取红心歌单的曲目，再按下面的「查重」设置决定跳过哪些，"
-            "最后只把缺的交给 ncmctl。"
+            "「下载我喜欢的音乐」已经挪到红心歌曲页，下载完成的曲目会在"
+            "列表里逐首打勾。"
         )
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
-
-        card.add(self.liked_button)
 
         self.mv_button = ghost_button("下载收藏的 MV", compact=True)
         self.mv_button.clicked.connect(self._download_favorites)
@@ -423,6 +418,11 @@ class DownloadPage(BasePage):
         )
         self._invalidate_plan()
 
+    def is_downloading(self) -> bool:
+        """是否有正在进行的下载（含解析与后处理）。红心页用它停轮询。"""
+        resolving = self._task is not None and self._task.is_running
+        return bool(self._active_record_id) or resolving
+
     def _invalidate_plan(self) -> None:
         """输入或输出目录变了，上次的查重结论就不算数了。"""
         self._plan = None
@@ -432,7 +432,6 @@ class DownloadPage(BasePage):
         busy = bool(self._task is not None and self._task.is_running)
         self.start_button.setEnabled(not busy)
         self.preview_button.setEnabled(not busy)
-        self.liked_button.setEnabled(not busy and self.is_logged_in())
         self.setCursor(
             Qt.CursorShape.BusyCursor if busy else Qt.CursorShape.ArrowCursor
         )

@@ -275,6 +275,7 @@ class LikedPage(BasePage):
         self._load_generation = 0
         self._load_task: BackgroundTask | None = None
         self._ever_shown = False
+        self._download_watch: QTimer | None = None
 
         self.playback = self.window.playback
 
@@ -384,8 +385,14 @@ class LikedPage(BasePage):
         self.local_dir_btn.setToolTip("把下载目录里的音频全部加入播放队列。")
         self.local_dir_btn.clicked.connect(self._play_download_dir)
 
+        self.download_btn = ghost_button("下载全部", compact=True)
+        self.download_btn.setToolTip(
+            "按「下载」页的设置下载缺少的红心歌曲；下载完成一首就标一个 ✓。")
+        self.download_btn.clicked.connect(self._download_all)
+
         status_row.addWidget(self.status_label, 1)
         status_row.addWidget(self.count_label)
+        status_row.addWidget(self.download_btn)
         status_row.addWidget(self.local_btn)
         status_row.addWidget(self.local_dir_btn)
         self.content.addLayout(status_row)
@@ -490,6 +497,36 @@ class LikedPage(BasePage):
         self.refresh_btn.setEnabled(True)
         self.status_label.setText(f"读取失败：{message}")
         self.toast(f"读取红心歌单失败：{message}")
+
+    def _download_all(self) -> None:
+        """在红心页直接下载缺少的歌曲，复用「下载」页的解析与查重。"""
+        if not self._songs:
+            self.warn("红心歌单还没有加载完成。")
+            return
+        page = self.window.pages.get("download")
+        if page is None:
+            return
+        if not self.is_logged_in():
+            self.require_login("下载红心歌曲")
+            return
+        page._download_liked()
+        self._start_download_watch()
+
+    def _start_download_watch(self) -> None:
+        """下载期间定时重扫目录：每完成一首就多一个 ✓。"""
+        if self._download_watch is None:
+            self._download_watch = QTimer(self)
+            self._download_watch.setInterval(1500)
+            self._download_watch.timeout.connect(self._poll_downloads)
+        self._download_watch.start()
+        self._poll_downloads()
+
+    def _poll_downloads(self) -> None:
+        self._refresh_downloaded()
+        page = self.window.pages.get("download")
+        if page is None or not page.is_downloading():
+            if self._download_watch is not None:
+                self._download_watch.stop()
 
     def _refresh_downloaded(self) -> None:
         """重新扫一遍下载目录，不动列表本身。"""
