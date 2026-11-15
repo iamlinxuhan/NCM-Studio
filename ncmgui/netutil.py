@@ -19,63 +19,12 @@ class ProxyError(ValueError):
     """代理串不合法。消息直接展示给用户。"""
 
 
-def _looks_like_nonstandard_ip(name: str) -> bool:
-    """``134744072``、``0x08080808``、``0177.0.0.1`` 这类伪 IP 表示。
-
-    网络栈会把它们解析成真实的 IPv4（例如 134744072 → 8.8.8.8），但
-    ``ipaddress`` 不认；不显式拒绝的话会被当成「无点号的内网主机名」。
-    """
-    parts = [part for part in str(name or "").split(".") if part]
-    if not parts:
-        return False
-    return all(part.startswith("0x") or part.isdigit() for part in parts)
-
-
-def _is_local_or_private(host: str) -> bool:
-    """本机、私有网段、链路本地。
-
-    主机名必须解析后再判断：单标签名（``nas``）也可能被 DNS 解析到公网。
-    解析失败时按不安全处理 —— 让用户改用 HTTPS 或直接填内网 IP。
-    """
-    import ipaddress
-    import socket
-
-    name = str(host or "").strip().lower()
-    if not name:
-        return False
-    if name == "localhost" or name.endswith(".local"):
-        return True
-    try:
-        addr = ipaddress.ip_address(name)
-    except ValueError:
-        # 不是标准 IP 字面量：伪 IP 表示直接拒绝，其余按主机名解析
-        if _looks_like_nonstandard_ip(name):
-            return False
-    else:
-        return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
-
-    try:
-        infos = socket.getaddrinfo(name, None)
-    except OSError:
-        return False
-    seen = False
-    for info in infos:
-        raw = str(info[4][0]).split("%", 1)[0]
-        try:
-            addr = ipaddress.ip_address(raw)
-        except ValueError:
-            return False
-        if not (addr.is_loopback or addr.is_private or addr.is_link_local):
-            return False
-        seen = True
-    return seen
-
-
 def validate_server_url(url: str) -> str:
-    """流媒体服务器地址校验：HTTPS 任意，HTTP 仅限本机/内网。
+    """流媒体服务器地址校验：HTTPS 任意，HTTP 仅限本机/内网 IP。
 
     Jellyfin/Emby 的 Token 放在请求头里，走 HTTP 时同网段的攻击者可以直接
-    嗅探。公网地址一律要求 HTTPS；内网明文由界面单独提示。
+    嗅探。公网地址一律要求 HTTPS；为避免 DNS rebinding，HTTP 不接受主机名，
+    只接受明确的回环、私有或链路本地 IP 字面量。
     """
     text = str(url or "").strip().rstrip("/")
     parts = urlsplit(text)
@@ -87,7 +36,19 @@ def validate_server_url(url: str) -> str:
         raise ValueError("服务器地址缺少主机名")
     if scheme == "https":
         return text
-    if _is_local_or_private(host):
+    # localhost 是 RFC 6761 保留名，固定解析到回环，不存在 DNS rebinding
+    if host.lower() == "localhost":
+        return text
+    import ipaddress
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError(
+            "HTTP 服务器只接受本机或私网 IP 地址（如 127.0.0.1、192.168.*）；"
+            "主机名请改用 HTTPS。"
+        ) from exc
+    if address.is_loopback or address.is_private or address.is_link_local:
         return text
     raise ValueError(
         "公网地址请使用 HTTPS：HTTP 会明文传输 Token 与密码。")
@@ -172,25 +133,14 @@ def _selftest() -> int:
           "http://127.0.0.1:8096")
     check("HTTP 私网", validate_server_url("http://192.168.1.2:4533"),
           "http://192.168.1.2:4533")
-    # 主机名按 DNS 结果判断：解析到私网才允许
-    import socket
-    from unittest.mock import patch
-
-    def addresses(ip: str):
-        def fake(host, port, *args, **kwargs):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
-        return fake
-
-    with patch("socket.getaddrinfo", addresses("192.168.1.9")):
-        check("主机名解析到私网", validate_server_url("http://nas:8096"),
-              "http://nas:8096")
-    with patch("socket.getaddrinfo", addresses("8.8.8.8")):
-        try:
-            validate_server_url("http://nas.example.com")
-        except ValueError:
-            check("主机名解析到公网被拒绝", True, True)
-        else:
-            check("主机名解析到公网被拒绝", False, True)
+    check("HTTP localhost", validate_server_url("http://localhost:8096"),
+          "http://localhost:8096")
+    try:
+        validate_server_url("http://nas:8096")
+    except ValueError:
+        check("HTTP 主机名拒绝", True, True)
+    else:
+        check("HTTP 主机名拒绝", False, True)
     for bad in ("http://media.example.com", "http://8.8.8.8",
                 "http://134744072", "http://0x08080808", "http://0177.0.0.1",
                 "ftp://x/a", "", "http:///a"):

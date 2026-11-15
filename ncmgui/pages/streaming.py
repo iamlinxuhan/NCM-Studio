@@ -547,7 +547,7 @@ class StreamingPage(BasePage):
             names = "、".join(item["name"] for item in insecure)
             self.status.setText(
                 f"{names} 使用公网 HTTP，凭据会明文传输，已禁用；"
-                "请编辑为 https:// 或内网地址。")
+                "请编辑为 https:// 或内网 IP 地址。")
             return
         # 建页阶段不联网：切到本页时 on_show 会读一次，用户也可以点「刷新」
         self.status.setText("已选择服务器。切换到本页或点「刷新」开始读取。")

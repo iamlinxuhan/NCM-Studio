@@ -231,7 +231,7 @@ class StreamingRegistry(QObject):
         if server.get("insecure"):
             raise StreamError(
                 "这个服务器使用公网 HTTP，凭据会在网络中明文传输，已禁用。"
-                "请编辑为 https:// 或内网地址。")
+                "请编辑为 https:// 或内网 IP 地址。")
         factory = KINDS.get(server["kind"])
         if factory is None:
             raise StreamError(f"不支持的服务器类型：{server['kind']}")
