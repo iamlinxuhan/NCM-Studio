@@ -15,8 +15,17 @@ import json
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QEventLoop, QPoint, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEvent,
+    QEventLoop,
+    QPoint,
+    QRect,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtWidgets import QGraphicsDropShadowEffect
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -303,9 +312,22 @@ class SetupDialog(QDialog):
 class _TourBubble(QFrame):
     def __init__(self, parent) -> None:
         super().__init__(parent)
-        self.setObjectName("Card")
+        self.setObjectName("TourBubble")
+        # QFrame 默认不绘制 QSS 背景，必须显式打开，否则气泡会“透明”
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # 顶层透明遮罩窗口里的子控件拿不到全局 Card 背景，这里显式给一套
+        self.setStyleSheet(
+            f"QFrame#TourBubble {{ background: {theme.PANEL};"
+            f" border: 1px solid {theme.BORDER}; border-radius: 10px; }}"
+            f"QFrame#TourBubble QLabel#CardTitle {{ color: {theme.TEXT}; }}"
+            f"QFrame#TourBubble QLabel#Hint {{ color: {theme.TEXT_DIM}; }}")
         self.setMinimumWidth(320)
         self.setMaximumWidth(420)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 120))
+        self.setGraphicsEffect(shadow)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(8)
@@ -333,15 +355,16 @@ class TourOverlay(QWidget):
     finished = pyqtSignal()
 
     def __init__(self, window) -> None:
-        super().__init__(None)
+        # 盖在主窗口的中央区域上，而不是另开一个全屏顶层窗口：
+        # Wayland 不允许客户端自己摆顶层窗口，子控件才是 100% 贴合的做法
+        parent = window.centralWidget() or window
+        super().__init__(parent)
         self.window = window
+        self._parent = parent
         self._index = -1
         self._hole: QRect | None = None
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAutoFillBackground(False)
         self.bubble = _TourBubble(self)
         self.bubble.next_btn.clicked.connect(self.next_step)
         self.bubble.skip_btn.clicked.connect(self.finish)
@@ -371,13 +394,18 @@ class TourOverlay(QWidget):
     # ------------------------------------------------------------ 流程
 
     def start(self) -> None:
-        screen = self.window.screen()
-        if screen is not None:
-            self.setGeometry(screen.geometry())
+        self.setGeometry(self._parent.rect())
         self.show()
         self.raise_()
         self.setFocus()
+        self._parent.installEventFilter(self)
         self.next_step()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
+        if obj is self._parent and event.type() == QEvent.Type.Resize:
+            self.setGeometry(self._parent.rect())
+            QTimer.singleShot(0, self._position)
+        return super().eventFilter(obj, event)
 
     def next_step(self) -> None:
         self._index += 1
@@ -401,28 +429,32 @@ class TourOverlay(QWidget):
             # 控件不在屏幕上（窗口太小、页面没切过来）就跳过这一步
             self.next_step()
             return
-        top_left = widget.mapToGlobal(QPoint(0, 0))
-        self._hole = QRect(self.mapFromGlobal(top_left), widget.size())
+        top_left = widget.mapTo(self._parent, QPoint(0, 0))
+        self._hole = QRect(top_left, widget.size())
         self._place_bubble(self._hole)
         self.update()
 
     def _place_bubble(self, hole: QRect) -> None:
-        self.bubble.adjustSize()
+        """优先放在目标右侧，放不下再下方、上方。"""
         size = self.bubble.sizeHint()
         width = min(max(320, size.width()), 420)
+        height = size.height()
         margin = 16
-        x = min(max(margin, hole.center().x() - width // 2),
-                max(margin, self.width() - width - margin))
-        height = self.bubble.sizeHint().height()
-        y = hole.bottom() + margin
-        if y + height > self.height() - margin:
-            y = max(margin, hole.top() - height - margin)
+        x = hole.right() + margin
+        y = max(margin, min(hole.top(), self.height() - height - margin))
+        if x + width > self.width() - margin:
+            x = min(max(margin, hole.center().x() - width // 2),
+                    max(margin, self.width() - width - margin))
+            y = hole.bottom() + margin
+            if y + height > self.height() - margin:
+                y = max(margin, hole.top() - height - margin)
         self.bubble.setGeometry(x, y, width, height)
         self.bubble.raise_()
 
     def finish(self) -> None:
         if not self.isVisible():
             return
+        self._parent.removeEventFilter(self)
         self.hide()
         self.finished.emit()
 
@@ -437,17 +469,15 @@ class TourOverlay(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 160))
+        # 轻遮罩：真实界面仍然看得见，只是压暗一档
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
         if self._hole is None:
             return
         hole = self._hole.adjusted(-6, -6, 6, 6)
-        painter.setCompositionMode(
-            QPainter.CompositionMode.CompositionMode_Clear)
+        # 高亮区再叠一层浅色，视觉上比周围亮，配合描边指目标
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(Qt.GlobalColor.transparent)
+        painter.setBrush(QColor(255, 255, 255, 26))
         painter.drawRoundedRect(hole, 10, 10)
-        painter.setCompositionMode(
-            QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setPen(QPen(QColor(theme.CYAN), 2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(hole, 10, 10)
