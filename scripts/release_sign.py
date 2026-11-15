@@ -186,7 +186,23 @@ def cmd_sign(args: argparse.Namespace) -> int:
         if not sums_path.is_file():
             _fail(f"下载后没有找到 {sums_path}")
 
-        data = sums_path.read_bytes()
+        # 把 tag 写进被签名的文件：签名只证明内容是官方某个版本，不证明是
+        # 哪个版本；绑定后客户端能拒绝「新版本号 + 旧内容」的静默降级。
+        raw = sums_path.read_bytes()
+        tag_line = f"{updater.TAG_LINE_PREFIX} {tag}\n".encode("utf-8")
+        prefix = updater.TAG_LINE_PREFIX.encode("utf-8")
+        data = tag_line + b"".join(
+            line for line in raw.splitlines(keepends=True)
+            if not line.startswith(prefix)
+        )
+        sums_path.write_bytes(data)
+        print(f"重新上传带版本绑定的 {updater.SUMS_ASSET} …")
+        _gh([
+            "release", "upload", tag, str(sums_path),
+            "--repo", updater.REPO,
+            "--clobber",
+        ])
+
         signature = key.sign(data)
         sig_path = work / updater.SIG_ASSET
         sig_path.write_bytes(signature)

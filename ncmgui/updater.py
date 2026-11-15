@@ -49,6 +49,9 @@ API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 GITHUB_DOWNLOAD = f"https://github.com/{REPO}/releases/download"
 SUMS_ASSET = "SHA256SUMS"
+#: 校验文件里的版本绑定行。签名只证明「内容是官方某个版本」，不证明是哪个
+#: 版本；把 tag 写进被签名的文件，客户端才能拒绝「新版本号 + 旧内容」的降级。
+TAG_LINE_PREFIX = "# ncm-studio-release-tag:"
 #: ``SHA256SUMS`` 的 Ed25519 分离签名（原始 64 字节）。
 SIG_ASSET = "SHA256SUMS.sig"
 
@@ -748,6 +751,16 @@ def verify_signature(
         ) from exc
 
 
+def parse_release_tag(payload: bytes) -> str:
+    """从校验文件头部读出签名时绑定的版本号；没有则返回空串。"""
+    for line in payload.decode("utf-8", "replace").splitlines():
+        if line.startswith(TAG_LINE_PREFIX):
+            return line[len(TAG_LINE_PREFIX):].strip()
+        if line and not line.startswith("#"):
+            break
+    return ""
+
+
 def fetch_checksums(release: Release, proxy: str = "", timeout: float = 10.0,
                     source: str = "auto") -> dict[str, str]:
     """下载、验签并解析这个 Release 的 ``SHA256SUMS``。
@@ -772,6 +785,18 @@ def fetch_checksums(release: Release, proxy: str = "", timeout: float = 10.0,
     signature = _read_any(asset_urls(release, sig_asset, source), proxy, timeout,
                           "签名文件")
     verify_signature(payload, signature)
+
+    # 签名只证明内容是官方发布的某个版本；不比对 tag 的话，镜像或站点
+    # 可以把「v9.9.9」和旧版本的正式签名文件拼在一起，静默降级
+    bound_tag = parse_release_tag(payload)
+    if not bound_tag:
+        raise UpdateError(
+            f"{SUMS_ASSET} 没有绑定版本号，无法确认版本来源，已拒绝自动安装。"
+            "请到 Release 页面手动下载。")
+    if bound_tag != release.tag:
+        raise UpdateError(
+            f"校验文件绑定的是 {bound_tag}，与 Release 的 {release.tag} 不一致，"
+            "已拒绝自动安装。请到 Release 页面手动下载。")
 
     try:
         text = payload.decode("utf-8")
@@ -1066,6 +1091,14 @@ def _selftest() -> int:
     def check(name: str, got: object, want: object) -> None:
         if got != want:
             failures.append(f"{name}：期望 {want!r}，实际 {got!r}")
+
+    # ---- 版本绑定
+    check("绑定 tag 解析",
+          parse_release_tag(
+              b"# ncm-studio-release-tag: v1.2.3\n"
+              b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  a\n"),
+          "v1.2.3")
+    check("无 tag 行", parse_release_tag(b"abc  x\n"), "")
 
     # ---- 版本
     check("v 前缀", parse_version("v1.3.0"), (1, 3, 0))

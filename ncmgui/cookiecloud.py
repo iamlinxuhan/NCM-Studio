@@ -29,6 +29,10 @@ _KEY_LEN = 32
 _IV_LEN = 16
 _SALTED = b"Salted__"
 
+#: CookieCloud 响应上限。正常响应只有几百 KB；异常服务返回超大内容
+#: 不该把内存吃光。
+MAX_RESPONSE = 4 * 1024 * 1024
+
 
 class CookieCloudError(Exception):
     """CookieCloud 拉取或解密失败；消息可以直接显示给用户。"""
@@ -105,7 +109,9 @@ def fetch_payload(
         method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
+            raw = response.read(MAX_RESPONSE + 1)
+            if len(raw) > MAX_RESPONSE:
+                raise CookieCloudError("CookieCloud 返回的内容过大，已中止")
     except Exception as exc:  # noqa: BLE001 - 网络层细节对用户没意义
         reason = getattr(exc, "reason", exc)
         raise CookieCloudError(f"无法连接 CookieCloud：{reason}") from exc

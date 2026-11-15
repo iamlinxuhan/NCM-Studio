@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from .api.transport import USER_AGENT
+from .netutil import media_url
 
 REFERER = "https://music.163.com/"
 
@@ -89,7 +90,7 @@ def fetch_mv_file(
     """
     if skip_existing and target.is_file() and target.stat().st_size > 0:
         return str(target)
-    url, _fee = client.mv_url(mv.id)
+    url = media_url(client.mv_url(mv.id)[0])
     part = target.with_name(target.name + ".part")
     attempt = 0
     if progress is not None:
@@ -164,7 +165,7 @@ def fetch_mv_file(
                 raise
             time.sleep(1.5 * attempt)
             # 旧地址可能已随断流失效，重新取一次再续传
-            url, _fee = client.mv_url(mv.id)
+            url = media_url(client.mv_url(mv.id)[0])
 
 
 def download_all(

@@ -620,7 +620,11 @@ class LocalPage(BasePage):
         的「歌手 - 歌名」，和红心歌单里的 :attr:`Song.base` 同一套规则，
         因此能一一对上。
         """
-        order = self.db.liked_order(self.window.client.uid)
+        try:
+            order = self.db.liked_order(self.window.client.uid)
+        except Exception:  # noqa: BLE001 - 槽函数里异常会让进程退出
+            # 排序缓存读不到只是排序退化，不能让下拉框的操作杀掉进程
+            order = None
         if order is None:
             self._liked_rank = None
             self.status_label.setText(

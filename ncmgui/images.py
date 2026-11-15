@@ -88,6 +88,10 @@ def _opener(proxy: str = ""):
     return urllib.request.build_opener()
 
 
+#: 单张封面的上限。正常封面 < 1 MB；异常图片服务返回超大内容时中止。
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
+
+
 def fetch(
     url: str,
     proxy: str = "",
@@ -101,6 +105,9 @@ def fetch(
     """
     if not url:
         raise RuntimeError("没有封面地址")
+    from .netutil import media_url
+
+    url = media_url(url)
     request_headers = {
         "User-Agent": f"ncm-studio/{VERSION}",
         "Referer": "https://music.163.com/",
@@ -113,7 +120,10 @@ def fetch(
         raise RuntimeError(f"代理设置无效：{exc}") from exc
     try:
         with opener.open(request, timeout=timeout) as response:
-            return response.read()
+            data = response.read(MAX_IMAGE_BYTES + 1)
+            if len(data) > MAX_IMAGE_BYTES:
+                raise RuntimeError("封面图片过大，已中止")
+            return data
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"封面下载失败：HTTP {exc.code}") from exc
     except (urllib.error.URLError, OSError) as exc:

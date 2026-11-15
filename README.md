@@ -558,6 +558,13 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
   命令行、进程列表或日志。关闭窗口时会取消拉取任务，已生成的临时文件立即删除。
 - 自动更新的响应体与安装包都有大小上限：API/校验文件 16 MB，安装包以 Release
   声明的大小为准（兜底 2 GB）。签名能防篡改，大小上限防资源耗尽。
+- 媒体地址统一过白名单，只允许 `http` / `https`：`file://` 等本地协议会让被控的
+  接口响应或流媒体服务器把本机文件交给播放器。MV 播放、MV 下载、封面下载与
+  mpv 加载都走同一处校验。
+- 来自接口的文本（评论、昵称、签名、歌名歌手）在 `QLabel` 里按纯文本渲染，
+  不会被当成 HTML 富文本，恶意评论无法伪装成系统提示或 UI 元素。
+- CookieCloud 响应上限 4 MB、单张封面 16 MB；异常服务返回超大内容时中止，
+  不会把内存吃光。
 - 粘贴的 Cookie 会先写入本程序配置目录下的私有临时目录（目录 `0700`、文件 `0600`）再传给 `--file`，避免直接出现在进程参数中，用完即删；异常退出留下的残留会在下次启动时清掉。
 - CookieCloud 同步成功后会记录时间；1 小时内再次点击会先提醒，避免短时间内反复拉取浏览器 Cookie 触发风控。失败不会记录，可以立即重试。
 - 配置目录在 POSIX 上为 `0700`、配置文件为 `0600`，其他用户无法读取其中的路径、代理与账号标识。
@@ -676,7 +683,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.2 packaging\ncm-studio.iss
+iscc /DAppVersion=4.7.3 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
@@ -732,8 +739,10 @@ CI（`.github/workflows/build.yaml`）在推 `main` 时会三平台各打一次�
    .venv/bin/python scripts/release_sign.py sign v2.2.0 --publish
    ```
 
-   脚本会下载 `SHA256SUMS`、用离线私钥生成 `SHA256SUMS.sig`、上传，再用程序
-   内置公钥复核一遍，全部通过才把草稿转为正式 Release。
+   脚本会下载 `SHA256SUMS`，在文件头写入 `# ncm-studio-release-tag: <tag>`
+   并重新上传，再用离线私钥签名、上传 `SHA256SUMS.sig`，最后用程序内置公钥
+   复核。客户端会比对签名文件里的 tag 与 Release 的 tag —— **签名只证明内容是
+   官方发布的某个版本，绑定 tag 才能挡住「新版本号 + 旧内容」的静默降级**。
 
 4. Release 转正会触发 `.github/workflows/winget.yaml`：下载安装版、重新计算
    校验和、生成清单，并向 `microsoft/winget-pkgs` 提交 PR。这个工作流需要仓库

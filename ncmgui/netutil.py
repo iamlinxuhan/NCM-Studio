@@ -19,6 +19,22 @@ class ProxyError(ValueError):
     """代理串不合法。消息直接展示给用户。"""
 
 
+def media_url(url: str) -> str:
+    """确认媒体地址只使用 http/https。
+
+    ``urllib`` 与 mpv 都接受 ``file://`` 等本地协议：如果地址来自被控的
+    接口响应或流媒体服务器，``file://`` 能让播放器读到本机文件。网络来源
+    的媒体一律只允许 http/https。
+    """
+    text = str(url or "").strip()
+    if not text:
+        raise ValueError("媒体地址为空")
+    scheme = urlsplit(text).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"不支持的媒体地址协议：{scheme or '无'}")
+    return text
+
+
 def normalize_proxy(value: str) -> str:
     """返回规范化后的代理串。
 
@@ -65,6 +81,17 @@ def _selftest() -> int:
     def check(name: str, got, want) -> None:
         if got != want:
             failures.append(f"{name}：期望 {want!r}，实际 {got!r}")
+
+    # ---- 媒体地址白名单
+    check("允许 http", media_url("http://x/a.mp4"), "http://x/a.mp4")
+    check("允许 https", media_url("https://x/a"), "https://x/a")
+    for bad in ("file:///etc/passwd", "ftp://x/a", "data:text/plain,x", ""):
+        try:
+            media_url(bad)
+        except ValueError:
+            check(f"拒绝 {bad or '空地址'}", True, True)
+        else:
+            check(f"拒绝 {bad or '空地址'}", False, True)
 
     def rejects(name: str, value: str) -> None:
         try:

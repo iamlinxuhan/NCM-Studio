@@ -23,6 +23,7 @@ from typing import Callable
 from PyQt6.QtCore import QIODevice
 
 from .api.transport import USER_AGENT
+from .netutil import media_url
 
 REFERER = "https://music.163.com/"
 
@@ -109,7 +110,7 @@ class HttpRangeDevice(QIODevice):
 
     def _request(self, start: int, end: int) -> tuple[bytes, int, bool]:
         """取 ``[start, end]``，返回 ``(数据, 文件总长, 是否 206)``。"""
-        url = self._url or self._provider()
+        url = media_url(self._url or self._provider())
         self._url = url
         headers = {
             "User-Agent": USER_AGENT,

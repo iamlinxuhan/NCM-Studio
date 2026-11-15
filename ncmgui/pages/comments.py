@@ -390,10 +390,12 @@ class CommentsPage(BasePage):
         head.setSpacing(8)
         user = QLabel(comment.user or "匿名用户")
         user.setObjectName("CommentUser")
+        user.setTextFormat(Qt.TextFormat.PlainText)
         head.addWidget(user)
         if comment.ip:
             ip = QLabel(comment.ip)
             ip.setObjectName("Hint")
+            ip.setTextFormat(Qt.TextFormat.PlainText)
             head.addWidget(ip)
         head.addStretch(1)
         column.addLayout(head)
@@ -403,6 +405,7 @@ class CommentsPage(BasePage):
             text = f"回复 @{comment.reply_user}：{text}"
         body = QLabel(text)
         body.setObjectName("CommentBody")
+        body.setTextFormat(Qt.TextFormat.PlainText)
         body.setWordWrap(True)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         column.addWidget(body)
@@ -410,6 +413,7 @@ class CommentsPage(BasePage):
         if comment.reply:
             reply = QLabel(f"回复：{comment.reply}")
             reply.setObjectName("Hint")
+            reply.setTextFormat(Qt.TextFormat.PlainText)
             reply.setWordWrap(True)
             column.addWidget(reply)
 

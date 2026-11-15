@@ -302,9 +302,11 @@ class PlayerPage(BasePage):
         center_layout.setSpacing(4)
 
         self.title_label = QLabel("未在播放")
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setObjectName("PlayerTitle")
         self.title_label.setWordWrap(True)
         self.artist_label = QLabel("")
+        self.artist_label.setTextFormat(Qt.TextFormat.PlainText)
         self.artist_label.setObjectName("PlayerArtist")
         # 合作曲的歌手名单可能很长（五六个名字用逗号串起来）。不换行的话，
         # QLabel 的最小宽度会按整行文字算，把中间的歌词列撑到几百像素，

@@ -1202,6 +1202,16 @@ class PlaybackController(QObject):
         self._load(url, source=source, headers=headers)
 
     def _load(self, target: str, source=None, headers=()) -> None:
+        if "://" in target:
+            # 网络地址只允许 http/https：file:// 等本地协议会让被控的
+            # 流媒体服务器或接口响应带播放器读本机文件
+            from .netutil import media_url
+
+            try:
+                target = media_url(target)
+            except ValueError as exc:
+                self._fail(f"播放地址不可用：{exc}")
+                return
         if source is not None:
             # 接口会在非会员请求高音质时悄悄退回一档，这里记下的才是实际档位
             self._set_quality(getattr(source, "level", "") or "")

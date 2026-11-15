@@ -490,5 +490,10 @@ class HistoryPage(BasePage):
         entry = self._entry_at(row)
         if entry is None:
             return
-        self.db.execute("DELETE FROM play_events WHERE id = ?", (int(entry.id),))
+        try:
+            self.db.execute(
+                "DELETE FROM play_events WHERE id = ?", (int(entry.id),))
+        except Exception as exc:  # noqa: BLE001 - 槽函数里异常会让进程退出
+            self.status_label.setText(f"删除失败：{exc}")
+            return
         self._reload()
