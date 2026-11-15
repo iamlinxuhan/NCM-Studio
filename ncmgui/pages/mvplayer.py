@@ -609,10 +609,13 @@ class MvPlayerPage(BasePage):
         后端会把视频帧画满整个窗口，子控件实测不显示。让两者做兄弟控件最稳。
         """
         window = QWidget()
+        window.setObjectName("MvFullscreen")
         window.setWindowTitle(self.title.text() or "MV")
         window.setWindowFlags(
             Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
-        window.setStyleSheet("background: #000000;")
+        # 只给窗口本身刷黑，不能写裸的 “background:” —— 那会连子控件一起
+        # 覆盖成黑色，按钮文字跟着消失
+        window.setStyleSheet("QWidget#MvFullscreen { background: #000000; }")
         layout = QVBoxLayout(window)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -625,9 +628,20 @@ class MvPlayerPage(BasePage):
             controls_layout.removeWidget(self.controls)
 
         self.controls.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # 全屏是黑底，浅色主题的深色文字会看不见；这里显式给控制条一套
+        # 白字样式，而不是依赖主题的 $TEXT/$PANEL_ALT
         self.controls.setStyleSheet(
             "QWidget#MvControls {"
-            " background-color: rgba(8, 12, 20, 230); }")
+            " background-color: rgba(8, 12, 20, 230); }"
+            "QPushButton#Ghost {"
+            " color: #f2f6ff;"
+            " background: rgba(255, 255, 255, 0.10);"
+            " border: 1px solid rgba(255, 255, 255, 0.38); }"
+            "QPushButton#Ghost:hover {"
+            " color: #ffffff;"
+            " border-color: #8ecae6;"
+            " background: rgba(255, 255, 255, 0.18); }"
+            "QLabel#Hint { color: #dfe8f5; }")
         layout.addWidget(self.video, 1)
         layout.addWidget(self.controls, 0)
         self._fullscreen_window = window
