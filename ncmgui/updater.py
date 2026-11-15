@@ -676,16 +676,16 @@ def fetch_release(proxy: str = "", timeout: float = 10.0,
             if source == "site":
                 raise
         else:
-            # 站点只负责「有没有新版」这一小步。确认有新版本后，再从 GitHub
-            # 补一次说明和文件大小；补不到就用手上这份，下载仍可继续。
-            if source == "auto" and is_newer(release.tag, VERSION):
-                try:
-                    github = fetch_github_release(proxy, timeout)
-                except UpdateError:
-                    return release
-                if release.version <= github.version:
-                    return github
-            return release
+            if source == "site":
+                return release
+            # auto：站点和 GitHub 都问一次，取较新的那个。只信站点会让
+            # 「站点还没同步」变成「永远收不到更新」；下载地址仍优先走
+            # 镜像，多一次 API 请求换来的是不漏版本。
+            try:
+                github = fetch_github_release(proxy, timeout)
+            except UpdateError:
+                return release
+            return github if github.version >= release.version else release
     return fetch_github_release(proxy, timeout)
 
 
