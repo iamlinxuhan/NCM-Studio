@@ -65,6 +65,8 @@ class AccountPage(BasePage):
         self._qr_runner = None
         self._qr_from_stdout: str | None = None
         self._qr_shown = False
+        #: 等待输入短信验证码的手机号登录作业
+        self._phone_runner = None
         #: 尚未删除的 Cookie 临时文件。正常路径随作业结束删除；退出或作业
         #: 没能启动时由 shutdown() 兜底。
         self._pending_temp: set[str] = set()
@@ -470,9 +472,9 @@ class AccountPage(BasePage):
     def _build_phone_card(self) -> None:
         card = FormCard(
             "手机号登录",
-            "不给密码就走短信验证码：ncmctl 发码后会在控制台等待输入，"
-            "在底部控制台的输入框里填验证码即可 —— 输入框不回显，"
-            "内容也不会写进控制台或导出日志。",
+            "不给密码就走短信验证码：点「登录」后 ncmctl 会发短信，"
+            "收到后把验证码填在下面这一行并点「提交验证码」。输入框不回显，"
+            "内容也不会进入日志；不需要打开作业控制台。",
         )
         self.phone_number = card.add_line(
             "手机号", value=self.cfg.get("login.phone", ""), placeholder="18800008888",
@@ -486,9 +488,15 @@ class AccountPage(BasePage):
                  "系统日志读取。若条件允许，请优先使用扫码登录、短信登录或 Cookie 导入。",
         )
 
+        self.phone_code = card.add_line(
+            "短信验证码", placeholder="收到短信后填这里", password=True,
+            hint="只有短信验证码流程需要；用密码登录时可以留空。",
+        )
         run = accent_button("登录")
         run.clicked.connect(self._login_phone)
-        card.add_row_of(run)
+        send = ghost_button("提交验证码", compact=True)
+        send.clicked.connect(self._send_phone_code)
+        card.add_row_of(run, send)
         self.content.addWidget(card)
 
     def _login_phone(self) -> None:
@@ -502,20 +510,42 @@ class AccountPage(BasePage):
             self.warn("国家代码需要是数字，例如 86。")
             return
 
-        if not self.window.console_enabled():
-            self.warn(
-                "手机号登录需要在作业控制台里输入短信验证码。"
-                "请先到「设置 → 日志」打开「显示作业控制台」，"
-                "或改用扫码登录。")
-            return
         self.save_config()
         password = self.phone_password.text()
         argv = ncmctl.build_login_phone(
             number, countrycode=country, password=password, timeout="10m", opts=self.opts()
         )
-        # 短信验证码会从这个作业的 stdin 送进去；它是短期内可直接登录的凭据，
-        # 输入框必须密码回显，控制台和导出日志里不能留原文
-        self.submit("手机号登录", argv, sensitive_input=True)
+        # 验证码从本页的输入框经 stdin 送进去，不依赖作业控制台；
+        # 面板仍用敏感输入模式，避免任何回显或日志留下原文
+        runner = self.submit(
+            "手机号登录", argv, sensitive_input=True, show_log=False)
+        if runner is None:
+            return
+        self._phone_runner = runner
+        runner.finished.connect(self._on_phone_finished)
+        if password:
+            self.toast("已提交密码登录")
+        else:
+            self.toast("已请求发送验证码，收到短信后填在下面并提交")
+            self.phone_code.setFocus()
+
+    def _send_phone_code(self) -> None:
+        code = self.phone_code.text().strip()
+        if not code:
+            self.warn("请先填写短信验证码。")
+            return
+        runner = self._phone_runner
+        if runner is None or not runner.is_running:
+            self.warn("还没有等待中的手机号登录，请先点「登录」。")
+            return
+        runner.send_line(code)
+        self.phone_code.clear()
+        self.toast("验证码已提交，正在登录…")
+
+    def _on_phone_finished(self, *_args) -> None:
+        self._phone_runner = None
+        self.phone_code.clear()
+        self.refresh_login()
 
     # ------------------------------------------------------------- Cookie
 
