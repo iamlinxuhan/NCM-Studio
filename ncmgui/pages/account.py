@@ -502,6 +502,12 @@ class AccountPage(BasePage):
             self.warn("国家代码需要是数字，例如 86。")
             return
 
+        if not self.window.console_enabled():
+            self.warn(
+                "手机号登录需要在作业控制台里输入短信验证码。"
+                "请先到「设置 → 日志」打开「显示作业控制台」，"
+                "或改用扫码登录。")
+            return
         self.save_config()
         password = self.phone_password.text()
         argv = ncmctl.build_login_phone(

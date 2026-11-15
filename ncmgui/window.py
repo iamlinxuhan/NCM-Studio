@@ -1061,7 +1061,7 @@ class MainWindow(QMainWindow):
         tagger: Callable[[str], str | None] | None = None,
         on_finish: Callable[["ConsolePanel", int], None] | None = None,
         sensitive_input: bool = False,
-        show_log: bool = True,
+        show_log: bool | None = None,
     ):
         """启动一个作业。
 
@@ -1080,11 +1080,14 @@ class MainWindow(QMainWindow):
             调用方拿不到，只能这样传回去。
         :param sensitive_input: 这个作业的 stdin 是敏感内容（短信验证码、
             密码、令牌）。输入框改用密码回显，回显行与导出日志都不记原文。
-        :param show_log: 是否把输出显示到「作业控制台」。下载可以关掉，
-            避免每首歌都刷一屏日志；作业本身照常执行。
+        :param show_log: 是否把输出显示到「作业控制台」。``None`` 表示按
+            设置里的「显示作业控制台」开关走；作业本身照常执行。
         :return: 启动成功返回 :class:`~ncmgui.runner.JobRunner`，否则返回 None
         """
         from .runner import JobRunner
+
+        if show_log is None:
+            show_log = self.console_enabled()
 
         if confirm and not self._confirm(confirm[0], confirm[1]):
             return None
@@ -1125,6 +1128,10 @@ class MainWindow(QMainWindow):
 
         runner.start()
         return runner
+
+    def console_enabled(self) -> bool:
+        """设置里的「显示作业控制台」是否打开。默认关闭。"""
+        return bool(self.cfg.get("download.show_log", False))
 
     def _confirm(self, title: str, body: str) -> bool:
         box = QMessageBox(self)

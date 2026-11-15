@@ -54,14 +54,15 @@ class SettingsPage(BasePage):
     def _build_log_card(self) -> None:
         card = FormCard(
             "日志",
-            "控制下载歌曲时是否在底部「作业控制台」逐行显示 ncmctl 的输出。",
+            "是否显示底部的「作业控制台」。关闭时所有作业（下载、登录、云盘等）"
+            "都照常执行，只是不再弹出控制台、不逐行刷日志。",
         )
         self.show_download_log = card.add_switch(
-            "显示下载日志",
+            "显示作业控制台",
             bool(self.cfg.get("download.show_log", False)),
             hint=(
-                "关闭时下载照常进行，只是不再弹出控制台、不逐行刷日志；"
-                "失败与完成仍会提示。排查网络或音质问题时再打开。"
+                "默认关闭。失败与完成仍会提示。手机号登录需要在控制台里输入"
+                "短信验证码，关闭时请改用扫码登录，或先打开这个开关。"
             ),
         )
         self.content.addWidget(card)
