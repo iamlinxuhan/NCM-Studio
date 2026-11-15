@@ -714,7 +714,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.8 packaging\ncm-studio.iss
+iscc /DAppVersion=4.7.9 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
