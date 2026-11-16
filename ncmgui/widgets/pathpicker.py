@@ -17,9 +17,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QUrl, pyqtSignal
-from PyQt6.QtGui import QAction, QDesktopServices
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -35,7 +35,7 @@ from .card import ghost_button
 class PathPicker(QWidget):
     """一行式路径选择控件：输入框 + 选择 + 打开 + 恢复默认。"""
 
-    pathChanged = pyqtSignal(str)
+    pathChanged = Signal(str)
 
     def __init__(
         self,
@@ -208,7 +208,7 @@ class PathPicker(QWidget):
 
     def _attach_any_menu(self) -> None:
         """``any`` 模式下把「选择…」变成一个小菜单。"""
-        from PyQt6.QtWidgets import QMenu
+        from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self)
         pick_file = QAction("选择单个文件…", self)
@@ -271,7 +271,7 @@ class PathList(QWidget):
     所以这里用列表明确保存每一项。
     """
 
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

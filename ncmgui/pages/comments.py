@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPixmap
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -38,7 +38,7 @@ class CommentsPage(BasePage):
     TRAILING_STRETCH = False
 
     #: 点「返回」回上一页
-    backRequested = pyqtSignal()
+    backRequested = Signal()
 
     def __init__(self, window) -> None:
         self.song: Song | None = None
@@ -471,7 +471,7 @@ class _Avatar(QLabel):
     """圆形头像。评论可能很多，图片走 ImageStore 的缓存和去重。"""
 
     SIZE = 38
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, store, comment) -> None:
         super().__init__()

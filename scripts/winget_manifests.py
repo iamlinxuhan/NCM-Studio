@@ -60,7 +60,7 @@ SHORT_EN = "A third-party NetEase Cloud Music player built on ncmctl, with searc
 
 DESCRIPTION_ZH = """\
 NCM Studio 是 ncmctl 的图形前端，提供搜索、推荐、歌单、每日推荐、本地曲库、歌词、
-下载与流媒体服务器播放。界面用 PyQt6 编写，实际播放交给随包的 mpv，不需要另外安装
+下载与流媒体服务器播放。界面用 PySide6 编写，实际播放交给随包的 mpv，不需要另外安装
 Python、ncmctl 或 mpv。
 
 Windows 版还接入了系统媒体控件（SMTC）：键盘媒体键、任务栏「正在播放」浮层与锁屏
@@ -69,7 +69,7 @@ Windows 版还接入了系统媒体控件（SMTC）：键盘媒体键、任务�
 DESCRIPTION_EN = """\
 NCM Studio is a graphical frontend for ncmctl. It provides search, recommendations,
 playlists, a local music library, lyrics, downloads, and streaming-server playback.
-The interface is built with PyQt6, while playback is delegated to the bundled mpv;
+The interface is built with PySide6, while playback is delegated to the bundled mpv;
 no separate Python, ncmctl, or mpv installation is required.
 
 On Windows it integrates with System Media Transport Controls (SMTC), so media keys,

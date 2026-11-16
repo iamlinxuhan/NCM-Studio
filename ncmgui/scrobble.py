@@ -55,7 +55,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from .api.client import ApiClient
 from .api.errors import ApiError, RateLimited
@@ -119,7 +119,7 @@ class ScrobbleReporter(QObject):
     """
 
     #: 熔断状态变化：``(是否暂停, 原因)``
-    pausedChanged = pyqtSignal(bool, str)
+    pausedChanged = Signal(bool, str)
 
     def __init__(
         self,
@@ -503,7 +503,7 @@ def _selftest() -> int:
     import time
     from pathlib import Path
 
-    from PyQt6.QtCore import QCoreApplication
+    from PySide6.QtCore import QCoreApplication
 
     from . import ensure_utf8_stdout
     from .api.cookies import CookieJar, CookieSnapshot

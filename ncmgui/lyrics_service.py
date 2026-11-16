@@ -17,7 +17,7 @@ import sqlite3
 from collections import OrderedDict
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import lyrics, ncmctl
 from .resolver import Resolver, Song
@@ -46,8 +46,8 @@ class LyricsService(QObject):
     是界面该显示的一句话。
     """
 
-    lyricsChanged = pyqtSignal(object, object, str)
-    offsetChanged = pyqtSignal(int)
+    lyricsChanged = Signal(object, object, str)
+    offsetChanged = Signal(int)
 
     def __init__(self, window, parent: QObject | None = None) -> None:
         super().__init__(parent or window)

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit
 
 from ..api.models import Mv
 from ..library import favorites

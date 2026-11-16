@@ -10,8 +10,8 @@ import math
 from dataclasses import replace
 from typing import Sequence
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -40,7 +40,7 @@ PLAYLIST_PAGE_SIZE = 500
 class CollectionPage(BasePage):
     """歌单/专辑/歌手详情。由 :class:`DetailHost` 创建和销毁。"""
 
-    backRequested = pyqtSignal()
+    backRequested = Signal()
     TAB_SONGS = 0
     TAB_ALBUMS = 1
 

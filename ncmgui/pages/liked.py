@@ -17,15 +17,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
     QSortFilterProxyModel,
     Qt,
     QTimer,
 )
-from PyQt6.QtGui import QColor, QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QFileDialog,
@@ -696,7 +696,7 @@ class LikedPage(BasePage):
                 self.window.client.uid, [song.base for song in self._songs]
             )
         except Exception as exc:  # noqa: BLE001 - 排序缓存失败不该让页面崩溃
-            # Qt 槽函数里未捕获的异常会让整个进程退出（PyQt6 默认行为），
+            # Qt 槽函数里未捕获的异常会让整个进程退出（PySide6 默认行为），
             # 这只是个排序缓存，写失败最多是「喜欢顺序」排序退化
             self.status_label.setText(f"收藏顺序缓存写入失败：{exc}")
 

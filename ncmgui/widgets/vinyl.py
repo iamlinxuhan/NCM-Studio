@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     QEasingCurve,
     QElapsedTimer,
     QPointF,
@@ -22,9 +22,9 @@ from PyQt6.QtCore import (
     QRectF,
     Qt,
     QTimer,
-    pyqtProperty,
+    Property,
 )
-from PyQt6.QtGui import (
+from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
@@ -34,7 +34,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QRadialGradient,
 )
-from PyQt6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .. import theme
 
@@ -147,7 +147,7 @@ class VinylWidget(QWidget):
         self._set_arm(1.0 if self._playing else 0.0)
 
     def sizeHint(self):  # noqa: N802
-        from PyQt6.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         return QSize(380, 380)
 
@@ -160,7 +160,7 @@ class VinylWidget(QWidget):
         self._arm = max(0.0, min(1.0, float(value)))
         self.update()
 
-    armProgress = pyqtProperty(float, fget=_get_arm, fset=_set_arm)
+    armProgress = Property(float, fget=_get_arm, fset=_set_arm)
 
     def _animate_arm(self, target: float) -> None:
         self._arm_anim.stop()

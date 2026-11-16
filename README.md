@@ -1,7 +1,7 @@
 # NCM Studio
 
 **网易云音乐的第三方桌面客户端**：基于 [`ncmctl`](https://github.com/chaunsin/netease-cloud-music) 构建，
-PyQt6 编写，支持 Windows / Linux / macOS。内置 `ncmctl` 与 mpv，下载即用，
+PySide6 编写，支持 Windows / Linux / macOS。内置 `ncmctl` 与 mpv，下载即用，
 不需要额外安装 Python 或命令行工具。
 
 <p align="center">
@@ -106,7 +106,7 @@ ncmctl 的全部子命令都在界面里有对应入口：
   自己的，打包进去反而会把硬件加速顶掉。
 
   > **glibc 下限是 2.35**，对应 Ubuntu 22.04 / Debian 12 及以上。
-  > 这由 PyQt6 的 manylinux 标签与构建机决定，打包格式换不掉。
+  > 这由 PySide6 的 manylinux 标签与构建机决定，打包格式换不掉。
   > CI 里有一道检查（`packaging/check_glibc_floor.py`）卡着这个数，
   > 免得哪天构建机升级后悄悄把老用户挡在门外。
 
@@ -131,8 +131,8 @@ uv venv && uv pip install -r requirements.txt
 
 Windows 上把 `.venv/bin/python` 换成 `.venv\Scripts\python.exe`。
 
-> 虚拟环境是隔离的，看不到系统 `dist-packages` 里的 PyQt6。
-> 如果你的发行版已经装了系统级 PyQt6 又不想重复下载，
+> 虚拟环境是隔离的，看不到系统 `dist-packages` 里的 PySide6。
+> 如果你的发行版已经装了系统级 PySide6 又不想重复下载，
 > 可以改用 `python3 -m venv --system-site-packages .venv`。
 
 ## ncmctl 是内置的
@@ -616,7 +616,7 @@ Windows 上 `pywinpty` 已经写进 `requirements.txt` 的条件依赖，打包�
 | 媒体 URL 未校验协议 | `file:/…`、`data:` 可让播放器读本机文件 | 统一 `netutil.media_url` 白名单；`source` 非空时强制校验，拒绝 userinfo 与无主机 URL |
 | 流媒体服务器允许公网 HTTP | Token 在明文网络中可被嗅探 | HTTPS 任意；HTTP 仅本机/私网，公网拒绝；内网 HTTP 弹警告；**旧配置里的公网 HTTP 加载时标记禁用**，保留条目但不允许连接，等用户改地址 |
 | 网易云接口、流媒体、反作弊、封面、CookieCloud 响应无上限 | 异常服务耗内存 | 分别限制 64 / 32 / 64 / 16 / 4 MB |
-| PyQt 槽函数里的数据库异常会杀进程 | 菜单/下拉操作可能让整个程序退出 | 红心排序、历史删除、喜欢顺序查询加兜底 |
+| Qt 槽函数里的数据库异常会杀进程 | 菜单/下拉操作可能让整个程序退出 | 红心排序、历史删除、喜欢顺序查询加兜底 |
 | 远端文本按 AutoText 渲染 | 恶意评论可伪装成 UI 元素 | 评论、昵称、签名、歌名歌手改为 `PlainText` |
 | CI Action 使用可变 tag、构建 job 有写权限 | 供应链风险 | 固定 Action commit SHA；顶层 `contents: read`，仅 release job 可写 |
 | 搜索词里的 `%` / `_` 被当成 LIKE 通配符 | 输入 `%` 会匹配全部记录 | 统一 `like_pattern` 转义并加 `ESCAPE '\'`，曲库 / 历史 / MV 历史 / MV 收藏四个入口一致 |
@@ -714,7 +714,7 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
   pyinstaller ncm-studio.spec --noconfirm
 
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
-iscc /DAppVersion=4.7.9 packaging\ncm-studio.iss
+iscc /DAppVersion=4.8.0 packaging\ncm-studio.iss
 
 # 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
 python scripts/winget_manifests.py \
@@ -801,8 +801,8 @@ CI 里有三类断言，都是同一个思路 —— **「打包成功」不等�
 
 最后一条是最容易忽略的：PyInstaller 会把**构建机**的 libglib、libgtk、libstdc++、
 libxcb 一起收进产物，这些库在构建机的 glibc 上编译，于是产物的实际门槛被构建机决定，
-和 PyQt6 自己的 manylinux 标签没关系。所以 CI 里 Linux 任务**固定跑在 `ubuntu-22.04`
-上**，不要图省事改成 `ubuntu-latest` —— 那是目前唯一能同时满足 PyQt6（≥2.34）和
+和 PySide6 自己的 manylinux 标签没关系。所以 CI 里 Linux 任务**固定跑在 `ubuntu-22.04`
+上**，不要图省事改成 `ubuntu-latest` —— 那是目前唯一能同时满足 PySide6（≥2.34）和
 Debian 12 / Ubuntu 22.04 用户（≤2.35）的档位。
 
 ### 代码结构
@@ -885,6 +885,9 @@ AGPL-3.0 发布，与本项目兼容。
 
 「写入音频标签」这一种歌词模式用到 [mutagen](https://mutagen.readthedocs.io/)，它同样以
 GPL-2.0-or-later 发布，可升级到 GPL-3.0 并与 AGPL-3.0 组合。默认的「独立 .lrc 文件」不需要它。
+
+界面框架使用 Qt 官方的 Python 绑定 [PySide6](https://doc.qt.io/qtforpython/)，
+以 LGPL-3.0 发布（也可选用 GPL-3.0 或商业许可），与本项目的 AGPL-3.0 兼容。
 
 Windows 的系统媒体控件通过 [PyWinRT](https://github.com/pywinrt/pywinrt)（MIT）
 调用 Windows Runtime，相关投影包只会装进 Windows 产物。

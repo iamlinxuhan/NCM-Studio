@@ -6,9 +6,9 @@ import sys
 import time
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QFrame,
@@ -143,11 +143,11 @@ class MainWindow(QMainWindow):
     """应用主窗口。"""
 
     #: 登录状态发生变化
-    loginChanged = pyqtSignal(bool)
+    loginChanged = Signal(bool)
     #: 在线校验拿到的账号资料（昵称、头像、UID）；登出时发空字典
-    profileChanged = pyqtSignal(dict)
+    profileChanged = Signal(dict)
     #: 接口因限流进入/退出自动退避；工作线程发信号，界面线程接收
-    rateLimitChanged = pyqtSignal(bool)
+    rateLimitChanged = Signal(bool)
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()

@@ -22,7 +22,7 @@ import time
 from dataclasses import replace
 from typing import Callable
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from .library.db import LibraryDB
 from .library.history import record_play, update_play
@@ -49,14 +49,14 @@ class HistoryRecorder(QObject):
     """
 
     #: 本轮第一次真正开始播放（暂停后恢复不会重复发）
-    playStarted = pyqtSignal(object)
+    playStarted = Signal(object)
     #: 本轮累计收听达到 5 秒门槛（每轮只发一次）。
     #:
     #: 云端播放日志用它发 ``startPlay``：真正听住了一轮才上报，快速切歌
     #: 不会在几秒内制造一串开始日志。
-    playQualified = pyqtSignal(object)
+    playQualified = Signal(object)
     #: 一轮结束，携带曲目与累计实际收听毫秒数
-    playSettled = pyqtSignal(object, int)
+    playSettled = Signal(object, int)
 
     def __init__(
         self,
@@ -277,7 +277,7 @@ def _selftest() -> int:
     import tempfile
     from pathlib import Path
 
-    from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
+    from PySide6.QtCore import QCoreApplication, QObject, Signal
 
     from . import ensure_utf8_stdout
     from .library.db import LibraryDB
@@ -291,9 +291,9 @@ def _selftest() -> int:
             failures.append(f"{name}: 期望 {want!r}，实际 {got!r}")
 
     class FakePlayback(QObject):
-        trackStarted = pyqtSignal(object)
-        trackEnded = pyqtSignal(object)
-        stateChanged = pyqtSignal(str)
+        trackStarted = Signal(object)
+        trackEnded = Signal(object)
+        stateChanged = Signal(str)
 
         def __init__(self) -> None:
             super().__init__()

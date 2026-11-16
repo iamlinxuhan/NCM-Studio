@@ -20,7 +20,7 @@ import time
 import urllib.request
 from typing import Callable
 
-from PyQt6.QtCore import QIODevice
+from PySide6.QtCore import QIODevice
 
 from .api.transport import USER_AGENT
 from .netutil import media_url

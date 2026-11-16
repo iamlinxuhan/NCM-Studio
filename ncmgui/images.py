@@ -21,8 +21,8 @@ import urllib.request
 from collections import OrderedDict
 from typing import Callable
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtGui import (
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import (
     QColor,
     QFont,
     QPainter,
@@ -31,7 +31,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QRadialGradient,
 )
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from . import VERSION, theme
 from .workers import BackgroundTask
@@ -209,7 +209,7 @@ class ImageStore(QObject):
     卡片被复用后，旧图片可能晚到。
     """
 
-    imageReady = pyqtSignal(str, QPixmap)
+    imageReady = Signal(str, QPixmap)
 
     def __init__(
         self,
@@ -308,11 +308,11 @@ class CoverStore(QObject):
     """
 
     #: 歌曲 ID 必须用 ``qint64``。网易云的新歌 ID 早已超过 32 位
-    #: （例如 3388734818），而 PyQt 的 ``pyqtSignal(int, ...)`` 对应 C++ 的
+    #: （例如 3388734818），而 PySide6 的 ``Signal(int, ...)`` 对应 C++ 的
     #: ``int``，会把 ID 截成负数（同一个 ID 发出后变成 -906232478）。接收方
     #: 拿它和 ``_cover_id`` 一比就对不上，封面永远停在占位图 —— 图其实早就
     #: 下载好并进了缓存。
-    coverReady = pyqtSignal("qint64", QPixmap)
+    coverReady = Signal("qint64", QPixmap)
 
     def __init__(
         self,
@@ -482,7 +482,7 @@ def _selftest() -> int:
         check("刚命中的那张还在", store.get(2) is one, True)
 
         # 歌曲 ID 超过 32 位时，coverReady 不能把它截断。之前信号声明成
-        # ``pyqtSignal(int, ...)``，3388734818 发出去变成 -906232478，播放页
+        # ``Signal(int, ...)``，3388734818 发出去变成 -906232478，播放页
         # 和底部播放条都认不出这是当前歌曲的封面，一直显示占位图
         big_id = 3388734818
         seen: list[int] = []

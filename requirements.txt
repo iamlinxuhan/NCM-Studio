@@ -8,7 +8,8 @@
 #   uv venv && uv pip install -r requirements.txt
 
 # 界面框架。唯一必须的依赖，三个平台通用。
-PyQt6>=6.5
+# PySide6 是 Qt 官方的 Python 绑定，LGPL-3.0，分发限制比 PyQt6 宽松。
+PySide6>=6.6
 
 # Windows 专用：伪终端（ConPTY）。
 #

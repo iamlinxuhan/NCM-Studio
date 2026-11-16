@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from typing import Sequence
 
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     QAbstractListModel,
     QEasingCurve,
     QEvent,
@@ -20,10 +20,10 @@ from PyQt6.QtCore import (
     QPropertyAnimation,
     Qt,
     QTimer,
-    pyqtSignal,
+    Signal,
 )
-from PyQt6.QtGui import QColor, QFont, QPixmap
-from PyQt6.QtWidgets import (
+from PySide6.QtGui import QColor, QFont, QPixmap
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFrame,
@@ -159,8 +159,8 @@ class QueueListView(QListView):
     而这里只需要「把第 N 首挪到第 M 位」，直接按落点算目标索引更简单。
     """
 
-    reorderRequested = pyqtSignal(int, int)
-    contextRequested = pyqtSignal(int, object)
+    reorderRequested = Signal(int, int)
+    contextRequested = Signal(int, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -211,7 +211,7 @@ class PlayerPage(BasePage):
     #: 用户拖动过就记在 ``player.split`` 里，下次启动按用户的比例来。
     DEFAULT_SPLIT = (0.367, 0.633)
 
-    backRequested = pyqtSignal()
+    backRequested = Signal()
 
     def build(self) -> None:
         self.playback = self.window.playback

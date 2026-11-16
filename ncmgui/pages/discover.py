@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -30,7 +30,7 @@ from .base import BasePage
 class QuickTile(QFrame):
     """发现页的快捷入口块：图标 + 标题 + 一行说明。"""
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(
         self,

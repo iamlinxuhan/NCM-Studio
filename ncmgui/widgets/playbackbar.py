@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import (
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
@@ -25,7 +25,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QPolygonF,
 )
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -59,7 +59,7 @@ class SeekSlider(QSlider):
     仍然交给父类，拖动才不会被吃掉。
     """
 
-    clickedValue = pyqtSignal(int)
+    clickedValue = Signal(int)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
@@ -643,7 +643,7 @@ class NowPlaying(QWidget):
     返回就只能靠播放列表按钮 —— 不知道该点哪儿的人会被困在别的页面。
     """
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     #: 封面缩略图边长
     COVER_SIZE = 46
@@ -747,9 +747,9 @@ class PlaybackBar(QWidget):
     """窗口底部的常驻播放条。"""
 
     #: 用户点了「播放列表」：打开播放页并展开队列
-    queueRequested = pyqtSignal()
+    queueRequested = Signal()
     #: 用户点了左侧歌曲信息：打开播放页（不展开队列）
-    playerRequested = pyqtSignal()
+    playerRequested = Signal()
 
     def __init__(self, window, parent: QWidget | None = None) -> None:
         super().__init__(parent)

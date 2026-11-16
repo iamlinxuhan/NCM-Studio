@@ -10,9 +10,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
@@ -176,7 +176,7 @@ class ConsoleView(QPlainTextEdit):
         self._stick_to_bottom = bar.value() >= bar.maximum() - 4
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        from PyQt6.QtWidgets import QMenu
+        from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self)
         menu.addAction("复制全部", self.copy_all)
@@ -197,9 +197,9 @@ class ConsolePanel(QWidget):
     """一个作业的完整输出面板：标题 + 状态 + 停止/清空/导出 + stdin 输入。"""
 
     #: 参数为退出码；主窗口据此更新标签页标题
-    jobFinished = pyqtSignal(int)
+    jobFinished = Signal(int)
     #: 用户点击关闭
-    closeRequested = pyqtSignal()
+    closeRequested = Signal()
 
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)

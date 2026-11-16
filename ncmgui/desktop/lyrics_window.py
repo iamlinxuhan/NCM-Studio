@@ -21,8 +21,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import (
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPen,
 )
-from PyQt6.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 from .. import lyrics, theme
 from ..lyrics_service import song_key
@@ -56,7 +56,7 @@ CURTAIN_BAND = 0.8
 
 
 class DesktopLyricsWindow(QWidget):
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, window) -> None:
         flags = (

@@ -13,8 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from PyQt6.QtCore import QModelIndex, Qt, QTimer
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QModelIndex, Qt, QTimer
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QFileDialog,

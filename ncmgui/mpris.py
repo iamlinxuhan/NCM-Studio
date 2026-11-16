@@ -30,7 +30,7 @@ import sys
 import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from . import APP_NAME, images
 from .playback import (
@@ -312,7 +312,7 @@ class MprisService(QObject):
     """
 
     #: D-Bus 线程 → 主线程。带上动作名和参数，由 :meth:`_handle_action` 执行
-    _actionRequested = pyqtSignal(str, object)
+    _actionRequested = Signal(str, object)
 
     def __init__(self, controller, window=None, parent: QObject | None = None) -> None:
         super().__init__(parent)

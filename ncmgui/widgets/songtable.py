@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from typing import Callable, Iterable, Sequence
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QKeyEvent
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QKeyEvent
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
     QTableView,
@@ -247,8 +247,8 @@ class SongTableView(QTableView):
     * 右键菜单交给页面：``contextMenuRequested(song, global_pos)``。
     """
 
-    songActivated = pyqtSignal(object)
-    contextMenuRequested = pyqtSignal(object, object)
+    songActivated = Signal(object)
+    contextMenuRequested = Signal(object, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

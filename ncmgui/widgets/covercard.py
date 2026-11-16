@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from typing import Callable, Iterable, Sequence
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFontMetrics, QPixmap
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics, QPixmap
+from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QLabel,
@@ -33,8 +33,8 @@ COVER_SIZE = 150
 class CoverCard(QFrame):
     """一张封面卡片：图片 + 标题 + 副标题。"""
 
-    clicked = pyqtSignal(object)
-    contextRequested = pyqtSignal(object, object)
+    clicked = Signal(object)
+    contextRequested = Signal(object, object)
 
     def __init__(
         self,
@@ -155,8 +155,8 @@ class CoverGrid(QWidget):
     预先创建并复用（搜索翻页、收藏刷新时只换内容），避免每次重建一堆 QLabel。
     """
 
-    itemClicked = pyqtSignal(object)
-    itemContextRequested = pyqtSignal(object, object)
+    itemClicked = Signal(object)
+    itemContextRequested = Signal(object, object)
 
     def __init__(
         self,

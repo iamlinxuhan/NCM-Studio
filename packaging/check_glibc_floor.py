@@ -9,7 +9,7 @@ AppImage 打包有个特别容易踩的坑：**构建机上越新，产物在别
 
 PyInstaller 会把构建机上的系统库（libglib、libgtk、libstdc++、libxcb……）一起收
 进产物。这些库是在构建机的 glibc 上编译的，于是它们要求的最高 ``GLIBC_x.y`` 就
-成了产物的实际门槛 —— 与 PyQt6 自己的 manylinux 标签毫无关系。
+成了产物的实际门槛 —— 与 PySide6 自己的 manylinux 标签毫无关系。
 
 后果是：在 Ubuntu 24.04（glibc 2.39）上打出来的包，在 Debian 12（2.36）上启动
 即 ``version `GLIBC_2.39' not found``；构建、上传、发布全都没报错，等到用户下载
@@ -33,7 +33,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-#: 本项目声称支持的 glibc 下限。由 PyQt6 的 manylinux_2_34 wheel 决定 —— 这是
+#: 本项目声称支持的 glibc 下限。由 PySide6 的 manylinux_2_34 wheel 决定 —— 这是
 #: 换打包格式、换构建机都降不下去的硬底。低于它没有意义，高于它就得解释。
 DEFAULT_MAX = "2.35"
 

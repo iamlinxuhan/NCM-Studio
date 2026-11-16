@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel
 
 from .. import ncmctl
 from ..widgets.card import accent_button, danger_button

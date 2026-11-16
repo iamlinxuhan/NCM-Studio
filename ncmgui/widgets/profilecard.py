@@ -7,9 +7,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
 
 from .. import theme
 from ..images import rounded
@@ -18,7 +18,7 @@ from ..images import rounded
 class ProfileCard(QFrame):
     """可点击的账号信息卡。``compact`` 用于侧边栏，否则用于账号页。"""
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, window, parent=None, *, compact: bool = True) -> None:
         super().__init__(parent)

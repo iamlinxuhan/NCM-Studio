@@ -6,7 +6,7 @@ ncmctl 的 help 明确提示 scrobble 与 partner 有账号风控风险，
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QWidget
 
 from .. import ncmctl
 from ..widgets.card import accent_button, danger_button

@@ -51,3 +51,6 @@ signing-key*.pem
 /promo_cover_square.py
 /promo_real.py
 /promo_record.py
+/promo_v2_build.py
+/promo_v2_shots.py
+/promo_v2_music.py

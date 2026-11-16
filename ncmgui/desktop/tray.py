@@ -8,8 +8,8 @@ Wayland 会话）。这里只在 ``QSystemTrayIcon.isSystemTrayAvailable()`` 为
 
 from __future__ import annotations
 
-from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from .. import APP_NAME
 from ..playback import STATE_PLAYING

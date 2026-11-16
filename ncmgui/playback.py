@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import dsp, localmusic, player
 from .resolver import Resolver, Song
@@ -97,38 +97,38 @@ _RECOVER_LIMIT = 3
 class PlaybackController(QObject):
     """一份全局播放状态。窗口里只应该有这一个实例。"""
 
-    trackChanged = pyqtSignal(object)          # Song | None
-    stateChanged = pyqtSignal(str)
-    positionChanged = pyqtSignal(float, float)  # position, duration
-    volumeChanged = pyqtSignal(int)
+    trackChanged = Signal(object)          # Song | None
+    stateChanged = Signal(str)
+    positionChanged = Signal(float, float)  # position, duration
+    volumeChanged = Signal(int)
     #: 实际音质变了（本地文件解析出格式，或直链接口返回了降级后的档位）
-    qualityChanged = pyqtSignal()
-    modeChanged = pyqtSignal(str)
-    queueChanged = pyqtSignal()
-    errorRaised = pyqtSignal(str)
-    playerExited = pyqtSignal(int)
+    qualityChanged = Signal()
+    modeChanged = Signal(str)
+    queueChanged = Signal()
+    errorRaised = Signal(str)
+    playerExited = Signal(int)
     #: 一首歌开始装载；统计与「最近播放」用
-    trackStarted = pyqtSignal(object)          # Song
+    trackStarted = Signal(object)          # Song
     #: 一首歌自然播完（不包括手动切歌）
-    trackEnded = pyqtSignal(object)            # Song
+    trackEnded = Signal(object)            # Song
     #: 音频工具状态变化。没有运行的播放器时只更新状态，下次装载时生效。
-    speedChanged = pyqtSignal(float)
-    pitchChanged = pyqtSignal(float)
-    equalizerChanged = pyqtSignal()
-    abLoopChanged = pyqtSignal(object, object)  # (a, b) 秒；未设置为 None
-    audioInfoChanged = pyqtSignal()
-    audioDevicesChanged = pyqtSignal()
+    speedChanged = Signal(float)
+    pitchChanged = Signal(float)
+    equalizerChanged = Signal()
+    abLoopChanged = Signal(object, object)  # (a, b) 秒；未设置为 None
+    audioInfoChanged = Signal()
+    audioDevicesChanged = Signal()
     #: (剩余秒数, 是否「播完当前曲」)；倒计时取消后剩余为 0
-    sleepTimerChanged = pyqtSignal(int, bool)
-    sleepTimerFinished = pyqtSignal(str)
+    sleepTimerChanged = Signal(int, bool)
+    sleepTimerFinished = Signal(str)
 
     #: mpv 事件从读线程发回来，走队列连接
-    _playerEvent = pyqtSignal(str, object)
-    _playerFailed = pyqtSignal(str)
+    _playerEvent = Signal(str, object)
+    _playerFailed = Signal(str)
     #: 事件通道断了 / mpv 进程意外退出。带上出事的那个 MpvPlayer 对象，
     #: 免得旧播放器的迟到通知把刚换上的新播放器也当成死的
-    _playerLost = pyqtSignal(object)
-    _playerExited = pyqtSignal(object, int)
+    _playerLost = Signal(object)
+    _playerExited = Signal(object, int)
 
     def __init__(
         self,

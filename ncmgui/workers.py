@@ -8,7 +8,7 @@
 生命周期约束：线程还在跑时对象被销毁会直接让程序崩掉，用户关窗口时正好会撞上。
 守护线程没有这个问题 —— 进程退出时它随进程一起消失，产出的结果本来就是丢弃的。
 
-结果通过 Qt 信号送回界面：从非 Qt 线程 emit 是安全的，PyQt 会自动改用队列连接，
+结果通过 Qt 信号送回界面：从非 Qt 线程 emit 是安全的，PySide6 会自动改用队列连接，
 槽函数仍然在主线程执行，因此界面可以照常更新控件。
 
 用法::
@@ -26,20 +26,20 @@ import threading
 import time
 from typing import Any, Callable
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 
 class BackgroundTask(QObject):
     """在线程里跑一次函数，把结果用信号送回界面。只能启动一次。"""
 
     #: 进度说明（人话，可直接显示给用户）
-    progress = pyqtSignal(str)
+    progress = Signal(str)
     #: 百分比 0～100；``-1`` 表示总长未知（下载时服务端没给 Content-Length）
-    percent = pyqtSignal(int)
+    percent = Signal(int)
     #: 成功，携带返回值
-    done = pyqtSignal(object)
+    done = Signal(object)
     #: 失败，携带面向用户的错误说明
-    failed = pyqtSignal(str)
+    failed = Signal(str)
 
     #: 仍在跑的任务。关窗时用来等「正在写盘」的任务收尾。
     _active: set["BackgroundTask"] = set()

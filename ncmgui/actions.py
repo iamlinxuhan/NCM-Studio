@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Iterable, Sequence
 
-from PyQt6.QtCore import QObject, QPoint, pyqtSignal
-from PyQt6.QtWidgets import QMenu, QWidget
+from PySide6.QtCore import QObject, QPoint, Signal
+from PySide6.QtWidgets import QMenu, QWidget
 
 from .api import ApiError, AuthRequired
 from .dialogs.playlist import AddToPlaylistDialog
@@ -25,7 +25,7 @@ class SongActions(QObject):
     """一个窗口一份。页面通过 ``window.actions`` 调用。"""
 
     #: 喜欢状态批量加载完成；页面可据此刷新红心图标
-    likedChanged = pyqtSignal()
+    likedChanged = Signal()
 
     def __init__(self, window) -> None:
         super().__init__(window)

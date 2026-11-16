@@ -40,7 +40,7 @@ pty 尺寸必须报成正常行列数：``openpty()`` 给的是 0×0，pb 据此
 
 pty 的读端由一条守护线程持续读，读到的东西经 :meth:`JobRunner._consume` 切分
 后发信号；另一条守护线程等着进程退出，随后收尾并发 ``finished``。信号从非 Qt
-线程 emit 是安全的，PyQt 会自动改成队列连接，槽函数仍然在主线程执行。
+线程 emit 是安全的，PySide6 会自动改成队列连接，槽函数仍然在主线程执行。
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ import sys
 import threading
 import time
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from . import ncmctl
 
@@ -370,12 +370,12 @@ class JobRunner(QObject):
     * ``failed(str)``              连启动都没成功，或进程异常
     """
 
-    started = pyqtSignal()
-    output = pyqtSignal(str)
-    progress = pyqtSignal(str)
-    rewind = pyqtSignal(int)
-    finished = pyqtSignal(int, float)
-    failed = pyqtSignal(str)
+    started = Signal()
+    output = Signal(str)
+    progress = Signal(str)
+    rewind = Signal(int)
+    finished = Signal(int, float)
+    failed = Signal(str)
 
     def __init__(
         self,

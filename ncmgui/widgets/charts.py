@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from datetime import date
 
-from PyQt6.QtCore import QRect, QRectF, Qt
-from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPen
-from PyQt6.QtWidgets import QToolTip, QWidget
+from PySide6.QtCore import QRect, QRectF, Qt
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
+from PySide6.QtWidgets import QToolTip, QWidget
 
 from .. import theme
 from ..library.stats import DayEntry, SliceEntry, format_duration

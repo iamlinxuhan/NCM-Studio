@@ -18,8 +18,8 @@ from __future__ import annotations
 from functools import lru_cache
 from string import Template
 
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
 # --------------------------------------------------------------------------- #
 # 调色板
@@ -217,7 +217,7 @@ def resolve_family(candidates: tuple[str, ...], fallback: str) -> str:
     需要 QApplication 已创建，因此延迟到首次调用时再查。
     """
     try:
-        from PyQt6.QtGui import QFontDatabase
+        from PySide6.QtGui import QFontDatabase
 
         installed = set(QFontDatabase.families())
     except Exception:  # pragma: no cover - 无 GUI 环境下直接回退
@@ -251,7 +251,7 @@ def safe_glyph(char: str, fallback: str = "") -> str:
     与其赌某个字形存在（缺字会显示成豆腐块），不如先问一下字体度量。
     """
     try:
-        from PyQt6.QtGui import QFont, QFontMetrics
+        from PySide6.QtGui import QFont, QFontMetrics
 
         metrics = QFontMetrics(QFont(ui_family()))
         return char if metrics.inFont(char[0]) else fallback
@@ -1210,7 +1210,7 @@ def apply_theme(app, name: str | None = None) -> str:
     自绘控件：``paintEvent`` 里现取 ``theme.*`` 的会跟着变，缓存成 pixmap 的
     （占位封面等）由各页面自己的 ``theme_changed`` 钩子重建。
     """
-    from PyQt6.QtGui import QFont, QPalette
+    from PySide6.QtGui import QFont, QPalette
 
     if name is not None:
         set_theme(name)

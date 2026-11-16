@@ -41,7 +41,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from . import images
 from .covers import image_kind, read_artwork
@@ -236,7 +236,7 @@ class SmtcService(QObject):
     """
 
     #: 工作线程 → 主线程。带上动作名和参数，由 :meth:`_handle_action` 执行
-    _actionRequested = pyqtSignal(str, object)
+    _actionRequested = Signal(str, object)
 
     #: 两次进度上报之间至少隔这么久。系统浮层按秒显示，4 Hz 的动画帧没必要
     #: 全部转发过去；用户拖动进度条会造成大的跳变，那种情况单独放行。

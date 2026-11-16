@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QHBoxLayout, QLabel
+from PySide6.QtWidgets import QHBoxLayout, QLabel
 
 from ..resolver import Song
 from ..widgets.card import accent_button, ghost_button

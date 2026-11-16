@@ -24,8 +24,8 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
-from PyQt6.QtGui import (
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
+from PySide6.QtGui import (
     QColor,
     QFont,
     QImage,
@@ -35,7 +35,7 @@ from PyQt6.QtGui import (
     QTextLayout,
     QTextOption,
 )
-from PyQt6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .. import lyrics, theme
 
@@ -143,7 +143,7 @@ class LyricLineWidget(QWidget):
         option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         layout.setTextOption(option)
 
-        # PyQt6 里 createLine() 不会自动给每行设置纵向位置，必须手动 setPosition，
+        # PySide6 里 createLine() 不会自动给每行设置纵向位置，必须手动 setPosition，
         # 否则所有行会叠在 y=0 上。
         layout.beginLayout()
         y = 0.0

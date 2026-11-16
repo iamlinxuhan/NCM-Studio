@@ -20,9 +20,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -407,7 +407,7 @@ class AccountPage(BasePage):
             import io
 
             import qrcode
-            from PyQt6.QtGui import QImage
+            from PySide6.QtGui import QImage
         except ImportError:
             return False
 
@@ -459,8 +459,8 @@ class AccountPage(BasePage):
         self.qr_stop.setEnabled(False)
 
     def _reveal_qr_dir(self) -> None:
-        from PyQt6.QtCore import QUrl
-        from PyQt6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
 
         if self._qr_dir and Path(self._qr_dir).is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._qr_dir))

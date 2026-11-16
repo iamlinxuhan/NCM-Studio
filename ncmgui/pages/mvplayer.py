@@ -14,16 +14,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtMultimedia import (
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtMultimedia import (
     QAudioDevice,
     QAudioOutput,
     QMediaDevices,
     QMediaPlayer,
 )
-from PyQt6.QtMultimediaWidgets import QVideoWidget
-from PyQt6.QtWidgets import (
+from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
@@ -64,26 +64,49 @@ def _quiet_ffmpeg() -> None:
 
         names: list[str] = []
         try:
-            import PyQt6
+            import PySide6
 
-            # Qt 的 ffmpeg 插件优先用轮子里自带的库（RPATH 指向 Qt6/lib），
+            # Qt 的 ffmpeg 插件优先用轮子里自带的库（RPATH 指向 Qt/lib），
             # 只按 soname 加载可能拿到系统里另一份，级别设了也不生效
-            root = Path(PyQt6.__file__).parent / "Qt6"
-            for folder in (root / "lib", root / "bin"):
-                for stem in ("libavutil.so.59", "libavutil.so.58",
+            root = Path(PySide6.__file__).parent / "Qt"
+            for folder in (root / "lib", root / "bin",
+                           Path(PySide6.__file__).parent / "lib"):
+                for stem in ("libavutil.so.61", "libavutil.so.60",
+                             "libavutil.so.59", "libavutil.so.58",
+                             "avutil-61.dll", "avutil-60.dll",
                              "avutil-59.dll", "avutil-58.dll"):
                     path = folder / stem
                     if path.is_file():
                         names.append(str(path))
         except Exception:  # noqa: BLE001
             pass
-        names += ["libavutil.so.59", "libavutil.so.58", "avutil-59.dll"]
+        names += ["libavutil.so.61", "libavutil.so.60", "libavutil.so.59",
+                  "libavutil.so.58", "avutil-61.dll", "avutil-59.dll"]
         for name in names:
             try:
                 ctypes.CDLL(name).av_log_set_level(16)
                 return
-            except (OSError, AttributeError):
+            except AttributeError:
                 continue
+            except OSError:
+                # PySide6 的 FFmpeg 把 OpenSSL 换成了同目录的 stub 库，
+                # 直接 dlopen libavutil 会缺 RAND_bytes；先把 stub 全局加载
+                folder = Path(name).parent
+                mode = getattr(ctypes, "RTLD_GLOBAL", 0)
+                for stub in ("libQt6FFmpegStub-crypto.so.3",
+                             "libQt6FFmpegStub-ssl.so.3"):
+                    candidate = folder / stub
+                    if not candidate.is_file():
+                        continue
+                    try:
+                        ctypes.CDLL(str(candidate), mode=mode)
+                    except OSError:
+                        pass
+                try:
+                    ctypes.CDLL(name).av_log_set_level(16)
+                    return
+                except (OSError, AttributeError):
+                    continue
     except Exception:  # noqa: BLE001 - 日志降噪失败不该影响播放
         pass
 
@@ -174,7 +197,7 @@ class MvPlayerPage(BasePage):
     SCROLLABLE = False
     TRAILING_STRETCH = False
 
-    backRequested = pyqtSignal()
+    backRequested = Signal()
 
     def __init__(self, window) -> None:
         self.mv = None
@@ -761,7 +784,10 @@ class MvPlayerPage(BasePage):
                 and self._fullscreen_window is not None):
             self._exit_fullscreen()
             return True
-        return super().eventFilter(obj, event)
+        # 本页是全应用事件过滤器，退出时仍会收到事件。PySide6 在解释器收尾
+        # 阶段调 super().eventFilter 会重新进到本方法直到递归上限，而
+        # QWidget.eventFilter 本来就只返回 False，直接返回即可
+        return False
 
     # ---------------------------------------------------------------- 回调
 

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import os
 
-from PyQt6.QtCore import Qt, QTimer, QUrl
-from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QLabel, QMessageBox, QProgressBar, QScrollArea
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QLabel, QMessageBox, QProgressBar, QScrollArea
 
 from .. import NCMCTL_VERSION, VERSION, ncmctl, player, updater
 from ..config import config_dir

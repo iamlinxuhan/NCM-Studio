@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 import zlib
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from ..netutil import validate_server_url
 from ..resolver import Song
@@ -53,9 +53,9 @@ def song_id_for(server_id: str, track_id: str) -> int:
 
 
 class StreamingRegistry(QObject):
-    changed = pyqtSignal()
+    changed = Signal()
     #: 写盘失败。界面据此提示，避免用户以为服务器已经保存、重启后才发现丢了
-    saveFailed = pyqtSignal(str)
+    saveFailed = Signal(str)
 
     def __init__(self, cfg, parent: QObject | None = None) -> None:
         super().__init__(parent)

@@ -26,8 +26,8 @@ from pathlib import Path
 # 允许直接 `python main.py` 而不必先安装成包
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PyQt6.QtCore import QLockFile, QTimer, Qt  # noqa: E402
-from PyQt6.QtGui import (  # noqa: E402
+from PySide6.QtCore import QLockFile, QTimer, Qt  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
     QColor,
     QFont,
     QGuiApplication,
@@ -36,8 +36,8 @@ from PyQt6.QtGui import (  # noqa: E402
     QPainter,
     QPixmap,
 )
-from PyQt6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox  # noqa: E402
+from PySide6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox  # noqa: E402
 
 from ncmgui import APP_ID, APP_NAME, VERSION, ensure_utf8_stdout, theme  # noqa: E402
 from ncmgui import updater  # noqa: E402

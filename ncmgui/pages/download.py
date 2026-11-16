@@ -17,8 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
-from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QLabel,
@@ -90,8 +90,8 @@ class _LyricSignals(QObject):
     一个两通道的信号对象。信号是队列投递的，槽函数仍在主线程执行。
     """
 
-    progress = pyqtSignal(str)
-    note = pyqtSignal(str)
+    progress = Signal(str)
+    note = Signal(str)
 
 
 class DownloadPage(BasePage):

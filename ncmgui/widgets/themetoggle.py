@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPainterPath
-from PyQt6.QtWidgets import QPushButton, QWidget
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath
+from PySide6.QtWidgets import QPushButton, QWidget
 
 from .. import theme
 

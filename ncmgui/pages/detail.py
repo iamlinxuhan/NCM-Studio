@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -32,7 +32,7 @@ KIND_LABELS = {
 class DetailHost(QWidget):
     """内容区里的详情栈，不是导航项。"""
 
-    emptied = pyqtSignal()
+    emptied = Signal()
 
     def __init__(self, window) -> None:
         super().__init__()

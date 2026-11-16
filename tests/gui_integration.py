@@ -19,7 +19,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 # 无头环境下模态框没人点，会永久阻塞 —— 换成记录
 DIALOGS: list[tuple[str, str, str]] = []

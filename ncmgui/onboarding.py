@@ -15,18 +15,18 @@ import json
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     QEvent,
     QEventLoop,
     QPoint,
     QRect,
     Qt,
     QTimer,
-    pyqtSignal,
+    Signal,
 )
-from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QGraphicsDropShadowEffect
-from PyQt6.QtWidgets import (
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QGraphicsDropShadowEffect
+from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
@@ -364,7 +364,7 @@ class _TourBubble(QFrame):
 class TourOverlay(QWidget):
     """全屏透明遮罩 + 高亮洞 + 跟随气泡。"""
 
-    finished = pyqtSignal()
+    finished = Signal()
 
     def __init__(self, window) -> None:
         # 盖在整个主窗口上，而不是另开顶层窗口：Wayland 不允许客户端自己摆

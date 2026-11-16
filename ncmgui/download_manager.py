@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from .config import config_dir, private_tmp_dir
 
@@ -114,7 +114,7 @@ class DownloadRecord:
 
 
 class DownloadManager(QObject):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, path: Path | str | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)

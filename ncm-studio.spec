@@ -185,19 +185,135 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 这些是 PyQt6 拖得进来、界面里一个都没用到的大家伙
-        "PyQt6.QtWebEngineCore",
-        "PyQt6.QtWebEngineWidgets",
-        "PyQt6.QtWebEngine",
-        "PyQt6.QtBluetooth",
+        # 这些是 PySide6 拖得进来、界面里一个都没用到的大家伙。
+        # WebEngine 一个就能占几十 MB，3D / Charts / Pdf / Qml 同理。
+        "PySide6.QtWebEngineCore",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtWebEngineQuick",
+        "PySide6.QtWebChannel",
+        "PySide6.QtWebSockets",
+        "PySide6.QtWebView",
+        "PySide6.Qt3DAnimation",
+        "PySide6.Qt3DCore",
+        "PySide6.Qt3DExtras",
+        "PySide6.Qt3DInput",
+        "PySide6.Qt3DLogic",
+        "PySide6.Qt3DRender",
+        "PySide6.QtCharts",
+        "PySide6.QtDataVisualization",
+        "PySide6.QtGraphs",
+        "PySide6.QtGraphsWidgets",
+        "PySide6.QtPdf",
+        "PySide6.QtPdfWidgets",
+        "PySide6.QtDesigner",
+        "PySide6.QtUiTools",
+        "PySide6.QtHelp",
+        "PySide6.QtQml",
+        "PySide6.QtQuick",
+        "PySide6.QtQuick3D",
+        "PySide6.QtQuickControls2",
+        "PySide6.QtQuickWidgets",
+        "PySide6.QtQuickTest",
+        "PySide6.QtBluetooth",
+        "PySide6.QtNfc",
+        "PySide6.QtPositioning",
+        "PySide6.QtLocation",
+        "PySide6.QtSerialPort",
+        "PySide6.QtSerialBus",
+        "PySide6.QtSensors",
+        "PySide6.QtRemoteObjects",
+        "PySide6.QtScxml",
+        "PySide6.QtStateMachine",
+        "PySide6.QtSpatialAudio",
+        "PySide6.QtTextToSpeech",
+        "PySide6.QtHttpServer",
+        "PySide6.QtNetworkAuth",
         # QtMultimedia 不能排除：MV 播放页（ncmgui/pages/mvplayer.py）在
         # window.py 里是静态导入的，打包版缺了它启动就会 ImportError
-        "PyQt6.QtSql",
-        "PyQt6.QtTest",
+        "PySide6.QtSql",
+        "PySide6.QtTest",
+        # PyInstaller 的 Pillow hook 会顺带把 numpy 也拖进来（合计 ~40MB），
+        # 但界面与 main.py 里没有任何一处用到它们（只有 scripts/make_icon.py 用），
+        # yaml 同样只是构建期的间接依赖
+        "PIL",
+        "numpy",
+        "yaml",
         "tkinter",
     ],
     noarchive=False,
+    # 去掉 docstring 与 assert，pyc 更小；程序里没有依赖两者的地方
+    optimize=2,
 )
+
+# PySide6 的 hook 会把 Qt 自带的翻译文件（.qm）整目录收进来，界面全是中文
+# 自定义文案，用不到这些；顺手再把少数漏网的 Qt 大库与插件清掉。excludes
+# 只管 Python 模块，这些是 hook 直接塞进 datas / binaries 的。
+a.datas = [item for item in a.datas if not str(item[0]).endswith(".qm")]
+_DROP_BINARIES = (
+    "QtWebEngine", "Qt6WebEngine",
+    "Qt63D", "Qt6Charts", "Qt6DataVisualization",
+    "Qt6Pdf", "Qt6Designer",
+    # GTK 主题插件被裁掉之后，这一整套只为它服务的系统库也没人用了
+    "libgtk-3.so", "libgdk-3.so", "libgdk_pixbuf-2.0.so",
+    "libatk-1.0.so", "libatk-bridge-2.0.so", "libatspi.so",
+    "libcairo.so", "libcairo-gobject.so", "libepoxy.so",
+    "libharfbuzz.so", "libpango-1.0.so", "libpangocairo-1.0.so",
+    "libpangoft2-1.0.so", "libpixman-1.so", "libdatrie.so",
+    "libthai.so", "libgraphite2.so", "libfribidi.so",
+    "libcloudproviders.so",
+)
+# 用不到的插件目录。注意 QtMultimedia、xcb、wayland 客户端、iconengines、
+# platforminputcontexts（输入法）都必须留着。
+_DROP_PLUGIN_DIRS = (
+    "plugins/sqldrivers/",            # 本地库用的是标准库 sqlite3
+    "plugins/tls/",                   # 网络请求走 Python，媒体流走 ffmpeg
+    "plugins/networkinformation/",
+    "plugins/printsupport/",
+    "plugins/assetimporters/",
+    "plugins/sceneparsers/",
+    "plugins/renderers/",
+    "plugins/qmltooling/",
+    "plugins/texttospeech/",
+    "plugins/sensors/",
+    "plugins/position/",
+    "plugins/geoservices/",
+    "plugins/canbus/",
+    "plugins/designer/",
+    "plugins/webview/",
+    "plugins/geometryloaders/",
+    "plugins/scxmldatamodel/",
+    "plugins/platformthemes/",
+    # 这几个是给 Wayland 合成器/服务端用的，客户端用不到
+    "plugins/wayland-graphics-integration-server/",
+    "plugins/wayland-decoration-server/",
+    "plugins/wayland-shell-integration-server/",
+)
+_DROP_PLUGIN_FILES = (
+    "imageformats/libqpdf", "imageformats/libqtiff",
+    "imageformats/libqtga", "imageformats/libqwbmp",
+    "imageformats/libqicns",
+    "imageformats/qpdf", "imageformats/qtiff", "imageformats/qtga",
+    "imageformats/qwbmp", "imageformats/qicns",
+    # 无显示环境只需要 offscreen；xcb / wayland 要留
+    "platforms/libqminimal", "platforms/libqlinuxfb",
+    "platforms/libqvnc", "platforms/libqdirect2d",
+    "platforms/qminimal", "platforms/qlinuxfb",
+    "platforms/qvnc", "platforms/qdirect2d",
+)
+
+
+def _keep_binary(name) -> bool:
+    path = str(name).replace("\\", "/")
+    if any(tag in path for tag in _DROP_BINARIES):
+        return False
+    if any(tag in path for tag in _DROP_PLUGIN_DIRS):
+        return False
+    if any(tag in path for tag in _DROP_PLUGIN_FILES):
+        return False
+    return True
+
+
+a.binaries = [item for item in a.binaries if _keep_binary(item[0])]
 
 pyz = PYZ(a.pure)
 

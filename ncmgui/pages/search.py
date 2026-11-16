@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import QStringListModel, Qt, QTimer
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QStringListModel, Qt, QTimer
+from PySide6.QtWidgets import (
     QCompleter,
     QComboBox,
     QFrame,

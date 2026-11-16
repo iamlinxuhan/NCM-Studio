@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from .card import ghost_button
 
@@ -15,7 +15,7 @@ from .card import ghost_button
 class Pager(QWidget):
     """一行分页。``set_page(page, has_more, total)``。"""
 
-    pageChanged = pyqtSignal(int)
+    pageChanged = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

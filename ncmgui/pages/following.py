@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
