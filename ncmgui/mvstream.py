@@ -55,6 +55,7 @@ class HttpRangeDevice(QIODevice):
         self._buf_start = 0
         self._url = ""
         self._closed = False
+        self._prefetched = False
         self.open(QIODevice.OpenModeFlag.ReadOnly)
 
     # ------------------------------------------------------------ QIODevice
@@ -66,7 +67,9 @@ class HttpRangeDevice(QIODevice):
 
     def size(self) -> int:
         with self._lock:
-            if self._size < 0:
+            # 已经预取过就不再现场探测：size() 可能被 GUI 线程同步调用，
+            # 这里发网络请求会把窗口冻住
+            if self._size < 0 and not self._prefetched:
                 try:
                     self._size = self._probe_size()
                 except Exception:  # noqa: BLE001 - 探测失败按未知处理
@@ -97,10 +100,36 @@ class HttpRangeDevice(QIODevice):
             return self._buf[offset:offset + maxlen]
 
     def close(self) -> None:  # noqa: D401 - Qt 重写
-        with self._lock:
-            self._closed = True
-            self._buf = b""
+        # 不阻塞等锁：readData/prefetch 可能正卡在网络请求里，而 close()
+        # 是从 GUI 线程调用的。等锁会连带把窗口冻住，这里只置标志，
+        # 正在进行的请求会自己结束并发现设备已关闭。
+        self._closed = True
+        if self._lock.acquire(blocking=False):
+            try:
+                self._buf = b""
+            finally:
+                self._lock.release()
         super().close()
+
+    def prefetch(self) -> None:
+        """在后台线程里先取好头部，确认 Range 支持并拿到总长。
+
+        ``QMediaPlayer.setSourceDevice`` 会在调用线程里同步问 ``size()``。
+        如果 ``size()`` 现场发网络请求，这一段就卡在 GUI 线程上，地址慢
+        或代理不通时整个窗口会「没有响应」。所以起播前先在后台预取第一块，
+        让随后的 ``size()`` / 首次 ``readData()`` 直接命中内存。
+        """
+        with self._lock:
+            if self._closed or self._buf:
+                return
+            data, total, _ranged = self._request(0, self.BLOCK - 1)
+            if self._closed:
+                return
+            if total >= 0:
+                self._size = total
+            if data:
+                self._buf = data
+                self._buf_start = 0
 
     # ------------------------------------------------------------ 内部
 
@@ -150,6 +179,8 @@ class HttpRangeDevice(QIODevice):
             try:
                 data, total, ranged = self._request(
                     position, position + self.BLOCK - 1)
+                if self._closed:
+                    return False
                 if total >= 0:
                     self._size = total
                 if not data:
@@ -172,7 +203,6 @@ class HttpRangeDevice(QIODevice):
 # --------------------------------------------------------------------------- #
 
 def _selftest() -> int:
-    import tempfile
     import threading as _threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -268,6 +298,18 @@ def _selftest() -> int:
             check("不支持 Range 被拒绝", True, True)
         else:
             check("不支持 Range 被拒绝", False, True)
+
+        # 预取：起播前在后台拿好第一块与总长，之后 size()/首次 read()
+        # 都不应再发网络请求（GUI 线程不能碰网络）
+        prefetched = HttpRangeDevice(lambda: url)
+        try:
+            before = state["n"]
+            prefetched.prefetch()
+            check("预取后总长", prefetched.size(), len(payload))
+            check("预取后首块", prefetched.read(64), payload[:64])
+            check("预取只发一次请求", state["n"] - before, 1)
+        finally:
+            prefetched.close()
     finally:
         device.close()
         server.shutdown()

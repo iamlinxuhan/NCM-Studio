@@ -422,9 +422,31 @@ class MvPlayerPage(BasePage):
 
         device = HttpRangeDevice(provider, self)
         self._device = device
-        # sourceUrl 只是给后端识别格式用的，真实数据全来自 device
-        self.media.setSourceDevice(device, QUrl("https://music.163.com/mv.mp4"))
-        self.media.play()
+        self.status.setText("正在加载视频…")
+        self._transient_status = True
+
+        # 先在后台预取第一块并确认总长。QMediaPlayer.setSourceDevice 会同步
+        # 问 size()，若现场发网络请求就会把 GUI 线程卡死 —— 没播放过的 MV
+        # 没有本地缓存，必然走这里，所以这一步不能省。
+        task = BackgroundTask(device.prefetch, parent=self)
+
+        def done(_result) -> None:
+            if self._device is not device:
+                return
+            # sourceUrl 只是给后端识别格式用的，真实数据全来自 device
+            self.media.setSourceDevice(
+                device, QUrl("https://music.163.com/mv.mp4"))
+            self.media.play()
+
+        def failed(message: str) -> None:
+            if self._device is not device:
+                return
+            self._close_device()
+            self._recover(message or "视频地址不可用")
+
+        task.done.connect(done)
+        task.failed.connect(failed)
+        task.start()
 
     def _close_device(self) -> None:
         device = self._device
