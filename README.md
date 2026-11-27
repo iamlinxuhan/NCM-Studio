@@ -86,12 +86,7 @@ ncmctl 的全部子命令都在界面里有对应入口：
     普通用户点更新会静默失败。
   - **便携版**不写注册表、不建快捷方式，放在哪里就从哪里运行；自动更新同样可用。
   - 两者都可能触发 SmartScreen 提示「已保护你的电脑」，点「更多信息 → 仍要运行」。
-  - 安装版也会提交到 [winget-pkgs](https://github.com/microsoft/winget-pkgs)，
-    审核合并后可以直接：
-
-    ```powershell
-    winget install --id iamlinxuhan.NCMStudio -e
-    ```
+  - winget 分发已停用（上游审核积压严重），请从本站或 GitHub Releases 下载。
 - **macOS**：首次打开会被 Gatekeeper 拦下，右键点图标选「打开」，或在终端执行
   `xattr -d com.apple.quarantine ./ncm-studio-macos-arm64`。
 - **Linux**：给执行位就行，不需要 FUSE，也不需要 libfuse2。
@@ -716,10 +711,6 @@ NCMGUI_BUNDLE_NCMCTL=1 NCMGUI_BUNDLE_MPV=1 \
 # Windows 安装包（可选，需要 Inno Setup 6；上面的便携版必须先打出来）
 iscc /DAppVersion=4.8.1 packaging\ncm-studio.iss
 
-# 生成 winget 清单（本地看一眼会提交什么；真正提交由 GitHub Actions 做）
-python scripts/winget_manifests.py \
-  --installer dist/ncm-studio-windows-x86_64-setup.exe
-
 # macOS：单文件，不随包 mpv
 NCMGUI_BUNDLE_NCMCTL=1 pyinstaller ncm-studio.spec --noconfirm
 
@@ -775,11 +766,9 @@ CI（`.github/workflows/build.yaml`）在推 `main` 时会三平台各打一次�
    复核。客户端会比对签名文件里的 tag 与 Release 的 tag —— **签名只证明内容是
    官方发布的某个版本，绑定 tag 才能挡住「新版本号 + 旧内容」的静默降级**。
 
-4. Release 转正会触发 `.github/workflows/winget.yaml`：下载安装版、重新计算
-   校验和、生成清单，并向 `microsoft/winget-pkgs` 提交 PR。这个工作流需要仓库
-   secret `WINGET_TOKEN` —— 一个带 `public_repo` 权限的 classic PAT（`GITHUB_TOKEN`
-   只能操作本仓库，开不了外部 PR）。没配时工作流会明确报错，补上 secret 后手动
-   重跑即可，不影响已经发布的版本。
+4. winget 提交已永久停用：上游 `microsoft/winget-pkgs` 审核积压严重，
+   最早的 v3.x 清单 6 个月仍未合并，不再生成或提交清单。`scripts/winget_manifests.py`
+   仅保留用于本地查看清单内容。
 
 也可以随时独立复核从 Release 页面下载的两个文件：
 
@@ -814,7 +803,7 @@ scripts/
   fetch_ncmctl.py      下载并校验 ncmctl 到 vendor/（版本与 SHA-256 钉在里面）
   fetch_mpv.py         收集 mpv 到 vendor/mpv/（Linux 走 apt + ldd，Windows 走钉死的 .7z）
   release_sign.py      离线生成发布密钥、给 SHA256SUMS 签名并转正草稿 Release
-  winget_manifests.py  生成 winget-pkgs 清单（版本、安装器、中英文商店信息）
+  winget_manifests.py  生成 winget 清单（已停用，仅本地查看）
   make_icon.py         生成图标（纯几何绘制，不依赖字体）
 packaging/
   ncm-studio.png/.ico  图标，已入库（免得构建期还要装 Pillow）
